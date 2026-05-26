@@ -32,9 +32,21 @@ export type CodexTask = {
   title: string
   status: 'queued' | 'running' | 'needs_approval' | 'completed' | 'failed'
   workspace: string
+  createdAt?: string
+  exitCode?: number | null
   transcript: Array<{
     role: 'user' | 'assistant' | 'tool' | 'system'
     content: string
     timestamp: string
   }>
+}
+
+export type CodexTaskEvent = {
+  id: string
+  taskId: string
+  type: 'thread.started' | 'turn.started' | 'message' | 'tool' | 'error' | 'turn.completed' | 'turn.failed' | 'process.exit'
+  role: 'user' | 'assistant' | 'tool' | 'system'
+  content: string
+  timestamp: string
+  raw?: unknown
 }

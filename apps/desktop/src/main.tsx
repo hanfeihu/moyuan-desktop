@@ -14,42 +14,27 @@ import {
   TerminalSquare,
   UserRound,
 } from 'lucide-react'
-import React, { useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import ReactDOM from 'react-dom/client'
-import type { CodexTask } from '@eaw/shared'
+import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
 import './styles.css'
 
-const tasks: CodexTask[] = [
-  {
-    id: 'task-1',
-    title: '生成今日客户跟进日报',
-    status: 'needs_approval',
-    workspace: '销售一组 / 华东客户',
-    transcript: [
-      { role: 'user', content: '根据今天企微和飞书沟通，生成客户跟进日报。', timestamp: '10:18' },
-      { role: 'assistant', content: '已整理 3 个客户进展，发现 1 个审批延迟风险。需要读取客户报价表。', timestamp: '10:19' },
-      { role: 'tool', content: '请求权限：读取 /客户资料/华东项目/报价表.xlsx', timestamp: '10:19' },
-    ],
-  },
-  {
-    id: 'task-2',
-    title: '把会议纪要拆成待办',
-    status: 'running',
-    workspace: '交付中心 / 飞书项目',
-    transcript: [
-      { role: 'assistant', content: '正在从会议纪要中识别负责人、截止时间和风险项。', timestamp: '09:42' },
-    ],
-  },
-  {
-    id: 'task-3',
-    title: '查询企业知识库里的报销规则',
-    status: 'completed',
-    workspace: '我的工作区',
-    transcript: [
-      { role: 'assistant', content: '已引用 2 篇制度文档，并生成可提交的报销说明。', timestamp: '09:12' },
-    ],
-  },
-]
+const runtimeUrl = import.meta.env.VITE_CODEX_RUNTIME_URL ?? 'http://127.0.0.1:4100'
+const defaultWorkspace = import.meta.env.VITE_DEFAULT_WORKSPACE ?? '/Users/a1/Documents/Codex/2026-05-26/codex'
+
+const starterTask: CodexTask = {
+  id: 'welcome',
+  title: '墨渊 Desktop',
+  status: 'completed',
+  workspace: defaultWorkspace,
+  transcript: [
+    {
+      role: 'assistant',
+      content: '我是内置 Codex Runtime 的员工桌面端。输入任务后，我会在本机工作区执行，并把过程实时显示在这里。',
+      timestamp: new Date().toISOString(),
+    },
+  ],
+}
 
 const workspaces = ['我的工作区', '销售一组', '华东客户项目', '日报周报', '企业知识库']
 
@@ -63,9 +48,113 @@ function statusText(status: CodexTask['status']) {
   }[status]
 }
 
+function eventToTranscript(event: CodexTaskEvent) {
+  return {
+    role: event.role,
+    content: event.content,
+    timestamp: event.timestamp,
+  }
+}
+
 function DesktopApp() {
-  const [activeTask, setActiveTask] = useState(tasks[0])
-  const [prompt, setPrompt] = useState('帮我把今天的客户沟通、会议记录和任务进展整理成日报，风险项单独列出来。')
+  const [tasks, setTasks] = useState<CodexTask[]>([starterTask])
+  const [activeTaskId, setActiveTaskId] = useState(starterTask.id)
+  const [prompt, setPrompt] = useState('查看当前目录内容，判断这个项目是什么技术栈，并给我一个简短说明。')
+  const [workspace, setWorkspace] = useState(defaultWorkspace)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+
+  const activeTask = useMemo(() => {
+    return tasks.find((task) => task.id === activeTaskId) ?? tasks[0]
+  }, [activeTaskId, tasks])
+
+  useEffect(() => {
+    fetch(`${runtimeUrl}/api/codex/tasks`)
+      .then((response) => response.json())
+      .then((payload: { data?: CodexTask[] }) => {
+        if (payload.data?.length) {
+          setTasks([starterTask, ...payload.data])
+        }
+      })
+      .catch(() => {
+        setTasks((current) => [
+          {
+            ...starterTask,
+            transcript: [
+              ...starterTask.transcript,
+              {
+                role: 'system',
+                content: `无法连接 Codex Runtime：${runtimeUrl}`,
+                timestamp: new Date().toISOString(),
+              },
+            ],
+          },
+          ...current.filter((task) => task.id !== starterTask.id),
+        ])
+      })
+  }, [])
+
+  useEffect(() => {
+    if (!activeTask || activeTask.id === 'welcome') return
+
+    const source = new EventSource(`${runtimeUrl}/api/codex/tasks/${activeTask.id}/events`)
+
+    source.onmessage = (message) => {
+      const event = JSON.parse(message.data) as CodexTaskEvent
+      setTasks((current) =>
+        current.map((task) => {
+          if (task.id !== event.taskId) return task
+
+          const nextTranscript = [...task.transcript, eventToTranscript(event)]
+          const nextStatus =
+            event.type === 'process.exit'
+              ? event.content.includes('完成')
+                ? 'completed'
+                : 'failed'
+              : event.type === 'turn.failed'
+                ? 'failed'
+                : event.type === 'turn.started'
+                  ? 'running'
+                  : task.status
+
+          return {
+            ...task,
+            status: nextStatus,
+            transcript: nextTranscript,
+          }
+        }),
+      )
+    }
+
+    source.onerror = () => {
+      source.close()
+    }
+
+    return () => source.close()
+  }, [activeTask?.id])
+
+  async function submitTask() {
+    if (!prompt.trim() || isSubmitting) return
+
+    setIsSubmitting(true)
+    try {
+      const response = await fetch(`${runtimeUrl}/api/codex/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employeeId: 'u-1001',
+          workspace,
+          prompt,
+        }),
+      })
+      const payload = (await response.json()) as { data: CodexTask }
+
+      setTasks((current) => [payload.data, ...current.filter((task) => task.id !== 'welcome')])
+      setActiveTaskId(payload.data.id)
+      setPrompt('')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
 
   return (
     <main className="desktop-shell">
@@ -95,7 +184,7 @@ function DesktopApp() {
       <aside className="workspace-list">
         <div className="desktop-brand">
           <Sparkles size={18} />
-          <strong>企业 Codex</strong>
+          <strong>墨渊 Desktop</strong>
         </div>
         <label className="search-box">
           <Search size={16} />
@@ -111,12 +200,12 @@ function DesktopApp() {
           ))}
         </div>
         <div className="workspace-section">
-          <span className="caption">正在执行</span>
+          <span className="caption">Codex 任务</span>
           {tasks.map((task) => (
             <button
               className={task.id === activeTask.id ? 'task-pill active' : 'task-pill'}
               key={task.id}
-              onClick={() => setActiveTask(task)}
+              onClick={() => setActiveTaskId(task.id)}
             >
               <span>{task.title}</span>
               <small>{statusText(task.status)}</small>
@@ -136,9 +225,9 @@ function DesktopApp() {
             <button className="icon-button" title="通知">
               <Bell size={18} />
             </button>
-            <button className="run-button">
+            <button className="run-button" disabled={isSubmitting} onClick={submitTask}>
               <Play size={16} />
-              运行
+              {isSubmitting ? '启动中' : '运行'}
             </button>
           </div>
         </header>
@@ -147,29 +236,23 @@ function DesktopApp() {
           {activeTask.transcript.map((item, index) => (
             <article className={`message ${item.role}`} key={`${item.timestamp}-${index}`}>
               <div className="message-meta">
-                <span>{item.role === 'assistant' ? 'Codex' : item.role === 'tool' ? '工具请求' : '你'}</span>
-                <small>{item.timestamp}</small>
+                <span>{item.role === 'assistant' ? 'Codex' : item.role === 'tool' ? '工具' : item.role === 'system' ? '系统' : '你'}</span>
+                <small>{new Date(item.timestamp).toLocaleTimeString()}</small>
               </div>
               <p>{item.content}</p>
             </article>
           ))}
-
-          <article className="message assistant">
-            <div className="message-meta">
-              <span>Codex</span>
-              <small>现在</small>
-            </div>
-            <p>
-              我会在本机工作区里执行任务，只访问企业策略允许的数据。涉及外发、写入系统、读取敏感文件时，会先停下来让你确认。
-            </p>
-          </article>
         </div>
 
         <footer className="composer">
+          <label className="workspace-input">
+            <span>工作目录</span>
+            <input value={workspace} onChange={(event) => setWorkspace(event.target.value)} />
+          </label>
           <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} />
           <div className="composer-footer">
-            <span>已连接：企业微信、飞书、企业知识库、Codex Runtime</span>
-            <button>
+            <span>内置 Codex · 企业中转 · 本地工作区</span>
+            <button disabled={isSubmitting} onClick={submitTask}>
               <Sparkles size={16} />
               交给 Codex
             </button>
@@ -188,8 +271,8 @@ function DesktopApp() {
             <strong>ai.blector.com</strong>
           </div>
           <div className="policy-line">
-            <span>数据出域</span>
-            <strong>禁止</strong>
+            <span>执行沙箱</span>
+            <strong>工作区可写</strong>
           </div>
           <div className="policy-line">
             <span>审计</span>
@@ -200,13 +283,9 @@ function DesktopApp() {
         <section className="inspector-card approval">
           <div className="inspector-title">
             <KeyRound size={18} />
-            <strong>等待确认</strong>
+            <strong>开箱即用</strong>
           </div>
-          <p>Codex 请求读取客户报价表，用于生成日报中的客户进展和风险判断。</p>
-          <div className="approval-actions">
-            <button className="allow">允许一次</button>
-            <button className="deny">拒绝</button>
-          </div>
+          <p>Codex 二进制随墨渊 Desktop 一起安装，员工不需要单独安装或配置 Codex。</p>
         </section>
 
         <section className="inspector-card">
@@ -217,15 +296,15 @@ function DesktopApp() {
           <ul className="runtime-list">
             <li>
               <CheckCircle2 size={15} />
-              @openai/codex 已内置
+              @openai/codex 随包内置
             </li>
             <li>
               <CheckCircle2 size={15} />
-              工具调用进入审计流
+              事件流实时回传桌面端
             </li>
             <li>
               <CheckCircle2 size={15} />
-              高风险动作人工确认
+              配置目录由企业托管
             </li>
           </ul>
         </section>

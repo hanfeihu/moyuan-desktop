@@ -28,6 +28,11 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
 .desktop-shell {
   height: 100vh;
   min-height: 720px;
@@ -288,6 +293,30 @@ button {
   background: #101721;
   overflow: hidden;
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+}
+
+.workspace-input {
+  min-height: 42px;
+  border-bottom: 1px solid #203040;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  color: #8291a4;
+  font-size: 13px;
+}
+
+.workspace-input span {
+  white-space: nowrap;
+}
+
+.workspace-input input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  color: #dce5ef;
+  background: transparent;
 }
 
 .composer textarea {
