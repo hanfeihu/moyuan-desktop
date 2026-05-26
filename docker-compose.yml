@@ -1,0 +1,25 @@
+services:
+  web:
+    build:
+      context: ./web
+    ports:
+      - "18080:80"
+    depends_on:
+      - server
+    restart: unless-stopped
+
+  server:
+    build:
+      context: ./server
+    environment:
+      PORT: 4000
+      HOST: 0.0.0.0
+      DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:5432/enterprise_ai
+      REDIS_URL: redis://host.docker.internal:6379
+      MILVUS_ADDRESS: host.docker.internal:19530
+      MINIO_ENDPOINT: host.docker.internal:10900
+    ports:
+      - "14000:4000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
