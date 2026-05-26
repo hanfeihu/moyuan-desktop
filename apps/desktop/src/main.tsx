@@ -87,6 +87,7 @@ function replaceTask(tasks: CodexTask[], oldTaskId: string, next: CodexTask) {
 function shouldShowMessage(item: TranscriptItem) {
   const content = item.content.trim()
   if (!content) return false
+  if (content === '正在生成图片...') return false
   if (isInternalCodexJson(content)) return false
   if (item.role !== 'system') return true
   return (
@@ -638,8 +639,8 @@ function DesktopApp() {
     const textarea = textareaRef.current
     if (!textarea) return
     textarea.style.height = 'auto'
-    const compactHeight = prompt.trim() ? Math.max(34, textarea.scrollHeight) : 30
-    textarea.style.height = `${Math.min(128, compactHeight)}px`
+    const compactHeight = prompt.trim() ? Math.max(28, textarea.scrollHeight) : 24
+    textarea.style.height = `${Math.min(116, compactHeight)}px`
     window.dispatchEvent(new Event('moyuan:composer-resized'))
   }, [prompt, activeTask?.id])
 

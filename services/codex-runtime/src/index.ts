@@ -117,10 +117,17 @@ function isInternalCodexJson(content: string) {
   }
 }
 
+function isMutedTranscriptStatus(content: string) {
+  return content.trim() === '正在生成图片...'
+}
+
 function sanitizeTask(task: CodexTask): CodexTask {
   return {
     ...task,
-    transcript: task.transcript.filter((item) => item.content.trim() && !isInternalCodexJson(item.content)),
+    transcript: task.transcript.filter((item) => {
+      const content = item.content.trim()
+      return content && !isInternalCodexJson(content) && !isMutedTranscriptStatus(content)
+    }),
   }
 }
 
@@ -718,12 +725,6 @@ async function runImageGeneration(record: TaskRecord, prompt: string, size: stri
     record.task.status = 'running'
     record.task.updatedAt = new Date().toISOString()
     await saveStore()
-    pushEvent(record, {
-      taskId: record.task.id,
-      type: 'tool',
-      role: 'tool',
-      content: '正在生成图片...',
-    })
 
     const image = await generateImage(prompt, size, model)
     record.task.status = 'completed'
