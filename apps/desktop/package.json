@@ -1,28 +1,98 @@
 {
   "name": "@eaw/desktop",
   "version": "0.1.0",
+  "description": "Moyuan Desktop, an enterprise local AI workbench with bundled Codex-style runtime.",
+  "author": "Han Feihu",
   "private": true,
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "electron": "electron electron/main.cjs",
     "build": "tsc -b && vite build",
     "typecheck": "tsc --noEmit",
-    "tauri": "tauri"
+    "dist": "electron-builder"
   },
   "dependencies": {
     "@eaw/shared": "*",
-    "@tauri-apps/api": "^2.9.0",
+    "@fontsource-variable/geist": "^5.2.9",
+    "@fontsource-variable/noto-sans-sc": "^5.2.10",
     "lucide-react": "^0.554.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
-    "electron": "^39.2.6",
+    "electron-builder": "^26.0.12",
+    "electron": "39.2.6",
     "vite": "^8.0.12"
+  },
+  "build": {
+    "appId": "com.moyuanai.desktop",
+    "productName": "Moyuan Desktop",
+    "copyright": "Copyright © 2026 Han Feihu",
+    "asar": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../../services/codex-runtime/dist",
+        "to": "app/services/codex-runtime/dist"
+      },
+      {
+        "from": "../../services/codex-runtime/package.json",
+        "to": "app/services/codex-runtime/package.json"
+      },
+      {
+        "from": "../../node_modules",
+        "to": "app/node_modules",
+        "filter": [
+          "**/*",
+          "!@eaw",
+          "!@eaw/**/*"
+        ]
+      }
+    ],
+    "extraMetadata": {
+      "main": "electron/main.cjs"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "artifactName": "Moyuan-Desktop-${version}-${os}-${arch}.${ext}"
   }
 }

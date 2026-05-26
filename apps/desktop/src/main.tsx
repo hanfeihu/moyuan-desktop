@@ -1,10 +1,14 @@
-import { Bot, Check, FolderOpen, Loader2, Plus, Send, Settings, Terminal, UserRound } from 'lucide-react'
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { Bot, Box, Check, ChevronDown, ChevronRight, Circle, FolderOpen, GitBranch, Loader2, Plus, Search, Send, Settings, Terminal, UserRound } from 'lucide-react'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
+import '@fontsource-variable/geist'
+import '@fontsource-variable/noto-sans-sc'
 import './styles.css'
 
-const runtimeUrl = import.meta.env.VITE_CODEX_RUNTIME_URL ?? 'http://127.0.0.1:4100'
+const launchParams = new URLSearchParams(window.location.search)
+const runtimeUrl = launchParams.get('runtimeUrl') ?? import.meta.env.VITE_CODEX_RUNTIME_URL ?? 'http://127.0.0.1:4101'
+const runtimeToken = launchParams.get('runtimeToken') ?? import.meta.env.VITE_CODEX_RUNTIME_TOKEN ?? ''
 const defaultWorkspace = import.meta.env.VITE_DEFAULT_WORKSPACE ?? '/Users/a1/Documents/Codex/2026-05-26/codex'
 const localEmployeeId = import.meta.env.VITE_EMPLOYEE_ID ?? 'u-1001'
 
@@ -44,10 +48,13 @@ function taskSortValue(task: CodexTask) {
 }
 
 function normalizeTask(task: CodexTask): CodexTask {
+  const transcript = (task.transcript ?? []).filter(shouldShowMessage)
+  const title = task.title?.trim().replace(/^生成图片[:：]\s*/, '')
+
   return {
     ...task,
-    title: task.title?.trim() || task.transcript.find((item) => item.role === 'user')?.content.slice(0, 36) || '新任务',
-    transcript: task.transcript ?? [],
+    title: title || transcript.find((item) => item.role === 'user')?.content.slice(0, 36) || '新任务',
+    transcript,
   }
 }
 
@@ -78,25 +85,68 @@ function replaceTask(tasks: CodexTask[], oldTaskId: string, next: CodexTask) {
 }
 
 function shouldShowMessage(item: TranscriptItem) {
+  const content = item.content.trim()
+  if (!content) return false
+  if (isInternalCodexJson(content)) return false
   if (item.role !== 'system') return true
   return (
-    item.content.includes('Codex Runtime 没连上') ||
-    item.content.includes('任务创建失败') ||
-    item.content.includes('发送失败') ||
-    item.content.includes('退出') ||
-    item.content.includes('失败') ||
-    item.content.includes('错误') ||
-    item.content.includes('error')
+    content.includes('Codex Runtime 没连上') ||
+    content.includes('任务创建失败') ||
+    content.includes('发送失败') ||
+    content.includes('中断') ||
+    content.includes('退出') ||
+    content.includes('失败') ||
+    content.includes('错误') ||
+    content.includes('未配置') ||
+    content.includes('超时') ||
+    content.includes('不支持') ||
+    content.includes('不可用') ||
+    content.includes('密钥') ||
+    content.includes('error')
   )
+}
+
+function isInternalCodexJson(content: string) {
+  if (!content.startsWith('{') || !content.endsWith('}')) return false
+
+  try {
+    const payload = JSON.parse(content) as { type?: unknown; item?: { type?: unknown } }
+    const type = typeof payload.type === 'string' ? payload.type : ''
+    const itemType = payload.item && typeof payload.item.type === 'string' ? payload.item.type : ''
+
+    return (
+      type.startsWith('item.') ||
+      type.startsWith('turn.') ||
+      type.includes('delta') ||
+      itemType === 'web_search' ||
+      itemType === 'reasoning' ||
+      itemType === 'command_execution'
+    )
+  } catch {
+    return content.includes('"type":"item.') || content.includes('"type":"web_search"')
+  }
 }
 
 function messageLabel(role: TranscriptItem['role']) {
   return {
-    assistant: 'Codex',
+    assistant: '墨渊',
     tool: '命令',
     system: '系统',
     user: '你',
   }[role]
+}
+
+function taskMeta(task: CodexTask) {
+  const assistantTurns = task.transcript.filter((item) => item.role === 'assistant').length
+  const commandTurns = task.transcript.filter((item) => item.role === 'tool' && item.content.trim().startsWith('$')).length
+  if (task.generatedImages?.length) return `${task.generatedImages.length} 张图片`
+  if (task.sessionId) return `${assistantTurns} 轮 · 可续聊`
+  if (commandTurns) return `${commandTurns} 次命令`
+  return statusText(task.status)
+}
+
+function workspaceName(workspacePath: string) {
+  return workspacePath.split('/').filter(Boolean).pop() ?? workspacePath
 }
 
 function eventStatus(event: CodexTaskEvent, fallback: CodexTask['status']): CodexTask['status'] {
@@ -108,8 +158,43 @@ function eventStatus(event: CodexTaskEvent, fallback: CodexTask['status']): Code
 }
 
 function mergeEventIntoTask(task: CodexTask, event: CodexTaskEvent): CodexTask {
+  const transcriptItem = eventToTranscript(event)
+  if (!shouldShowMessage(transcriptItem)) {
+    return { ...task, status: eventStatus(event, task.status) }
+  }
+
+  if (event.type === 'message_delta' && event.role === 'assistant') {
+    const transcript = [...task.transcript]
+    let lastAssistantIndex = -1
+    for (let index = transcript.length - 1; index >= 0; index -= 1) {
+      if (transcript[index].role === 'assistant') {
+        lastAssistantIndex = index
+        break
+      }
+    }
+    if (lastAssistantIndex === -1) {
+      transcript.push(transcriptItem)
+    } else {
+      const current = transcript[lastAssistantIndex]
+      const content = event.content.startsWith(current.content) ? event.content : `${current.content}${event.content}`
+      transcript[lastAssistantIndex] = { ...current, content, timestamp: event.timestamp }
+    }
+    return { ...task, status: eventStatus(event, task.status), transcript }
+  }
+
+  if (event.type === 'message' && event.role === 'assistant' && task.transcript.at(-1)?.role === 'assistant') {
+    const last = task.transcript.at(-1)
+    if (last?.content === event.content || event.content.startsWith(last?.content ?? '')) {
+      return {
+        ...task,
+        status: eventStatus(event, task.status),
+        transcript: [...task.transcript.slice(0, -1), transcriptItem],
+      }
+    }
+  }
+
   const seen = task.transcript.some((item) => item.timestamp === event.timestamp && item.content === event.content && item.role === event.role)
-  const transcript = seen ? task.transcript : [...task.transcript, eventToTranscript(event)]
+  const transcript = seen ? task.transcript : [...task.transcript, transcriptItem]
   return { ...task, status: eventStatus(event, task.status), transcript }
 }
 
@@ -171,8 +256,14 @@ function buildLocalErrorTask(error: unknown, workspacePath: string): CodexTask {
   }
 }
 
+function isCommandToolContent(content: string) {
+  return content.trimStart().startsWith('$')
+}
+
 function TranscriptMessage({ animate, item, label }: { animate: boolean; item: TranscriptItem; label: string }) {
   const [visibleText, setVisibleText] = useState(animate && item.role === 'assistant' ? '' : item.content)
+  const isToolStatus = item.role === 'tool' && !isCommandToolContent(item.content)
+  const effectiveLabel = isToolStatus ? '状态' : label
 
   useEffect(() => {
     if (!animate || item.role !== 'assistant') {
@@ -185,6 +276,7 @@ function TranscriptMessage({ animate, item, label }: { animate: boolean; item: T
     const step = () => {
       index = Math.min(item.content.length, index + Math.max(1, Math.ceil(item.content.length / 80)))
       setVisibleText(item.content.slice(0, index))
+      window.dispatchEvent(new Event('moyuan:content-resized'))
       if (index >= item.content.length) window.clearInterval(timer)
     }
     const timer = window.setInterval(step, 18)
@@ -194,39 +286,283 @@ function TranscriptMessage({ animate, item, label }: { animate: boolean; item: T
   }, [animate, item.content, item.role, item.timestamp])
 
   return (
-    <article className={`message ${item.role}`}>
-      <div className="message-label">{label}</div>
+    <article className={`message ${item.role} ${isToolStatus ? 'tool-status' : ''}`}>
+      <div className="message-label" aria-label={effectiveLabel} title={effectiveLabel}>
+        {item.role === 'assistant' ? (
+          <Bot size={17} />
+        ) : item.role === 'tool' ? (
+          isToolStatus ? (
+            <span className="tool-status-dot" />
+          ) : (
+            <Terminal size={16} />
+          )
+        ) : item.role === 'system' ? (
+          <Circle size={13} />
+        ) : (
+          '你'
+        )}
+      </div>
       <div className="message-body">
-        {visibleText}
+        {item.role === 'assistant' ? <MarkdownText content={visibleText} /> : item.role === 'tool' ? <ToolOutput content={visibleText} /> : visibleText}
         {animate && item.role === 'assistant' && visibleText.length < item.content.length ? <span className="stream-caret" /> : null}
       </div>
     </article>
   )
 }
 
+function ToolOutput({ content }: { content: string }) {
+  const [firstLine, ...rest] = content.split(/\r?\n/)
+  const isCommand = isCommandToolContent(firstLine ?? '')
+  const command = isCommand ? firstLine?.replace(/^\$\s*/, '').trim() : ''
+  const detail = rest.join('\n').trim()
+  const summary = command ? `已运行命令` : firstLine?.trim() || '工具调用'
+
+  if (!detail) {
+    if (!isCommand) {
+      return <div className="tool-status-row">{summary}</div>
+    }
+
+    return (
+      <div className="tool-row">
+        <Terminal size={15} />
+        <span>{summary}</span>
+        {command ? <code>{command}</code> : null}
+      </div>
+    )
+  }
+
+  return (
+    <details className="tool-output">
+      <summary>
+        <Terminal size={15} />
+        <span>{summary}</span>
+        {command ? <code>{command}</code> : null}
+      </summary>
+      <pre>{detail}</pre>
+    </details>
+  )
+}
+
+function MarkdownText({ content }: { content: string }) {
+  const blocks = useMemo(() => markdownBlocks(content), [content])
+
+  return (
+    <div className="markdown">
+      {blocks.map((block, index) => {
+        if (block.type === 'list') {
+          return (
+            <ul key={index}>
+              {block.items.map((item, itemIndex) => (
+                <li key={itemIndex}>
+                  <div>{renderInline(item.body)}</div>
+                  {item.meta ? <div className="list-meta">{renderInline(item.meta)}</div> : null}
+                </li>
+              ))}
+            </ul>
+          )
+        }
+
+        if (block.type === 'heading') {
+          return <h3 key={index}>{renderInline(block.text)}</h3>
+        }
+
+        if (block.type === 'image') {
+          return (
+            <figure className="image-result" key={index}>
+              <img alt={block.alt} onLoad={() => window.dispatchEvent(new Event('moyuan:content-resized'))} src={resolveRuntimeAssetUrl(block.src)} />
+            </figure>
+          )
+        }
+
+        return <p key={index}>{renderInline(block.text)}</p>
+      })}
+    </div>
+  )
+}
+
+type MarkdownBlock =
+  | { type: 'paragraph' | 'heading'; text: string }
+  | { type: 'image'; alt: string; src: string }
+  | { type: 'list'; items: Array<{ body: string; meta?: string }> }
+
+function resolveRuntimeAssetUrl(src: string) {
+  if (src.startsWith('/api/')) return runtimeEndpoint(src)
+  return src
+}
+
+function runtimeEndpoint(pathname: string) {
+  const url = new URL(pathname, runtimeUrl)
+  if (runtimeToken) url.searchParams.set('token', runtimeToken)
+  return url.toString()
+}
+
+function runtimeFetch(pathname: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers)
+  if (runtimeToken) headers.set('x-moyuan-runtime-token', runtimeToken)
+  return fetch(runtimeEndpoint(pathname), { ...init, headers })
+}
+
+function markdownBlocks(content: string): MarkdownBlock[] {
+  const blocks: MarkdownBlock[] = []
+  const lines = content.split(/\r?\n/)
+  let paragraph: string[] = []
+  let list: Array<{ body: string; meta?: string }> = []
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return
+    const text = paragraph.join(' ').trim()
+    if (text) blocks.push({ type: 'paragraph', text })
+    paragraph = []
+  }
+
+  const flushList = () => {
+    if (!list.length) return
+    blocks.push({ type: 'list', items: list })
+    list = []
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim()
+    if (!line) {
+      flushParagraph()
+      flushList()
+      continue
+    }
+
+    const listMatch = line.match(/^[-*]\s+(.+)$/)
+    const imageMatch = line.match(/^!\[([^\]]*)\]\(([^)]+)\)$/)
+    if (imageMatch) {
+      flushParagraph()
+      flushList()
+      blocks.push({ type: 'image', alt: imageMatch[1], src: imageMatch[2] })
+      continue
+    }
+
+    if (listMatch) {
+      flushParagraph()
+      list.push({ body: listMatch[1] })
+      continue
+    }
+
+    if (list.length && /^https?:\/\//.test(line)) {
+      list[list.length - 1] = { ...list[list.length - 1], meta: line }
+      continue
+    }
+
+    const headingMatch = line.match(/^\*\*(.+)\*\*[:：]?$/)
+    if (headingMatch) {
+      flushParagraph()
+      flushList()
+      blocks.push({ type: 'heading', text: headingMatch[1] })
+      continue
+    }
+
+    flushList()
+    paragraph.push(line)
+  }
+
+  flushParagraph()
+  flushList()
+
+  return blocks.length ? blocks : [{ type: 'paragraph', text: content }]
+}
+
+function renderInline(text: string) {
+  const nodes: React.ReactNode[] = []
+  const pattern = /(\*\*([^*]+?)\*\*)|(https?:\/\/[^\s)]+)|(`([^`]+?)`)/g
+  let cursor = 0
+  let match: RegExpExecArray | null
+
+  while ((match = pattern.exec(text))) {
+    if (match.index > cursor) nodes.push(text.slice(cursor, match.index))
+    if (match[2]) {
+      nodes.push(<strong key={nodes.length}>{match[2]}</strong>)
+    } else if (match[3]) {
+      nodes.push(
+        <a href={match[3]} key={nodes.length} rel="noreferrer" target="_blank">
+          {match[3]}
+        </a>,
+      )
+    } else if (match[5]) {
+      nodes.push(<code key={nodes.length}>{match[5]}</code>)
+    }
+    cursor = pattern.lastIndex
+  }
+
+  if (cursor < text.length) nodes.push(text.slice(cursor))
+  return nodes
+}
+
 function DesktopApp() {
   const [tasks, setTasks] = useState<CodexTask[]>([welcomeTask])
   const [activeTaskId, setActiveTaskId] = useState(welcomeTask.id)
-  const [prompt, setPrompt] = useState('')
+  const [draftByTaskId, setDraftByTaskId] = useState<Record<string, string>>({})
   const [workspace, setWorkspace] = useState(defaultWorkspace)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [runtimeState, setRuntimeState] = useState<RuntimeState>('checking')
+  const mainPaneRef = useRef<HTMLElement | null>(null)
   const transcriptRef = useRef<HTMLDivElement | null>(null)
+  const transcriptBottomRef = useRef<HTMLDivElement | null>(null)
+  const composerRef = useRef<HTMLElement | null>(null)
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const seenEventsRef = useRef<Set<string>>(new Set())
+  const previousTaskIdRef = useRef(activeTaskId)
+  const pinTranscriptToBottomRef = useRef(true)
 
   const activeTask = useMemo(() => tasks.find((task) => task.id === activeTaskId) ?? tasks[0], [activeTaskId, tasks])
   const visibleTranscript = useMemo(() => activeTask.transcript.filter(shouldShowMessage), [activeTask.transcript])
   const isBusy = activeTask.status === 'queued' || activeTask.status === 'running'
+  const prompt = draftByTaskId[activeTask.id] ?? ''
+  const promptSuggestions = ['整理这个项目结构', '检查最近代码改动', '运行测试并修复问题']
+  const placeholder = isBusy ? '当前任务运行中，完成后继续发送' : '让墨渊做点什么...'
+  const canSubmit = !isSubmitting && !isBusy && Boolean(prompt.trim())
+
+  function setPrompt(value: string, taskId = activeTask.id) {
+    setDraftByTaskId((current) => ({ ...current, [taskId]: value }))
+  }
+
+  function selectTask(taskId: string) {
+    pinTranscriptToBottomRef.current = true
+    setActiveTaskId(taskId)
+    window.requestAnimationFrame(() => {
+      scheduleTranscriptBottom('auto')
+      textareaRef.current?.focus()
+    })
+  }
+
+  function isNearTranscriptBottom() {
+    const transcript = transcriptRef.current
+    if (!transcript) return true
+    return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 96
+  }
+
+  function scrollTranscriptToBottom(behavior: ScrollBehavior = 'auto') {
+    const transcript = transcriptRef.current
+    if (!transcript) return
+    transcriptBottomRef.current?.scrollIntoView({ block: 'end', behavior })
+    transcript.scrollTop = transcript.scrollHeight
+  }
+
+  function scheduleTranscriptBottom(behavior: ScrollBehavior = 'auto') {
+    const run = () => scrollTranscriptToBottom(behavior)
+    run()
+    window.requestAnimationFrame(() => {
+      run()
+      window.requestAnimationFrame(run)
+    })
+    window.setTimeout(run, 80)
+    window.setTimeout(run, 220)
+  }
 
   useEffect(() => {
-    fetch(`${runtimeUrl}/health`)
+    runtimeFetch('/health')
       .then((response) => {
         if (!response.ok) throw new Error('offline')
         setRuntimeState('online')
       })
       .catch(() => setRuntimeState('offline'))
 
-    fetch(`${runtimeUrl}/api/codex/tasks`)
+    runtimeFetch('/api/codex/tasks')
       .then((response) => response.json())
       .then((payload: { data?: CodexTask[] }) => {
         setRuntimeState('online')
@@ -255,17 +591,108 @@ function DesktopApp() {
   }, [])
 
   useEffect(() => {
-    transcriptRef.current?.scrollTo({
-      top: transcriptRef.current.scrollHeight,
-      behavior: 'smooth',
-    })
-  }, [visibleTranscript.length, activeTask?.id])
+    const transcript = transcriptRef.current
+    if (!transcript) return
+
+    const onScroll = () => {
+      pinTranscriptToBottomRef.current = isNearTranscriptBottom()
+    }
+    transcript.addEventListener('scroll', onScroll, { passive: true })
+    return () => transcript.removeEventListener('scroll', onScroll)
+  }, [])
+
+  useLayoutEffect(() => {
+    const switchedTask = previousTaskIdRef.current !== activeTask?.id
+    previousTaskIdRef.current = activeTask?.id ?? previousTaskIdRef.current
+
+    if (switchedTask) {
+      pinTranscriptToBottomRef.current = true
+      scheduleTranscriptBottom('auto')
+      void document.fonts?.ready.then(() => scheduleTranscriptBottom('auto'))
+      return
+    }
+
+    if (pinTranscriptToBottomRef.current) {
+      scheduleTranscriptBottom('smooth')
+    }
+  }, [visibleTranscript.length, activeTask?.id, activeTask?.status])
+
+  useEffect(() => {
+    const transcript = transcriptRef.current
+    if (!transcript) return
+
+    const keepBottom = () => {
+      if (pinTranscriptToBottomRef.current) scheduleTranscriptBottom('auto')
+    }
+    const observer = new MutationObserver(keepBottom)
+    observer.observe(transcript, { childList: true, characterData: true, subtree: true })
+    window.addEventListener('moyuan:content-resized', keepBottom)
+
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('moyuan:content-resized', keepBottom)
+    }
+  }, [activeTask?.id])
+
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    textarea.style.height = 'auto'
+    const compactHeight = prompt.trim() ? Math.max(34, textarea.scrollHeight) : 30
+    textarea.style.height = `${Math.min(128, compactHeight)}px`
+    window.dispatchEvent(new Event('moyuan:composer-resized'))
+  }, [prompt, activeTask?.id])
+
+  useLayoutEffect(() => {
+    const pane = mainPaneRef.current
+    const composer = composerRef.current
+    if (!pane || !composer) return
+
+    const updateComposerSpace = () => {
+      pane.style.setProperty('--composer-space', `${Math.ceil(composer.offsetHeight + 32)}px`)
+      if (pinTranscriptToBottomRef.current) scheduleTranscriptBottom('auto')
+    }
+
+    updateComposerSpace()
+    const observer = new ResizeObserver(updateComposerSpace)
+    observer.observe(composer)
+    window.addEventListener('resize', updateComposerSpace)
+    window.addEventListener('moyuan:composer-resized', updateComposerSpace)
+    void document.fonts?.ready.then(updateComposerSpace)
+
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updateComposerSpace)
+      window.removeEventListener('moyuan:composer-resized', updateComposerSpace)
+    }
+  }, [])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      const isEditing = target?.tagName === 'TEXTAREA' || target?.tagName === 'INPUT'
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
+        event.preventDefault()
+        setPrompt('', welcomeTask.id)
+        selectTask(welcomeTask.id)
+      }
+
+      if (!isEditing && event.key === '/') {
+        event.preventDefault()
+        textareaRef.current?.focus()
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   useEffect(() => {
     if (!activeTask || activeTask.id === 'welcome') return
 
     let pollTimer: number | undefined
-    const source = new EventSource(`${runtimeUrl}/api/codex/tasks/${activeTask.id}/events`)
+    const source = new EventSource(runtimeEndpoint(`/api/codex/tasks/${activeTask.id}/events`))
 
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as CodexTaskEvent
@@ -282,7 +709,7 @@ function DesktopApp() {
     }
 
     pollTimer = window.setInterval(() => {
-      fetch(`${runtimeUrl}/api/codex/tasks/${activeTask.id}`)
+      runtimeFetch(`/api/codex/tasks/${activeTask.id}`)
         .then((response) => response.json())
         .then((payload: { data?: CodexTask }) => {
           setRuntimeState('online')
@@ -303,6 +730,7 @@ function DesktopApp() {
     if (!promptText || isSubmitting) return
 
     setIsSubmitting(true)
+    pinTranscriptToBottomRef.current = true
     const shouldResume = activeTask.id !== 'welcome' && Boolean(activeTask.sessionId)
     const pendingTask = shouldResume ? appendPendingTurn(activeTask, promptText, workspacePath) : buildPendingTask(promptText, workspacePath)
     setTasks((current) => mergeTask(current, pendingTask))
@@ -310,7 +738,7 @@ function DesktopApp() {
     setPrompt('')
 
     try {
-      const response = await fetch(`${runtimeUrl}/api/codex/tasks`, {
+      const response = await runtimeFetch('/api/codex/tasks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -334,40 +762,51 @@ function DesktopApp() {
       setActiveTaskId(shouldResume ? activeTask.id : errorTask.id)
     } finally {
       setIsSubmitting(false)
+      window.requestAnimationFrame(() => textareaRef.current?.focus())
     }
   }
 
   return (
     <main className="desktop-shell">
       <aside className="sidebar">
-        <div className="window-dots" aria-hidden="true">
-          <span />
-          <span />
-          <span />
-        </div>
         <div className="brand">
           <Bot size={18} />
           <strong>墨渊</strong>
         </div>
-        <button
-          className="new-task"
-          onClick={() => {
-            setActiveTaskId('welcome')
-            setPrompt('')
-          }}
-        >
-          <Plus size={16} />
-          新任务
-        </button>
+        <nav className="sidebar-nav" aria-label="主导航">
+          <button
+            className={activeTask.id === 'welcome' ? 'nav-item active' : 'nav-item'}
+            onClick={() => {
+              setPrompt('', welcomeTask.id)
+              selectTask(welcomeTask.id)
+            }}
+          >
+            <Plus size={16} />
+            新对话
+          </button>
+          <button className="nav-item">
+            <Search size={16} />
+            搜索
+          </button>
+          <button className="nav-item">
+            <Box size={16} />
+            技能
+          </button>
+          <button className="nav-item">
+            <FolderOpen size={16} />
+            项目
+          </button>
+        </nav>
+        <div className="section-title">对话</div>
         <div className="task-list">
           {tasks.map((task) => (
             <button
-              className={task.id === activeTask.id ? 'task-item active' : 'task-item'}
+              className={`task-item ${task.status} ${task.id === activeTask.id ? 'active' : ''}`}
               key={task.id}
-              onClick={() => setActiveTaskId(task.id)}
+              onClick={() => selectTask(task.id)}
             >
               <span>{task.title}</span>
-              <small>{statusText(task.status)}</small>
+              <small>{taskMeta(task)}</small>
             </button>
           ))}
         </div>
@@ -376,7 +815,7 @@ function DesktopApp() {
             <FolderOpen size={17} />
           </button>
           <button title="设置">
-            <Settings size={17} />
+            <Settings size={16} />
           </button>
           <button title="账号">
             <UserRound size={17} />
@@ -384,17 +823,24 @@ function DesktopApp() {
         </div>
       </aside>
 
-      <section className="main-pane">
+      <section className="main-pane" ref={mainPaneRef}>
         <header className="topbar">
-          <div>
+          <div className="topbar-title">
             <h1>{activeTask.title}</h1>
             <label className="workspace-field">
-              <Terminal size={15} />
+              <ChevronRight size={15} />
               <input value={workspace} onChange={(event) => setWorkspace(event.target.value)} />
             </label>
           </div>
           <div className="topbar-actions">
-            <div className={`runtime-dot ${runtimeState}`}>{runtimeState === 'online' ? 'Runtime online' : runtimeState === 'checking' ? 'Checking runtime' : 'Runtime offline'}</div>
+            <div className="workspace-chip">
+              <GitBranch size={14} />
+              {workspaceName(workspace)}
+            </div>
+            <div className={`runtime-dot ${runtimeState}`}>
+              <span />
+              {runtimeState === 'online' ? '本地运行' : runtimeState === 'checking' ? '连接中' : '未连接'}
+            </div>
             <div className={`status-badge ${activeTask.status}`}>
               {activeTask.status === 'running' || activeTask.status === 'queued' ? <Loader2 size={15} className="spin" /> : <Check size={15} />}
               {runtimeState === 'offline' ? '未连接' : statusText(activeTask.status)}
@@ -404,22 +850,42 @@ function DesktopApp() {
 
         <div className="transcript" ref={transcriptRef}>
           {visibleTranscript.map((item, index) => {
-            const isLatestAssistant = item.role === 'assistant' && index === visibleTranscript.length - 1
+            const isLatestAssistant = item.role === 'assistant' && index === visibleTranscript.length - 1 && activeTask.status === 'running'
             return <TranscriptMessage animate={isLatestAssistant} item={item} key={`${item.timestamp}-${index}`} label={messageLabel(item.role)} />
           })}
+          {activeTask.id === 'welcome' && (
+            <div className="quick-prompts">
+              {promptSuggestions.map((suggestion) => (
+                <button
+                  key={suggestion}
+                  onClick={() => {
+                    setPrompt(suggestion)
+                    window.requestAnimationFrame(() => textareaRef.current?.focus())
+                  }}
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
+          )}
           {isBusy && !hasCodexActivity(activeTask) && (
             <article className="message assistant pending">
-              <div className="message-label">Codex</div>
+              <div className="message-label">
+                <Bot size={17} />
+              </div>
               <div className="message-body">
                 <span className="typing-dot" />
                 正在处理...
               </div>
             </article>
           )}
+          <div className="transcript-bottom" ref={transcriptBottomRef} />
         </div>
 
-        <footer className="composer">
+        <footer className="composer" ref={composerRef}>
           <textarea
+            ref={textareaRef}
+            rows={1}
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             onKeyDown={(event) => {
@@ -428,18 +894,43 @@ function DesktopApp() {
                 void submitTask()
               }
             }}
-            placeholder="让 Codex 做点什么..."
+            placeholder={placeholder}
           />
-          <button disabled={isSubmitting || !prompt.trim()} onClick={submitTask}>
-            {isSubmitting ? <Loader2 size={17} className="spin" /> : <Send size={17} />}
-          </button>
+          <div className="composer-toolbar">
+            <div className="composer-tools">
+              <button className="composer-icon-button" title="添加上下文" type="button">
+                <Plus size={16} />
+              </button>
+              <button className="composer-soft-button" title="自定义" type="button">
+                <Settings size={15} />
+                <span>自定义</span>
+              </button>
+            </div>
+            <div className="composer-tools right">
+              <button className="composer-model-button" title="模型" type="button">
+                <span>gpt-5.5</span>
+                <ChevronDown size={14} />
+              </button>
+              <button className="composer-soft-button compact" title="推理强度" type="button">
+                medium
+              </button>
+              <button className="send-button" disabled={!canSubmit} onClick={submitTask} title="发送" type="button">
+                {isSubmitting ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
+              </button>
+            </div>
+          </div>
         </footer>
       </section>
     </main>
   )
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
+const rootElement = document.getElementById('root')!
+const windowWithRoot = window as typeof window & { __moyuanRoot?: ReactDOM.Root }
+const root = windowWithRoot.__moyuanRoot ?? ReactDOM.createRoot(rootElement)
+windowWithRoot.__moyuanRoot = root
+
+root.render(
   <React.StrictMode>
     <DesktopApp />
   </React.StrictMode>,

@@ -12,6 +12,10 @@
     "dev:desktop": "npm run dev -w @eaw/desktop",
     "dev:api": "npm run dev -w @eaw/api",
     "dev:codex": "npm run dev -w @eaw/codex-runtime",
+    "build:release": "npm run build -w @eaw/codex-runtime && npm run build -w @eaw/desktop",
+    "dist:desktop:dir": "npm run build:release && electron-builder --project apps/desktop --dir",
+    "dist:desktop:mac": "npm run build:release && electron-builder --project apps/desktop --mac dmg zip",
+    "dist:desktop:win": "npm run build:release && electron-builder --project apps/desktop --win nsis zip",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },

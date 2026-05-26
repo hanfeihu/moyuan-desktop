@@ -33,7 +33,7 @@ const providers: ModelProviderConfig[] = [
     id: 'blector',
     name: 'Blector 中转',
     baseUrl: 'https://ai.blector.com/v1',
-    maskedApiKey: 'sk-gJcO************************lsBi',
+    maskedApiKey: 'sk-************************demo',
     defaultModel: 'gpt-5-codex',
     enabled: true,
   },

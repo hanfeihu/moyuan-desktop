@@ -40,6 +40,7 @@ export type CodexTask = {
   createdAt?: string
   updatedAt?: string
   exitCode?: number | null
+  generatedImages?: ImageGenerationResult[]
   transcript: Array<{
     role: 'user' | 'assistant' | 'tool' | 'system'
     content: string
@@ -47,10 +48,19 @@ export type CodexTask = {
   }>
 }
 
+export type ImageGenerationResult = {
+  id: string
+  prompt: string
+  model: string
+  size: string
+  url: string
+  createdAt: string
+}
+
 export type CodexTaskEvent = {
   id: string
   taskId: string
-  type: 'thread.started' | 'turn.started' | 'message' | 'tool' | 'error' | 'turn.completed' | 'turn.failed' | 'process.exit'
+  type: 'thread.started' | 'turn.started' | 'message' | 'message_delta' | 'tool' | 'error' | 'turn.completed' | 'turn.failed' | 'process.exit'
   role: 'user' | 'assistant' | 'tool' | 'system'
   content: string
   timestamp: string
