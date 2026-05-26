@@ -1,9 +1,20 @@
 :root {
+  --bg: #050608;
+  --panel: #0b0e12;
+  --panel-2: #10141a;
+  --panel-3: #151a21;
+  --line: #242932;
+  --line-soft: #1a1f27;
+  --text: #e6e7ea;
+  --muted: #9aa1ad;
+  --dim: #68717f;
+  --accent: #d7dce4;
+  --danger: #f2a0a0;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
-  color: #d9e1ea;
-  background: #080b10;
+  color: var(--text);
+  background: var(--bg);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -16,6 +27,7 @@
 
 body {
   margin: 0;
+  background: var(--bg);
 }
 
 button,
@@ -30,7 +42,7 @@ button {
 
 button:disabled {
   cursor: not-allowed;
-  opacity: 0.55;
+  opacity: 0.5;
 }
 
 .desktop-shell {
@@ -39,24 +51,25 @@ button:disabled {
   display: grid;
   grid-template-columns: 292px minmax(0, 1fr);
   overflow: hidden;
-  background: #080b10;
+  background: var(--bg);
 }
 
 .sidebar {
   min-width: 0;
-  border-right: 1px solid #1d2631;
-  background: #0d131b;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
   display: grid;
   grid-template-rows: auto auto auto 1fr auto;
-  padding: 16px;
+  padding: 18px 14px;
   gap: 14px;
 }
 
 .window-dots {
-  height: 16px;
+  height: 15px;
   display: flex;
-  gap: 8px;
+  gap: 7px;
   align-items: center;
+  padding-left: 2px;
 }
 
 .window-dots span {
@@ -82,26 +95,38 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 10px;
-  color: #f4f7fb;
+  color: var(--text);
+  padding: 0 2px;
 }
 
 .brand svg {
-  color: #8bd7c9;
+  color: var(--muted);
+}
+
+.brand strong {
+  font-size: 15px;
+  font-weight: 650;
 }
 
 .new-task {
-  height: 38px;
-  border: 1px solid #263545;
-  border-radius: 8px;
-  background: #151d28;
-  color: #eef4fa;
+  height: 40px;
+  border: 1px solid #303744;
+  border-radius: 9px;
+  background: var(--panel-2);
+  color: var(--text);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
 }
 
+.new-task:hover {
+  background: var(--panel-3);
+  border-color: #3b4452;
+}
+
 .task-list {
+  min-height: 0;
   overflow: auto;
   display: flex;
   flex-direction: column;
@@ -111,12 +136,12 @@ button:disabled {
 
 .task-item {
   border: 0;
-  border-radius: 8px;
-  padding: 10px;
+  border-radius: 9px;
+  padding: 11px 12px;
   display: grid;
-  gap: 5px;
+  gap: 6px;
   background: transparent;
-  color: #b7c2cf;
+  color: #b9bec7;
   text-align: left;
 }
 
@@ -124,20 +149,21 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: 560;
 }
 
 .task-item small {
-  color: #738295;
+  color: var(--dim);
 }
 
 .task-item:hover,
 .task-item.active {
-  background: #17212d;
-  color: #f4f7fb;
+  background: #151a22;
+  color: var(--text);
 }
 
 .sidebar-footer {
-  border-top: 1px solid #1d2631;
+  border-top: 1px solid var(--line);
   padding-top: 12px;
   display: flex;
   gap: 8px;
@@ -151,93 +177,121 @@ button:disabled {
   display: grid;
   place-items: center;
   background: transparent;
-  color: #8997aa;
+  color: var(--muted);
 }
 
 .sidebar-footer button:hover {
-  background: #17212d;
-  color: #f4f7fb;
+  background: #151a22;
+  color: var(--text);
 }
 
 .main-pane {
   min-width: 0;
   display: grid;
   grid-template-rows: auto 1fr auto;
-  background: #080b10;
+  background: var(--bg);
 }
 
 .topbar {
   min-height: 78px;
-  border-bottom: 1px solid #1d2631;
-  padding: 16px 22px;
+  border-bottom: 1px solid var(--line);
+  padding: 18px 32px 14px;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.runtime-dot {
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 11px;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  color: var(--dim);
+  background: transparent;
+  font-size: 12px;
+}
+
+.runtime-dot.online {
+  color: #b7bdc7;
+}
+
+.runtime-dot.offline {
+  color: var(--danger);
+}
+
 .topbar h1 {
   margin: 0 0 8px;
-  font-size: 19px;
+  font-size: 20px;
   line-height: 1.25;
-  color: #f4f7fb;
+  color: #f1f2f4;
   letter-spacing: 0;
+  font-weight: 680;
 }
 
 .workspace-field {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #7f8da0;
+  color: var(--dim);
   font-size: 13px;
 }
 
 .workspace-field input {
-  width: min(720px, 58vw);
+  width: min(760px, 58vw);
   border: 0;
   outline: 0;
-  color: #9facbd;
+  color: var(--muted);
   background: transparent;
 }
 
 .status-badge {
-  height: 30px;
-  border: 1px solid #273545;
+  height: 32px;
+  border: 1px solid #303744;
   border-radius: 999px;
-  padding: 0 10px;
+  padding: 0 11px;
   display: inline-flex;
   align-items: center;
   gap: 7px;
   white-space: nowrap;
-  color: #9facbd;
-  background: #111821;
+  color: var(--muted);
+  background: var(--panel-2);
   font-size: 13px;
 }
 
 .status-badge.running {
-  color: #8bd7c9;
-  border-color: #246157;
+  color: var(--text);
+  border-color: #454d5b;
 }
 
 .status-badge.failed {
-  color: #ff9b9b;
-  border-color: #5d2b32;
+  color: var(--danger);
+  border-color: #614047;
 }
 
 .transcript {
   min-height: 0;
   overflow: auto;
-  padding: 28px 22px 18px;
+  padding: 34px 32px 18px;
   display: flex;
   flex-direction: column;
-  gap: 22px;
+  gap: 24px;
 }
 
 .message {
-  width: min(820px, 100%);
+  width: min(880px, 100%);
   display: grid;
-  grid-template-columns: 74px minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 18px;
 }
 
 .message.user {
@@ -245,54 +299,93 @@ button:disabled {
 }
 
 .message-label {
-  color: #748396;
+  color: var(--dim);
   font-size: 13px;
   padding-top: 3px;
 }
 
 .message-body {
-  color: #dce5ef;
-  line-height: 1.7;
+  color: #d9dce2;
+  line-height: 1.72;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .message.user .message-body {
-  border: 1px solid #26384c;
-  border-radius: 10px;
-  padding: 10px 12px;
-  background: #121d2a;
+  border: 1px solid #303845;
+  border-radius: 11px;
+  padding: 11px 13px;
+  background: #111822;
+}
+
+.message.assistant .message-body {
+  color: #e3e5e9;
+}
+
+.message.pending .message-body {
+  color: var(--muted);
+}
+
+.typing-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 10px;
+  background: var(--muted);
+  animation: pulse 1.2s ease-in-out infinite;
+  vertical-align: middle;
+}
+
+.message.tool .message-body {
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  padding: 12px 13px;
+  background: #080b0f;
 }
 
 .message.tool .message-body,
 .message.system .message-body {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  color: #9facbd;
+  color: #a8aeb8;
   font-size: 13px;
+  line-height: 1.62;
+}
+
+.message.system .message-body {
+  color: var(--dim);
 }
 
 .composer {
-  margin: 0 22px 22px;
-  border: 1px solid #263545;
-  border-radius: 12px;
-  background: #101720;
+  margin: 0 32px 28px;
+  border: 1px solid #303744;
+  border-radius: 13px;
+  background: var(--panel-2);
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
   overflow: hidden;
-  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.28);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.2);
+}
+
+.composer:focus-within {
+  border-color: #46515f;
 }
 
 .composer textarea {
-  min-height: 92px;
-  max-height: 210px;
+  min-height: 90px;
+  max-height: 220px;
   border: 0;
   outline: 0;
   resize: vertical;
-  padding: 15px 16px;
-  color: #edf4fb;
+  padding: 16px;
+  color: var(--text);
   background: transparent;
-  line-height: 1.6;
+  line-height: 1.62;
+}
+
+.composer textarea::placeholder {
+  color: #6f7783;
 }
 
 .composer button {
@@ -300,11 +393,15 @@ button:disabled {
   height: 42px;
   margin: 0 10px 10px 0;
   border: 0;
-  border-radius: 9px;
+  border-radius: 10px;
   display: grid;
   place-items: center;
-  background: #edf4ff;
-  color: #101720;
+  background: #dce1ea;
+  color: #0b0e12;
+}
+
+.composer button:hover:not(:disabled) {
+  background: #f0f3f8;
 }
 
 .spin {
@@ -314,6 +411,18 @@ button:disabled {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.28;
+    transform: scale(0.92);
+  }
+  50% {
+    opacity: 0.95;
+    transform: scale(1);
   }
 }
 

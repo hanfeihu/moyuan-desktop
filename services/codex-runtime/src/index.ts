@@ -40,6 +40,7 @@ const mutedStderrPatterns = [
   'chatgpt authentication required to sync remote plugins',
   'invalid_grant: Invalid refresh token',
   'failed to initialize MCP client during shutdown',
+  'Reading additional input from stdin',
 ]
 
 function getModelConfig() {
@@ -163,7 +164,7 @@ function eventFromJson(taskId: string, payload: unknown): Omit<CodexTaskEvent, '
   }
 
   if (type === 'thread.started' || type === 'turn.started') {
-    return { taskId, type, role: 'system', content: type, raw: payload }
+    return { taskId, type, role: 'system', content: '', raw: payload }
   }
 
   return {
@@ -201,12 +202,6 @@ async function runCodex(record: TaskRecord, prompt: string, workspace: string) {
   ]
 
   record.task.status = 'running'
-  pushEvent(record, {
-    taskId,
-    type: 'turn.started',
-    role: 'system',
-    content: `启动内置 Codex Runtime，工作区：${workspace}`,
-  })
 
   const child = spawn(process.execPath, args, {
     cwd: workspace,
@@ -228,10 +223,10 @@ async function runCodex(record: TaskRecord, prompt: string, workspace: string) {
 
     for (const line of lines) {
       if (!line.trim()) continue
-      if (line.includes('Reading additional input from stdin')) continue
       if (mutedStderrPatterns.some((pattern) => line.includes(pattern))) continue
       try {
-        pushEvent(record, eventFromJson(taskId, JSON.parse(line)))
+        const event = eventFromJson(taskId, JSON.parse(line))
+        if (event.content) pushEvent(record, event)
       } catch {
         pushEvent(record, {
           taskId,

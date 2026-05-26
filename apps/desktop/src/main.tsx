@@ -6,6 +6,10 @@ import './styles.css'
 
 const runtimeUrl = import.meta.env.VITE_CODEX_RUNTIME_URL ?? 'http://127.0.0.1:4100'
 const defaultWorkspace = import.meta.env.VITE_DEFAULT_WORKSPACE ?? '/Users/a1/Documents/Codex/2026-05-26/codex'
+const localEmployeeId = import.meta.env.VITE_EMPLOYEE_ID ?? 'u-1001'
+
+type TranscriptItem = CodexTask['transcript'][number]
+type RuntimeState = 'checking' | 'online' | 'offline'
 
 const welcomeTask: CodexTask = {
   id: 'welcome',
@@ -21,6 +25,10 @@ const welcomeTask: CodexTask = {
   ],
 }
 
+function nowIso() {
+  return new Date().toISOString()
+}
+
 function statusText(status: CodexTask['status']) {
   return {
     queued: '排队',
@@ -29,6 +37,18 @@ function statusText(status: CodexTask['status']) {
     completed: '完成',
     failed: '失败',
   }[status]
+}
+
+function taskSortValue(task: CodexTask) {
+  return new Date(task.createdAt ?? task.transcript[0]?.timestamp ?? 0).getTime()
+}
+
+function normalizeTask(task: CodexTask): CodexTask {
+  return {
+    ...task,
+    title: task.title?.trim() || task.transcript.find((item) => item.role === 'user')?.content.slice(0, 36) || '新任务',
+    transcript: task.transcript ?? [],
+  }
 }
 
 function eventToTranscript(event: CodexTaskEvent) {
@@ -40,9 +60,92 @@ function eventToTranscript(event: CodexTaskEvent) {
 }
 
 function mergeTask(tasks: CodexTask[], next: CodexTask) {
-  const exists = tasks.some((task) => task.id === next.id)
-  if (!exists) return [next, ...tasks.filter((task) => task.id !== 'welcome')]
-  return tasks.map((task) => (task.id === next.id ? next : task))
+  const normalized = normalizeTask(next)
+  const withoutWelcome = tasks.filter((task) => task.id !== 'welcome')
+  const exists = withoutWelcome.some((task) => task.id === normalized.id)
+  const merged = exists
+    ? withoutWelcome.map((task) => (task.id === normalized.id ? normalized : task))
+    : [normalized, ...withoutWelcome]
+
+  return merged.sort((a, b) => taskSortValue(b) - taskSortValue(a))
+}
+
+function shouldShowMessage(item: TranscriptItem) {
+  if (item.role !== 'system') return true
+  return (
+    item.content.includes('Codex Runtime 没连上') ||
+    item.content.includes('任务创建失败') ||
+    item.content.includes('发送失败') ||
+    item.content.includes('退出') ||
+    item.content.includes('失败') ||
+    item.content.includes('错误') ||
+    item.content.includes('error')
+  )
+}
+
+function messageLabel(role: TranscriptItem['role']) {
+  return {
+    assistant: 'Codex',
+    tool: '命令',
+    system: '系统',
+    user: '你',
+  }[role]
+}
+
+function eventStatus(event: CodexTaskEvent, fallback: CodexTask['status']): CodexTask['status'] {
+  if (event.type === 'process.exit') return event.content.includes('完成') ? 'completed' : 'failed'
+  if (event.type === 'turn.failed' || event.type === 'error') return 'failed'
+  if (event.type === 'turn.completed') return 'completed'
+  if (event.type === 'turn.started' || event.type === 'thread.started' || event.type === 'tool') return 'running'
+  return fallback
+}
+
+function mergeEventIntoTask(task: CodexTask, event: CodexTaskEvent): CodexTask {
+  const seen = task.transcript.some((item) => item.timestamp === event.timestamp && item.content === event.content && item.role === event.role)
+  const transcript = seen ? task.transcript : [...task.transcript, eventToTranscript(event)]
+  return { ...task, status: eventStatus(event, task.status), transcript }
+}
+
+function hasVisibleAssistantReply(task: CodexTask) {
+  return task.transcript.some((item) => item.role === 'assistant' && item.content.trim())
+}
+
+function buildPendingTask(promptText: string, workspacePath: string): CodexTask {
+  const timestamp = nowIso()
+  return {
+    id: `pending-${Date.now()}`,
+    title: promptText.slice(0, 36),
+    status: 'queued',
+    workspace: workspacePath,
+    createdAt: timestamp,
+    exitCode: null,
+    transcript: [
+      {
+        role: 'user',
+        content: promptText,
+        timestamp,
+      },
+    ],
+  }
+}
+
+function buildLocalErrorTask(error: unknown, workspacePath: string): CodexTask {
+  const timestamp = nowIso()
+  return {
+    id: `error-${Date.now()}`,
+    title: '发送失败',
+    status: 'failed',
+    workspace: workspacePath,
+    createdAt: timestamp,
+    exitCode: null,
+    transcript: [
+      {
+        role: 'system',
+        content: `发送失败：${error instanceof Error ? error.message : String(error)}`,
+        timestamp,
+      },
+    ],
+  }
 }
 
 function DesktopApp() {
@@ -51,11 +154,19 @@ function DesktopApp() {
   const [prompt, setPrompt] = useState('查看当前目录内容，判断这个项目是什么技术栈，并给我一个简短说明。')
   const [workspace, setWorkspace] = useState(defaultWorkspace)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [runtimeState, setRuntimeState] = useState<RuntimeState>('checking')
   const transcriptRef = useRef<HTMLDivElement | null>(null)
 
   const activeTask = useMemo(() => tasks.find((task) => task.id === activeTaskId) ?? tasks[0], [activeTaskId, tasks])
 
   useEffect(() => {
+    fetch(`${runtimeUrl}/health`)
+      .then((response) => {
+        if (!response.ok) throw new Error('offline')
+        setRuntimeState('online')
+      })
+      .catch(() => setRuntimeState('offline'))
+
     fetch(`${runtimeUrl}/api/codex/tasks`)
       .then((response) => response.json())
       .then((payload: { data?: CodexTask[] }) => {
@@ -94,22 +205,7 @@ function DesktopApp() {
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as CodexTaskEvent
       setTasks((current) =>
-        current.map((task) => {
-          if (task.id !== event.taskId) return task
-          const seen = task.transcript.some((item) => item.timestamp === event.timestamp && item.content === event.content)
-          const transcript = seen ? task.transcript : [...task.transcript, eventToTranscript(event)]
-          const status =
-            event.type === 'process.exit'
-              ? event.content.includes('完成')
-                ? 'completed'
-                : 'failed'
-              : event.type === 'turn.failed'
-                ? 'failed'
-                : event.type === 'turn.started'
-                  ? 'running'
-                  : task.status
-          return { ...task, status, transcript }
-        }),
+        current.map((task) => (task.id === event.taskId ? mergeEventIntoTask(task, event) : task)),
       )
     }
 
@@ -136,6 +232,11 @@ function DesktopApp() {
     if (!prompt.trim() || isSubmitting) return
 
     setIsSubmitting(true)
+    const pendingTask = buildPendingTask(prompt.trim(), workspace)
+    setTasks((current) => mergeTask(current, pendingTask))
+    setActiveTaskId(pendingTask.id)
+    setPrompt('')
+
     try {
       const response = await fetch(`${runtimeUrl}/api/codex/tasks`, {
         method: 'POST',
@@ -143,30 +244,17 @@ function DesktopApp() {
         body: JSON.stringify({
           employeeId: 'u-1001',
           workspace,
-          prompt,
+          prompt: pendingTask.transcript[0].content,
         }),
       })
       const payload = (await response.json()) as { data?: CodexTask; error?: string }
       if (!payload.data) throw new Error(payload.error ?? '任务创建失败')
-      setTasks((current) => mergeTask(current, payload.data!))
+      setTasks((current) => mergeTask(current.filter((task) => task.id !== pendingTask.id), payload.data!))
       setActiveTaskId(payload.data.id)
-      setPrompt('')
     } catch (error) {
-      setTasks((current) =>
-        mergeTask(current, {
-          ...welcomeTask,
-          id: `error-${Date.now()}`,
-          title: '发送失败',
-          status: 'failed',
-          transcript: [
-            {
-              role: 'system',
-              content: error instanceof Error ? error.message : String(error),
-              timestamp: new Date().toISOString(),
-            },
-          ],
-        }),
-      )
+      const errorTask = buildLocalErrorTask(error, workspace)
+      setTasks((current) => mergeTask(current.filter((task) => task.id !== pendingTask.id), errorTask))
+      setActiveTaskId(errorTask.id)
     } finally {
       setIsSubmitting(false)
     }
@@ -222,14 +310,17 @@ function DesktopApp() {
               <input value={workspace} onChange={(event) => setWorkspace(event.target.value)} />
             </label>
           </div>
+          <div className="topbar-actions">
+            <div className={`runtime-dot ${runtimeState}`}>{runtimeState === 'online' ? 'Runtime online' : runtimeState === 'checking' ? 'Checking runtime' : 'Runtime offline'}</div>
           <div className={`status-badge ${activeTask.status}`}>
             {activeTask.status === 'running' ? <Loader2 size={15} className="spin" /> : <Check size={15} />}
             {statusText(activeTask.status)}
           </div>
+          </div>
         </header>
 
         <div className="transcript" ref={transcriptRef}>
-          {activeTask.transcript.map((item, index) => (
+          {activeTask.transcript.filter(shouldShowMessage).map((item, index) => (
             <article className={`message ${item.role}`} key={`${item.timestamp}-${index}`}>
               <div className="message-label">
                 {item.role === 'assistant' ? 'Codex' : item.role === 'tool' ? '命令' : item.role === 'system' ? '系统' : '你'}
@@ -237,6 +328,15 @@ function DesktopApp() {
               <div className="message-body">{item.content}</div>
             </article>
           ))}
+          {(activeTask.status === 'queued' || (activeTask.status === 'running' && !hasVisibleAssistantReply(activeTask))) && (
+            <article className="message assistant pending">
+              <div className="message-label">Codex</div>
+              <div className="message-body">
+                <span className="typing-dot" />
+                正在处理...
+              </div>
+            </article>
+          )}
         </div>
 
         <footer className="composer">
