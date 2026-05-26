@@ -1,0 +1,70 @@
+body {
+  margin: 0;
+  background: #f3f6fa;
+}
+
+.admin-shell {
+  min-height: 100vh;
+}
+
+.admin-sider {
+  background: #09111f;
+}
+
+.admin-brand {
+  height: 72px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 22px;
+  color: #fff;
+}
+
+.admin-brand svg {
+  font-size: 24px;
+  color: #69b1ff;
+}
+
+.admin-brand strong,
+.admin-brand span {
+  display: block;
+}
+
+.admin-brand span {
+  color: #8c9bad;
+  font-size: 12px;
+}
+
+.admin-header {
+  height: 64px;
+  padding: 0 24px;
+  background: #fff;
+  border-bottom: 1px solid #e7edf3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.admin-content {
+  padding: 24px;
+}
+
+.section-card {
+  margin-top: 16px;
+}
+
+.two-columns {
+  margin-top: 16px;
+}
+
+.fill-card {
+  flex: 1 1 auto;
+}
+
+.policy-card {
+  width: 360px;
+}
+
+.ant-pro-page-container-children-container {
+  padding-inline: 0;
+}

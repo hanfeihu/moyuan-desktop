@@ -1,0 +1,21 @@
+{
+  "name": "enterprise-ai-workbench",
+  "version": "0.2.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "services/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:admin": "npm run dev -w @eaw/admin",
+    "dev:desktop": "npm run dev -w @eaw/desktop",
+    "dev:api": "npm run dev -w @eaw/api",
+    "dev:codex": "npm run dev -w @eaw/codex-runtime",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

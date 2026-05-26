@@ -1,25 +1,31 @@
 services:
-  web:
-    build:
-      context: ./web
-    ports:
-      - "18080:80"
-    depends_on:
-      - server
-    restart: unless-stopped
-
-  server:
-    build:
-      context: ./server
+  api:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run build -w @eaw/api && npm run start -w @eaw/api"
+    volumes:
+      - .:/app
     environment:
-      PORT: 4000
-      HOST: 0.0.0.0
-      DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:5432/enterprise_ai
-      REDIS_URL: redis://host.docker.internal:6379
-      MILVUS_ADDRESS: host.docker.internal:19530
-      MINIO_ENDPOINT: host.docker.internal:10900
+      API_PORT: 4000
+      CODEX_RUNTIME_URL: http://codex-runtime:4100
+      AI_BASE_URL: ${AI_BASE_URL:-https://ai.blector.com/v1}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-gpt-5-codex}
     ports:
       - "14000:4000"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  codex-runtime:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run build -w @eaw/codex-runtime && npm run start -w @eaw/codex-runtime"
+    volumes:
+      - .:/app
+    environment:
+      CODEX_RUNTIME_PORT: 4100
+      AI_BASE_URL: ${AI_BASE_URL:-https://ai.blector.com/v1}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-gpt-5-codex}
+    ports:
+      - "14100:4100"
     restart: unless-stopped
