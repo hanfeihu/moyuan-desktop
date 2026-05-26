@@ -109,6 +109,22 @@ function eventFromJson(taskId: string, payload: unknown): Omit<CodexTaskEvent, '
     }
   }
 
+  if ((type === 'item.started' || type === 'item.completed') && item?.type === 'command_execution') {
+    const command = typeof item.command === 'string' ? item.command : ''
+    const output = typeof item.aggregated_output === 'string' ? item.aggregated_output.trim() : ''
+    const status = typeof item.status === 'string' ? item.status : type === 'item.started' ? 'in_progress' : 'completed'
+    const exitCode = typeof item.exit_code === 'number' ? `\nexit ${item.exit_code}` : ''
+    const body = output ? `$ ${command}\n${output}${exitCode}` : `$ ${command}\n${status}`
+
+    return {
+      taskId,
+      type: 'tool',
+      role: 'tool',
+      content: body,
+      raw: payload,
+    }
+  }
+
   if (type.includes('error') || type === 'turn.failed') {
     return {
       taskId,
@@ -281,6 +297,17 @@ app.post('/api/codex/tasks', async (request, reply) => {
 app.get('/api/codex/tasks', async () => ({
   data: Array.from(records.values()).map((record) => record.task),
 }))
+
+app.get('/api/codex/tasks/:taskId', async (request, reply) => {
+  const params = z.object({ taskId: z.string() }).parse(request.params)
+  const record = records.get(params.taskId)
+
+  if (!record) {
+    return reply.status(404).send({ error: '任务不存在' })
+  }
+
+  return { data: record.task }
+})
 
 app.get('/api/codex/tasks/:taskId/events', async (request, reply) => {
   const params = z.object({ taskId: z.string() }).parse(request.params)

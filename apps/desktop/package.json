@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "electron": "electron electron/main.cjs",
     "build": "tsc -b && vite build",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
@@ -21,6 +22,7 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
+    "electron": "^39.2.6",
     "vite": "^8.0.12"
   }
 }

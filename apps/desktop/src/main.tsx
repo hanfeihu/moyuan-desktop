@@ -1,20 +1,5 @@
-import {
-  Bell,
-  Bot,
-  CheckCircle2,
-  ChevronRight,
-  FileText,
-  FolderOpen,
-  KeyRound,
-  MessageSquareText,
-  Play,
-  Search,
-  ShieldCheck,
-  Sparkles,
-  TerminalSquare,
-  UserRound,
-} from 'lucide-react'
-import React, { useEffect, useMemo, useState } from 'react'
+import { Bot, Check, FolderOpen, Loader2, Plus, Send, Settings, Terminal, UserRound } from 'lucide-react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
 import './styles.css'
@@ -22,28 +7,26 @@ import './styles.css'
 const runtimeUrl = import.meta.env.VITE_CODEX_RUNTIME_URL ?? 'http://127.0.0.1:4100'
 const defaultWorkspace = import.meta.env.VITE_DEFAULT_WORKSPACE ?? '/Users/a1/Documents/Codex/2026-05-26/codex'
 
-const starterTask: CodexTask = {
+const welcomeTask: CodexTask = {
   id: 'welcome',
-  title: '墨渊 Desktop',
+  title: '新任务',
   status: 'completed',
   workspace: defaultWorkspace,
   transcript: [
     {
       role: 'assistant',
-      content: '我是内置 Codex Runtime 的员工桌面端。输入任务后，我会在本机工作区执行，并把过程实时显示在这里。',
+      content: '说一句你想让我做的事。我会使用内置 Codex 在本地工作区执行，可以读文件、运行命令、修改代码、跑测试。',
       timestamp: new Date().toISOString(),
     },
   ],
 }
 
-const workspaces = ['我的工作区', '销售一组', '华东客户项目', '日报周报', '企业知识库']
-
 function statusText(status: CodexTask['status']) {
   return {
-    queued: '排队中',
-    running: '执行中',
+    queued: '排队',
+    running: '运行中',
     needs_approval: '待确认',
-    completed: '已完成',
+    completed: '完成',
     failed: '失败',
   }[status]
 }
@@ -56,46 +39,56 @@ function eventToTranscript(event: CodexTaskEvent) {
   }
 }
 
+function mergeTask(tasks: CodexTask[], next: CodexTask) {
+  const exists = tasks.some((task) => task.id === next.id)
+  if (!exists) return [next, ...tasks.filter((task) => task.id !== 'welcome')]
+  return tasks.map((task) => (task.id === next.id ? next : task))
+}
+
 function DesktopApp() {
-  const [tasks, setTasks] = useState<CodexTask[]>([starterTask])
-  const [activeTaskId, setActiveTaskId] = useState(starterTask.id)
+  const [tasks, setTasks] = useState<CodexTask[]>([welcomeTask])
+  const [activeTaskId, setActiveTaskId] = useState(welcomeTask.id)
   const [prompt, setPrompt] = useState('查看当前目录内容，判断这个项目是什么技术栈，并给我一个简短说明。')
   const [workspace, setWorkspace] = useState(defaultWorkspace)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const transcriptRef = useRef<HTMLDivElement | null>(null)
 
-  const activeTask = useMemo(() => {
-    return tasks.find((task) => task.id === activeTaskId) ?? tasks[0]
-  }, [activeTaskId, tasks])
+  const activeTask = useMemo(() => tasks.find((task) => task.id === activeTaskId) ?? tasks[0], [activeTaskId, tasks])
 
   useEffect(() => {
     fetch(`${runtimeUrl}/api/codex/tasks`)
       .then((response) => response.json())
       .then((payload: { data?: CodexTask[] }) => {
-        if (payload.data?.length) {
-          setTasks([starterTask, ...payload.data])
-        }
+        if (payload.data?.length) setTasks([...payload.data, welcomeTask])
       })
       .catch(() => {
-        setTasks((current) => [
+        setTasks([
           {
-            ...starterTask,
+            ...welcomeTask,
             transcript: [
-              ...starterTask.transcript,
+              ...welcomeTask.transcript,
               {
                 role: 'system',
-                content: `无法连接 Codex Runtime：${runtimeUrl}`,
+                content: `Codex Runtime 没连上：${runtimeUrl}`,
                 timestamp: new Date().toISOString(),
               },
             ],
           },
-          ...current.filter((task) => task.id !== starterTask.id),
         ])
       })
   }, [])
 
   useEffect(() => {
+    transcriptRef.current?.scrollTo({
+      top: transcriptRef.current.scrollHeight,
+      behavior: 'smooth',
+    })
+  }, [activeTask?.transcript.length])
+
+  useEffect(() => {
     if (!activeTask || activeTask.id === 'welcome') return
 
+    let pollTimer: number | undefined
     const source = new EventSource(`${runtimeUrl}/api/codex/tasks/${activeTask.id}/events`)
 
     source.onmessage = (message) => {
@@ -103,9 +96,9 @@ function DesktopApp() {
       setTasks((current) =>
         current.map((task) => {
           if (task.id !== event.taskId) return task
-
-          const nextTranscript = [...task.transcript, eventToTranscript(event)]
-          const nextStatus =
+          const seen = task.transcript.some((item) => item.timestamp === event.timestamp && item.content === event.content)
+          const transcript = seen ? task.transcript : [...task.transcript, eventToTranscript(event)]
+          const status =
             event.type === 'process.exit'
               ? event.content.includes('完成')
                 ? 'completed'
@@ -115,12 +108,7 @@ function DesktopApp() {
                 : event.type === 'turn.started'
                   ? 'running'
                   : task.status
-
-          return {
-            ...task,
-            status: nextStatus,
-            transcript: nextTranscript,
-          }
+          return { ...task, status, transcript }
         }),
       )
     }
@@ -129,7 +117,19 @@ function DesktopApp() {
       source.close()
     }
 
-    return () => source.close()
+    pollTimer = window.setInterval(() => {
+      fetch(`${runtimeUrl}/api/codex/tasks/${activeTask.id}`)
+        .then((response) => response.json())
+        .then((payload: { data?: CodexTask }) => {
+          if (payload.data) setTasks((current) => mergeTask(current, payload.data!))
+        })
+        .catch(() => undefined)
+    }, 1200)
+
+    return () => {
+      source.close()
+      if (pollTimer) window.clearInterval(pollTimer)
+    }
   }, [activeTask?.id])
 
   async function submitTask() {
@@ -146,11 +146,27 @@ function DesktopApp() {
           prompt,
         }),
       })
-      const payload = (await response.json()) as { data: CodexTask }
-
-      setTasks((current) => [payload.data, ...current.filter((task) => task.id !== 'welcome')])
+      const payload = (await response.json()) as { data?: CodexTask; error?: string }
+      if (!payload.data) throw new Error(payload.error ?? '任务创建失败')
+      setTasks((current) => mergeTask(current, payload.data!))
       setActiveTaskId(payload.data.id)
       setPrompt('')
+    } catch (error) {
+      setTasks((current) =>
+        mergeTask(current, {
+          ...welcomeTask,
+          id: `error-${Date.now()}`,
+          title: '发送失败',
+          status: 'failed',
+          transcript: [
+            {
+              role: 'system',
+              content: error instanceof Error ? error.message : String(error),
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        }),
+      )
     } finally {
       setIsSubmitting(false)
     }
@@ -158,52 +174,24 @@ function DesktopApp() {
 
   return (
     <main className="desktop-shell">
-      <aside className="rail">
-        <div className="traffic-lights" aria-hidden="true">
+      <aside className="sidebar">
+        <div className="window-dots" aria-hidden="true">
           <span />
           <span />
           <span />
         </div>
-        <button className="rail-action active" title="AI 工作区">
-          <Bot size={20} />
-        </button>
-        <button className="rail-action" title="文件">
-          <FolderOpen size={20} />
-        </button>
-        <button className="rail-action" title="消息">
-          <MessageSquareText size={20} />
-        </button>
-        <button className="rail-action" title="知识库">
-          <FileText size={20} />
-        </button>
-        <button className="rail-action bottom" title="账号">
-          <UserRound size={20} />
-        </button>
-      </aside>
-
-      <aside className="workspace-list">
-        <div className="desktop-brand">
-          <Sparkles size={18} />
-          <strong>墨渊 Desktop</strong>
+        <div className="brand">
+          <Bot size={18} />
+          <strong>墨渊</strong>
         </div>
-        <label className="search-box">
-          <Search size={16} />
-          <input placeholder="搜索工作区或任务" />
-        </label>
-        <div className="workspace-section">
-          <span className="caption">工作区</span>
-          {workspaces.map((name, index) => (
-            <button className={index === 0 ? 'workspace-item active' : 'workspace-item'} key={name}>
-              <span>{name}</span>
-              <ChevronRight size={16} />
-            </button>
-          ))}
-        </div>
-        <div className="workspace-section">
-          <span className="caption">Codex 任务</span>
+        <button className="new-task" onClick={() => setActiveTaskId('welcome')}>
+          <Plus size={16} />
+          新任务
+        </button>
+        <div className="task-list">
           {tasks.map((task) => (
             <button
-              className={task.id === activeTask.id ? 'task-pill active' : 'task-pill'}
+              className={task.id === activeTask.id ? 'task-item active' : 'task-item'}
               key={task.id}
               onClick={() => setActiveTaskId(task.id)}
             >
@@ -212,103 +200,62 @@ function DesktopApp() {
             </button>
           ))}
         </div>
+        <div className="sidebar-footer">
+          <button title="工作区">
+            <FolderOpen size={17} />
+          </button>
+          <button title="设置">
+            <Settings size={17} />
+          </button>
+          <button title="账号">
+            <UserRound size={17} />
+          </button>
+        </div>
       </aside>
 
-      <section className="conversation">
-        <header className="conversation-header">
+      <section className="main-pane">
+        <header className="topbar">
           <div>
-            <span className="caption">当前任务</span>
             <h1>{activeTask.title}</h1>
-            <p>{activeTask.workspace}</p>
+            <label className="workspace-field">
+              <Terminal size={15} />
+              <input value={workspace} onChange={(event) => setWorkspace(event.target.value)} />
+            </label>
           </div>
-          <div className="header-actions">
-            <button className="icon-button" title="通知">
-              <Bell size={18} />
-            </button>
-            <button className="run-button" disabled={isSubmitting} onClick={submitTask}>
-              <Play size={16} />
-              {isSubmitting ? '启动中' : '运行'}
-            </button>
+          <div className={`status-badge ${activeTask.status}`}>
+            {activeTask.status === 'running' ? <Loader2 size={15} className="spin" /> : <Check size={15} />}
+            {statusText(activeTask.status)}
           </div>
         </header>
 
-        <div className="transcript">
+        <div className="transcript" ref={transcriptRef}>
           {activeTask.transcript.map((item, index) => (
             <article className={`message ${item.role}`} key={`${item.timestamp}-${index}`}>
-              <div className="message-meta">
-                <span>{item.role === 'assistant' ? 'Codex' : item.role === 'tool' ? '工具' : item.role === 'system' ? '系统' : '你'}</span>
-                <small>{new Date(item.timestamp).toLocaleTimeString()}</small>
+              <div className="message-label">
+                {item.role === 'assistant' ? 'Codex' : item.role === 'tool' ? '命令' : item.role === 'system' ? '系统' : '你'}
               </div>
-              <p>{item.content}</p>
+              <div className="message-body">{item.content}</div>
             </article>
           ))}
         </div>
 
         <footer className="composer">
-          <label className="workspace-input">
-            <span>工作目录</span>
-            <input value={workspace} onChange={(event) => setWorkspace(event.target.value)} />
-          </label>
-          <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} />
-          <div className="composer-footer">
-            <span>内置 Codex · 企业中转 · 本地工作区</span>
-            <button disabled={isSubmitting} onClick={submitTask}>
-              <Sparkles size={16} />
-              交给 Codex
-            </button>
-          </div>
+          <textarea
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault()
+                void submitTask()
+              }
+            }}
+            placeholder="让 Codex 做点什么..."
+          />
+          <button disabled={isSubmitting || !prompt.trim()} onClick={submitTask}>
+            {isSubmitting ? <Loader2 size={17} className="spin" /> : <Send size={17} />}
+          </button>
         </footer>
       </section>
-
-      <aside className="inspector">
-        <section className="inspector-card emphasis">
-          <div className="inspector-title">
-            <ShieldCheck size={18} />
-            <strong>企业策略</strong>
-          </div>
-          <div className="policy-line">
-            <span>模型中转</span>
-            <strong>ai.blector.com</strong>
-          </div>
-          <div className="policy-line">
-            <span>执行沙箱</span>
-            <strong>工作区可写</strong>
-          </div>
-          <div className="policy-line">
-            <span>审计</span>
-            <strong>全量开启</strong>
-          </div>
-        </section>
-
-        <section className="inspector-card approval">
-          <div className="inspector-title">
-            <KeyRound size={18} />
-            <strong>开箱即用</strong>
-          </div>
-          <p>Codex 二进制随墨渊 Desktop 一起安装，员工不需要单独安装或配置 Codex。</p>
-        </section>
-
-        <section className="inspector-card">
-          <div className="inspector-title">
-            <TerminalSquare size={18} />
-            <strong>Runtime</strong>
-          </div>
-          <ul className="runtime-list">
-            <li>
-              <CheckCircle2 size={15} />
-              @openai/codex 随包内置
-            </li>
-            <li>
-              <CheckCircle2 size={15} />
-              事件流实时回传桌面端
-            </li>
-            <li>
-              <CheckCircle2 size={15} />
-              配置目录由企业托管
-            </li>
-          </ul>
-        </section>
-      </aside>
     </main>
   )
 }
