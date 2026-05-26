@@ -1,9 +1,10 @@
 import cors from '@fastify/cors'
-import { spawn } from 'node:child_process'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { execFile, spawn } from 'node:child_process'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
+import { promisify } from 'node:util'
 import 'dotenv/config'
 import Fastify from 'fastify'
 import { z } from 'zod'
@@ -11,6 +12,7 @@ import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
 
 const app = Fastify({ logger: true })
 const require = createRequire(import.meta.url)
+const execFileAsync = promisify(execFile)
 
 await app.register(cors, { origin: true })
 
@@ -24,6 +26,8 @@ const taskSchema = z.object({
   prompt: z.string().min(1),
   workspace: z.string().default(process.cwd()),
   employeeId: z.string().min(1),
+  parentTaskId: z.string().optional(),
+  sessionId: z.string().optional(),
 })
 
 const approvalSchema = z.object({
@@ -32,7 +36,15 @@ const approvalSchema = z.object({
   reason: z.string().optional(),
 })
 
+const forkSchema = z.object({
+  prompt: z.string().optional(),
+})
+
 const records = new Map<string, TaskRecord>()
+const runtimeRoot = process.env.MOYUAN_RUNTIME_HOME ?? path.join(tmpdir(), 'moyuan-runtime')
+const storePath = path.join(runtimeRoot, 'sessions.json')
+const memoryPath = path.join(runtimeRoot, 'workspace-memory.json')
+const workspaceMemory = new Map<string, string>()
 const mutedStderrPatterns = [
   'failed to warm featured plugin ids cache',
   'startup remote plugin sync failed',
@@ -41,6 +53,8 @@ const mutedStderrPatterns = [
   'invalid_grant: Invalid refresh token',
   'failed to initialize MCP client during shutdown',
   'Reading additional input from stdin',
+  'stream disconnected - retrying sampling request',
+  'Reconnecting...',
 ]
 
 function getModelConfig() {
@@ -58,9 +72,55 @@ function resolveCodexBin() {
   return require.resolve('@openai/codex/bin/codex.js')
 }
 
-async function createCodexHome(taskId: string) {
+async function saveStore() {
+  await mkdir(runtimeRoot, { recursive: true })
+  await writeFile(
+    storePath,
+    JSON.stringify({ tasks: Array.from(records.values()).map((record) => record.task) }, null, 2),
+  )
+}
+
+async function saveMemory() {
+  await mkdir(runtimeRoot, { recursive: true })
+  await writeFile(memoryPath, JSON.stringify(Object.fromEntries(workspaceMemory.entries()), null, 2))
+}
+
+async function loadStore() {
+  await mkdir(runtimeRoot, { recursive: true })
+
+  try {
+    const raw = await readFile(storePath, 'utf8')
+    const saved = JSON.parse(raw) as { tasks?: CodexTask[] }
+    for (const task of saved.tasks ?? []) {
+      records.set(task.id, { task, events: [], subscribers: new Set() })
+    }
+  } catch {
+    await saveStore()
+  }
+
+  try {
+    const raw = await readFile(memoryPath, 'utf8')
+    const saved = JSON.parse(raw) as Record<string, string>
+    for (const [workspace, memory] of Object.entries(saved)) {
+      workspaceMemory.set(workspace, memory)
+    }
+  } catch {
+    await saveMemory()
+  }
+}
+
+async function getGitDiff(workspace: string) {
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', workspace, 'diff', '--stat'], { timeout: 4000 })
+    return stdout.trim()
+  } catch {
+    return ''
+  }
+}
+
+async function createCodexHome() {
   const config = getModelConfig()
-  const codexHome = path.join(process.env.MOYUAN_CODEX_HOME ?? path.join(tmpdir(), 'moyuan-codex'), taskId)
+  const codexHome = process.env.MOYUAN_CODEX_HOME ?? path.join(tmpdir(), 'moyuan-codex', 'default')
 
   await mkdir(codexHome, { recursive: true })
   await writeFile(
@@ -95,12 +155,29 @@ function pushEvent(record: TaskRecord, event: Omit<CodexTaskEvent, 'id' | 'times
     timestamp: new Date().toISOString(),
   }
 
+  if (next.type === 'thread.started' && next.raw && typeof next.raw === 'object') {
+    const threadId = (next.raw as { thread_id?: unknown }).thread_id
+    if (typeof threadId === 'string') {
+      record.task.sessionId = threadId
+    }
+  }
+
+  if (!next.content && next.type !== 'thread.started') return
+
   record.events.push(next)
-  record.task.transcript.push({
-    role: next.role,
-    content: next.content,
-    timestamp: next.timestamp,
-  })
+  if (next.content) {
+    record.task.transcript.push({
+      role: next.role,
+      content: next.content,
+      timestamp: next.timestamp,
+    })
+  }
+
+  record.task.updatedAt = next.timestamp
+  if (next.role === 'tool' && next.content.startsWith('$ ')) {
+    record.task.commandHistory = [...(record.task.commandHistory ?? []), next.content].slice(-80)
+  }
+  void saveStore()
 
   for (const subscriber of record.subscribers) {
     subscriber(next)
@@ -186,30 +263,39 @@ function eventFromJson(taskId: string, payload: unknown): Omit<CodexTaskEvent, '
   }
 }
 
-async function runCodex(record: TaskRecord, prompt: string, workspace: string) {
+async function runCodex(record: TaskRecord, prompt: string, workspace: string, sessionId?: string) {
   const taskId = record.task.id
-  const codexHome = await createCodexHome(taskId)
+  const codexHome = await createCodexHome()
   const codexBin = resolveCodexBin()
   const config = getModelConfig()
-  const args = [
-    codexBin,
-    'exec',
+  const commonArgs = [
     '--json',
     '--skip-git-repo-check',
     '--disable',
     'remote_plugin',
     '--disable',
     'plugin_sharing',
-    '--sandbox',
-    'workspace-write',
     '-c',
     'approval_policy="never"',
+    '-c',
+    'sandbox_mode="workspace-write"',
     '-m',
     config.defaultModel,
-    '-C',
-    workspace,
-    prompt,
   ]
+  const memory = workspaceMemory.get(workspace)
+  const commandContext = record.task.commandHistory?.slice(-8).join('\n\n')
+  const diffSummary = await getGitDiff(workspace)
+  const contextBlock = [
+    memory ? `工作区记忆:\n${memory}` : '',
+    commandContext ? `最近命令历史:\n${commandContext}` : '',
+    diffSummary ? `当前文件变更摘要:\n${diffSummary}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+  const promptWithContext = contextBlock ? `${contextBlock}\n\n用户本轮请求:\n${prompt}` : prompt
+  const args = sessionId
+    ? [codexBin, 'exec', 'resume', ...commonArgs, sessionId, promptWithContext]
+    : [codexBin, 'exec', ...commonArgs, '--sandbox', 'workspace-write', '-C', workspace, promptWithContext]
 
   record.task.status = 'running'
 
@@ -236,7 +322,7 @@ async function runCodex(record: TaskRecord, prompt: string, workspace: string) {
       if (mutedStderrPatterns.some((pattern) => line.includes(pattern))) continue
       try {
         const event = eventFromJson(taskId, JSON.parse(line))
-        if (event.content) pushEvent(record, event)
+        pushEvent(record, event)
       } catch {
         pushEvent(record, {
           taskId,
@@ -263,6 +349,18 @@ async function runCodex(record: TaskRecord, prompt: string, workspace: string) {
   child.on('exit', (code) => {
     record.task.exitCode = code
     record.task.status = code === 0 ? 'completed' : 'failed'
+    record.task.updatedAt = new Date().toISOString()
+    void getGitDiff(record.task.workspace).then((diff) => {
+      record.task.diffSummary = diff
+      if (diff) {
+        workspaceMemory.set(
+          record.task.workspace,
+          [`最近会话: ${record.task.title}`, `Codex session: ${record.task.sessionId ?? 'unknown'}`, `最近 diff:\n${diff}`].join('\n'),
+        )
+        void saveMemory()
+      }
+      void saveStore()
+    })
     pushEvent(record, {
       taskId,
       type: 'process.exit',
@@ -280,6 +378,8 @@ app.get('/health', async () => ({
   model: getModelConfig(),
 }))
 
+await loadStore()
+
 app.post('/api/codex/tasks', async (request, reply) => {
   const parsed = taskSchema.safeParse(request.body)
 
@@ -288,25 +388,35 @@ app.post('/api/codex/tasks', async (request, reply) => {
   }
 
   const now = new Date().toISOString()
-  const task: CodexTask = {
-    id: `codex-${Date.now()}`,
-    title: parsed.data.prompt.slice(0, 36),
-    status: 'queued',
-    workspace: parsed.data.workspace,
-    createdAt: now,
-    exitCode: null,
-    transcript: [
-      {
-        role: 'user',
-        content: parsed.data.prompt,
-        timestamp: now,
-      },
-    ],
-  }
+  const existingRecord = parsed.data.parentTaskId ? records.get(parsed.data.parentTaskId) : undefined
+  const task: CodexTask =
+    existingRecord?.task ?? {
+      id: `codex-${Date.now()}`,
+      title: parsed.data.prompt.slice(0, 36),
+      status: 'queued',
+      workspace: parsed.data.workspace,
+      sessionId: parsed.data.sessionId,
+      createdAt: now,
+      updatedAt: now,
+      exitCode: null,
+      transcript: [],
+    }
 
-  const record: TaskRecord = { task, events: [], subscribers: new Set() }
+  task.status = 'queued'
+  task.workspace = parsed.data.workspace
+  task.workspaceMemory = workspaceMemory.get(parsed.data.workspace)
+  task.diffSummary = await getGitDiff(parsed.data.workspace)
+  task.updatedAt = now
+  task.transcript.push({
+    role: 'user',
+    content: parsed.data.prompt,
+    timestamp: now,
+  })
+
+  const record: TaskRecord = existingRecord ?? { task, events: [], subscribers: new Set() }
   records.set(task.id, record)
-  void runCodex(record, parsed.data.prompt, parsed.data.workspace).catch((error: unknown) => {
+  await saveStore()
+  void runCodex(record, parsed.data.prompt, parsed.data.workspace, parsed.data.sessionId ?? task.sessionId).catch((error: unknown) => {
     task.status = 'failed'
     pushEvent(record, {
       taskId: task.id,
@@ -332,6 +442,43 @@ app.get('/api/codex/tasks/:taskId', async (request, reply) => {
   }
 
   return { data: record.task }
+})
+
+app.post('/api/codex/tasks/:taskId/fork', async (request, reply) => {
+  const params = z.object({ taskId: z.string() }).parse(request.params)
+  const parsed = forkSchema.safeParse(request.body ?? {})
+
+  if (!parsed.success) {
+    return reply.status(400).send({ error: 'fork 参数不完整', detail: parsed.error.flatten() })
+  }
+
+  const source = records.get(params.taskId)
+  if (!source) {
+    return reply.status(404).send({ error: '任务不存在' })
+  }
+
+  const now = new Date().toISOString()
+  const forked: CodexTask = {
+    ...source.task,
+    id: `codex-${Date.now()}`,
+    title: `${source.task.title} fork`,
+    status: 'queued',
+    forkedFrom: source.task.id,
+    createdAt: now,
+    updatedAt: now,
+    transcript: [...source.task.transcript],
+  }
+
+  const record: TaskRecord = { task: forked, events: [], subscribers: new Set() }
+  records.set(forked.id, record)
+  await saveStore()
+
+  if (parsed.data.prompt) {
+    forked.transcript.push({ role: 'user', content: parsed.data.prompt, timestamp: now })
+    void runCodex(record, parsed.data.prompt, forked.workspace, forked.sessionId)
+  }
+
+  return { data: forked }
 })
 
 app.get('/api/codex/tasks/:taskId/events', async (request, reply) => {

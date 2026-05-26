@@ -136,6 +136,22 @@ function buildPendingTask(promptText: string, workspacePath: string): CodexTask 
   }
 }
 
+function appendPendingTurn(task: CodexTask, promptText: string, workspacePath: string): CodexTask {
+  return {
+    ...task,
+    status: 'queued',
+    workspace: workspacePath,
+    transcript: [
+      ...task.transcript,
+      {
+        role: 'user',
+        content: promptText,
+        timestamp: nowIso(),
+      },
+    ],
+  }
+}
+
 function buildLocalErrorTask(error: unknown, workspacePath: string): CodexTask {
   const timestamp = nowIso()
   return {
@@ -287,7 +303,8 @@ function DesktopApp() {
     if (!promptText || isSubmitting) return
 
     setIsSubmitting(true)
-    const pendingTask = buildPendingTask(promptText, workspacePath)
+    const shouldResume = activeTask.id !== 'welcome' && Boolean(activeTask.sessionId)
+    const pendingTask = shouldResume ? appendPendingTurn(activeTask, promptText, workspacePath) : buildPendingTask(promptText, workspacePath)
     setTasks((current) => mergeTask(current, pendingTask))
     setActiveTaskId(pendingTask.id)
     setPrompt('')
@@ -300,19 +317,21 @@ function DesktopApp() {
           employeeId: localEmployeeId,
           workspace: workspacePath,
           prompt: promptText,
+          parentTaskId: shouldResume ? activeTask.id : undefined,
+          sessionId: shouldResume ? activeTask.sessionId : undefined,
         }),
       })
       const payload = (await response.json()) as { data?: CodexTask; error?: string }
       if (!response.ok) throw new Error(payload.error ?? `Runtime 返回 ${response.status}`)
       if (!payload.data) throw new Error(payload.error ?? '任务创建失败')
       setRuntimeState('online')
-      setTasks((current) => replaceTask(current, pendingTask.id, payload.data!))
+      setTasks((current) => (shouldResume ? mergeTask(current, payload.data!) : replaceTask(current, pendingTask.id, payload.data!)))
       setActiveTaskId(payload.data.id)
     } catch (error) {
       setRuntimeState('offline')
       const errorTask = buildLocalErrorTask(error, workspacePath)
-      setTasks((current) => replaceTask(current, pendingTask.id, errorTask))
-      setActiveTaskId(errorTask.id)
+      setTasks((current) => (shouldResume ? mergeTask(current, errorTask) : replaceTask(current, pendingTask.id, errorTask)))
+      setActiveTaskId(shouldResume ? activeTask.id : errorTask.id)
     } finally {
       setIsSubmitting(false)
     }

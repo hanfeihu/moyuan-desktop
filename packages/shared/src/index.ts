@@ -32,7 +32,13 @@ export type CodexTask = {
   title: string
   status: 'queued' | 'running' | 'needs_approval' | 'completed' | 'failed'
   workspace: string
+  sessionId?: string
+  forkedFrom?: string
+  workspaceMemory?: string
+  commandHistory?: string[]
+  diffSummary?: string
   createdAt?: string
+  updatedAt?: string
   exitCode?: number | null
   transcript: Array<{
     role: 'user' | 'assistant' | 'tool' | 'system'
