@@ -33,6 +33,14 @@ const approvalSchema = z.object({
 })
 
 const records = new Map<string, TaskRecord>()
+const mutedStderrPatterns = [
+  'failed to warm featured plugin ids cache',
+  'startup remote plugin sync failed',
+  'skipping startup remote plugin sync',
+  'chatgpt authentication required to sync remote plugins',
+  'invalid_grant: Invalid refresh token',
+  'failed to initialize MCP client during shutdown',
+]
 
 function getModelConfig() {
   return {
@@ -62,6 +70,11 @@ async function createCodexHome(taskId: string) {
       'approval_policy = "never"',
       'sandbox_mode = "workspace-write"',
       'model_reasoning_effort = "medium"',
+      'disable_response_storage = true',
+      '',
+      '[features]',
+      'remote_plugin = false',
+      'plugin_sharing = false',
       '',
       `[model_providers.${config.providerId}]`,
       `name = "${config.providerName}"`,
@@ -172,6 +185,10 @@ async function runCodex(record: TaskRecord, prompt: string, workspace: string) {
     'exec',
     '--json',
     '--skip-git-repo-check',
+    '--disable',
+    'remote_plugin',
+    '--disable',
+    'plugin_sharing',
     '--sandbox',
     'workspace-write',
     '-c',
@@ -211,6 +228,8 @@ async function runCodex(record: TaskRecord, prompt: string, workspace: string) {
 
     for (const line of lines) {
       if (!line.trim()) continue
+      if (line.includes('Reading additional input from stdin')) continue
+      if (mutedStderrPatterns.some((pattern) => line.includes(pattern))) continue
       try {
         pushEvent(record, eventFromJson(taskId, JSON.parse(line)))
       } catch {
@@ -227,6 +246,7 @@ async function runCodex(record: TaskRecord, prompt: string, workspace: string) {
   child.stderr.on('data', (chunk: Buffer) => {
     const text = chunk.toString('utf8').trim()
     if (!text) return
+    if (mutedStderrPatterns.some((pattern) => text.includes(pattern))) return
     pushEvent(record, {
       taskId,
       type: 'error',
