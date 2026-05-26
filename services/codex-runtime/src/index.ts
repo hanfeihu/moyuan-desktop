@@ -124,9 +124,19 @@ function eventFromJson(taskId: string, payload: unknown): Omit<CodexTaskEvent, '
   }
 
   if ((type === 'item.started' || type === 'item.completed') && item?.type === 'command_execution') {
+    if (type === 'item.started') {
+      return {
+        taskId,
+        type: 'tool',
+        role: 'tool',
+        content: '',
+        raw: payload,
+      }
+    }
+
     const command = typeof item.command === 'string' ? item.command : ''
     const output = typeof item.aggregated_output === 'string' ? item.aggregated_output.trim() : ''
-    const status = typeof item.status === 'string' ? item.status : type === 'item.started' ? 'in_progress' : 'completed'
+    const status = typeof item.status === 'string' ? item.status : 'completed'
     const exitCode = typeof item.exit_code === 'number' ? `\nexit ${item.exit_code}` : ''
     const body = output ? `$ ${command}\n${output}${exitCode}` : `$ ${command}\n${status}`
 

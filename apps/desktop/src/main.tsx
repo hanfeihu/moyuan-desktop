@@ -70,6 +70,13 @@ function mergeTask(tasks: CodexTask[], next: CodexTask) {
   return merged.sort((a, b) => taskSortValue(b) - taskSortValue(a))
 }
 
+function replaceTask(tasks: CodexTask[], oldTaskId: string, next: CodexTask) {
+  return mergeTask(
+    tasks.filter((task) => task.id !== oldTaskId),
+    next,
+  )
+}
+
 function shouldShowMessage(item: TranscriptItem) {
   if (item.role !== 'system') return true
   return (
@@ -106,8 +113,8 @@ function mergeEventIntoTask(task: CodexTask, event: CodexTaskEvent): CodexTask {
   return { ...task, status: eventStatus(event, task.status), transcript }
 }
 
-function hasVisibleAssistantReply(task: CodexTask) {
-  return task.transcript.some((item) => item.role === 'assistant' && item.content.trim())
+function hasCodexActivity(task: CodexTask) {
+  return task.transcript.some((item) => (item.role === 'assistant' || item.role === 'tool') && item.content.trim())
 }
 
 function buildPendingTask(promptText: string, workspacePath: string): CodexTask {
@@ -148,16 +155,52 @@ function buildLocalErrorTask(error: unknown, workspacePath: string): CodexTask {
   }
 }
 
+function TranscriptMessage({ animate, item, label }: { animate: boolean; item: TranscriptItem; label: string }) {
+  const [visibleText, setVisibleText] = useState(animate && item.role === 'assistant' ? '' : item.content)
+
+  useEffect(() => {
+    if (!animate || item.role !== 'assistant') {
+      setVisibleText(item.content)
+      return
+    }
+
+    setVisibleText('')
+    let index = 0
+    const step = () => {
+      index = Math.min(item.content.length, index + Math.max(1, Math.ceil(item.content.length / 80)))
+      setVisibleText(item.content.slice(0, index))
+      if (index >= item.content.length) window.clearInterval(timer)
+    }
+    const timer = window.setInterval(step, 18)
+    step()
+
+    return () => window.clearInterval(timer)
+  }, [animate, item.content, item.role, item.timestamp])
+
+  return (
+    <article className={`message ${item.role}`}>
+      <div className="message-label">{label}</div>
+      <div className="message-body">
+        {visibleText}
+        {animate && item.role === 'assistant' && visibleText.length < item.content.length ? <span className="stream-caret" /> : null}
+      </div>
+    </article>
+  )
+}
+
 function DesktopApp() {
   const [tasks, setTasks] = useState<CodexTask[]>([welcomeTask])
   const [activeTaskId, setActiveTaskId] = useState(welcomeTask.id)
-  const [prompt, setPrompt] = useState('查看当前目录内容，判断这个项目是什么技术栈，并给我一个简短说明。')
+  const [prompt, setPrompt] = useState('')
   const [workspace, setWorkspace] = useState(defaultWorkspace)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [runtimeState, setRuntimeState] = useState<RuntimeState>('checking')
   const transcriptRef = useRef<HTMLDivElement | null>(null)
+  const seenEventsRef = useRef<Set<string>>(new Set())
 
   const activeTask = useMemo(() => tasks.find((task) => task.id === activeTaskId) ?? tasks[0], [activeTaskId, tasks])
+  const visibleTranscript = useMemo(() => activeTask.transcript.filter(shouldShowMessage), [activeTask.transcript])
+  const isBusy = activeTask.status === 'queued' || activeTask.status === 'running'
 
   useEffect(() => {
     fetch(`${runtimeUrl}/health`)
@@ -170,9 +213,15 @@ function DesktopApp() {
     fetch(`${runtimeUrl}/api/codex/tasks`)
       .then((response) => response.json())
       .then((payload: { data?: CodexTask[] }) => {
-        if (payload.data?.length) setTasks([...payload.data, welcomeTask])
+        setRuntimeState('online')
+        if (payload.data?.length) {
+          const nextTasks = payload.data.map(normalizeTask).sort((a, b) => taskSortValue(b) - taskSortValue(a))
+          setTasks(nextTasks)
+          setActiveTaskId((current) => (current === welcomeTask.id ? nextTasks[0]?.id ?? current : current))
+        }
       })
       .catch(() => {
+        setRuntimeState('offline')
         setTasks([
           {
             ...welcomeTask,
@@ -181,7 +230,7 @@ function DesktopApp() {
               {
                 role: 'system',
                 content: `Codex Runtime 没连上：${runtimeUrl}`,
-                timestamp: new Date().toISOString(),
+                timestamp: nowIso(),
               },
             ],
           },
@@ -194,7 +243,7 @@ function DesktopApp() {
       top: transcriptRef.current.scrollHeight,
       behavior: 'smooth',
     })
-  }, [activeTask?.transcript.length])
+  }, [visibleTranscript.length, activeTask?.id])
 
   useEffect(() => {
     if (!activeTask || activeTask.id === 'welcome') return
@@ -204,6 +253,9 @@ function DesktopApp() {
 
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as CodexTaskEvent
+      if (seenEventsRef.current.has(event.id)) return
+      seenEventsRef.current.add(event.id)
+      setRuntimeState('online')
       setTasks((current) =>
         current.map((task) => (task.id === event.taskId ? mergeEventIntoTask(task, event) : task)),
       )
@@ -217,9 +269,10 @@ function DesktopApp() {
       fetch(`${runtimeUrl}/api/codex/tasks/${activeTask.id}`)
         .then((response) => response.json())
         .then((payload: { data?: CodexTask }) => {
+          setRuntimeState('online')
           if (payload.data) setTasks((current) => mergeTask(current, payload.data!))
         })
-        .catch(() => undefined)
+        .catch(() => setRuntimeState('offline'))
     }, 1200)
 
     return () => {
@@ -229,10 +282,12 @@ function DesktopApp() {
   }, [activeTask?.id])
 
   async function submitTask() {
-    if (!prompt.trim() || isSubmitting) return
+    const promptText = prompt.trim()
+    const workspacePath = workspace.trim() || defaultWorkspace
+    if (!promptText || isSubmitting) return
 
     setIsSubmitting(true)
-    const pendingTask = buildPendingTask(prompt.trim(), workspace)
+    const pendingTask = buildPendingTask(promptText, workspacePath)
     setTasks((current) => mergeTask(current, pendingTask))
     setActiveTaskId(pendingTask.id)
     setPrompt('')
@@ -242,18 +297,21 @@ function DesktopApp() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          employeeId: 'u-1001',
-          workspace,
-          prompt: pendingTask.transcript[0].content,
+          employeeId: localEmployeeId,
+          workspace: workspacePath,
+          prompt: promptText,
         }),
       })
       const payload = (await response.json()) as { data?: CodexTask; error?: string }
+      if (!response.ok) throw new Error(payload.error ?? `Runtime 返回 ${response.status}`)
       if (!payload.data) throw new Error(payload.error ?? '任务创建失败')
-      setTasks((current) => mergeTask(current.filter((task) => task.id !== pendingTask.id), payload.data!))
+      setRuntimeState('online')
+      setTasks((current) => replaceTask(current, pendingTask.id, payload.data!))
       setActiveTaskId(payload.data.id)
     } catch (error) {
-      const errorTask = buildLocalErrorTask(error, workspace)
-      setTasks((current) => mergeTask(current.filter((task) => task.id !== pendingTask.id), errorTask))
+      setRuntimeState('offline')
+      const errorTask = buildLocalErrorTask(error, workspacePath)
+      setTasks((current) => replaceTask(current, pendingTask.id, errorTask))
       setActiveTaskId(errorTask.id)
     } finally {
       setIsSubmitting(false)
@@ -272,7 +330,13 @@ function DesktopApp() {
           <Bot size={18} />
           <strong>墨渊</strong>
         </div>
-        <button className="new-task" onClick={() => setActiveTaskId('welcome')}>
+        <button
+          className="new-task"
+          onClick={() => {
+            setActiveTaskId('welcome')
+            setPrompt('')
+          }}
+        >
           <Plus size={16} />
           新任务
         </button>
@@ -312,23 +376,19 @@ function DesktopApp() {
           </div>
           <div className="topbar-actions">
             <div className={`runtime-dot ${runtimeState}`}>{runtimeState === 'online' ? 'Runtime online' : runtimeState === 'checking' ? 'Checking runtime' : 'Runtime offline'}</div>
-          <div className={`status-badge ${activeTask.status}`}>
-            {activeTask.status === 'running' ? <Loader2 size={15} className="spin" /> : <Check size={15} />}
-            {statusText(activeTask.status)}
-          </div>
+            <div className={`status-badge ${activeTask.status}`}>
+              {activeTask.status === 'running' || activeTask.status === 'queued' ? <Loader2 size={15} className="spin" /> : <Check size={15} />}
+              {runtimeState === 'offline' ? '未连接' : statusText(activeTask.status)}
+            </div>
           </div>
         </header>
 
         <div className="transcript" ref={transcriptRef}>
-          {activeTask.transcript.filter(shouldShowMessage).map((item, index) => (
-            <article className={`message ${item.role}`} key={`${item.timestamp}-${index}`}>
-              <div className="message-label">
-                {item.role === 'assistant' ? 'Codex' : item.role === 'tool' ? '命令' : item.role === 'system' ? '系统' : '你'}
-              </div>
-              <div className="message-body">{item.content}</div>
-            </article>
-          ))}
-          {(activeTask.status === 'queued' || (activeTask.status === 'running' && !hasVisibleAssistantReply(activeTask))) && (
+          {visibleTranscript.map((item, index) => {
+            const isLatestAssistant = item.role === 'assistant' && index === visibleTranscript.length - 1
+            return <TranscriptMessage animate={isLatestAssistant} item={item} key={`${item.timestamp}-${index}`} label={messageLabel(item.role)} />
+          })}
+          {isBusy && !hasCodexActivity(activeTask) && (
             <article className="message assistant pending">
               <div className="message-label">Codex</div>
               <div className="message-body">
@@ -344,7 +404,7 @@ function DesktopApp() {
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault()
                 void submitTask()
               }
