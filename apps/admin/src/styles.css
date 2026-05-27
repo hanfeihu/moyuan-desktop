@@ -1,10 +1,16 @@
 body {
   margin: 0;
   background: #f3f6fa;
+  overflow-x: hidden;
 }
 
 .admin-shell {
   min-height: 100vh;
+  min-width: 0;
+}
+
+.admin-shell .ant-layout {
+  min-width: 0;
 }
 
 .admin-sider {
@@ -47,6 +53,8 @@ body {
 
 .admin-content {
   padding: 24px;
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 .section-card {
@@ -67,4 +75,62 @@ body {
 
 .ant-pro-page-container-children-container {
   padding-inline: 0;
+}
+
+.ant-card,
+.ant-pro-card,
+.ant-table-wrapper {
+  min-width: 0;
+}
+
+.ant-table-wrapper {
+  overflow-x: auto;
+}
+
+@media (max-width: 900px) {
+  .admin-shell {
+    display: block;
+  }
+
+  .admin-sider {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    flex: none !important;
+  }
+
+  .admin-brand {
+    height: 60px;
+  }
+
+  .admin-sider .ant-menu {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 0 8px 10px;
+  }
+
+  .admin-sider .ant-menu-item {
+    width: auto;
+    margin-inline: 4px;
+  }
+
+  .admin-header {
+    height: auto;
+    min-height: 64px;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 14px 18px;
+  }
+
+  .admin-content {
+    padding: 16px;
+  }
+
+  .two-columns {
+    flex-direction: column;
+  }
+
+  .policy-card {
+    width: 100%;
+  }
 }

@@ -94,4 +94,5 @@ app.get('/api/desktop/bootstrap', async () => ({
 }))
 
 const port = Number(process.env.API_PORT ?? 4000)
-await app.listen({ host: '0.0.0.0', port })
+const host = process.env.API_HOST ?? '0.0.0.0'
+await app.listen({ host, port })
