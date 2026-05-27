@@ -17,6 +17,7 @@ export type VideoSkillConfig = {
   provider: 'volcengine-ark'
   baseUrl: string
   maskedApiKey: string
+  apiKeyConfigured: boolean
   defaultModel: string
   enabled: boolean
   allowImageInput: boolean

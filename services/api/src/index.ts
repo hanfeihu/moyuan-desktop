@@ -32,7 +32,7 @@ const videoSkillConfigSchema = z.object({
 
 type StoredAdminConfig = {
   videoSkillApiKey?: string
-  videoSkill?: Omit<VideoSkillConfig, 'maskedApiKey'>
+  videoSkill?: Omit<VideoSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>
 }
 
 const employees: Employee[] = [
@@ -91,15 +91,17 @@ async function persistStoredConfig() {
   )
 }
 
-function buildVideoSkillConfig(stored?: Omit<VideoSkillConfig, 'maskedApiKey'>): VideoSkillConfig {
+function buildVideoSkillConfig(stored?: Omit<VideoSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>): VideoSkillConfig {
+  const apiKeyConfigured = Boolean(videoSkillApiKey)
   return {
     id: stored?.id ?? 'volcengine-seedance',
     name: stored?.name ?? '火山方舟 Seedance 视频生成',
     provider: 'volcengine-ark',
     baseUrl: stored?.baseUrl ?? process.env.VOLCENGINE_ARK_BASE_URL ?? 'https://ark.cn-beijing.volces.com/api/v3',
     maskedApiKey: maskKey(videoSkillApiKey),
+    apiKeyConfigured,
     defaultModel: stored?.defaultModel ?? process.env.VOLCENGINE_VIDEO_MODEL ?? 'doubao-seedance-2-0-260128',
-    enabled: stored?.enabled ?? Boolean(videoSkillApiKey),
+    enabled: stored?.enabled ?? apiKeyConfigured,
     allowImageInput: stored?.allowImageInput ?? true,
     defaultDuration: stored?.defaultDuration ?? 5,
     defaultRatio: stored?.defaultRatio ?? '16:9',
@@ -128,12 +130,17 @@ app.put('/api/admin/video-skill', async (request, reply) => {
     videoSkillApiKey = parsed.data.apiKey.trim()
   }
 
+  if (parsed.data.enabled && !videoSkillApiKey) {
+    return reply.status(400).send({ error: '启用视频技能前，请先配置 API Key' })
+  }
+
   videoSkill = {
     id: 'volcengine-seedance',
     name: '火山方舟 Seedance 视频生成',
     provider: 'volcengine-ark',
     baseUrl: parsed.data.baseUrl,
     maskedApiKey: maskKey(videoSkillApiKey),
+    apiKeyConfigured: Boolean(videoSkillApiKey),
     defaultModel: parsed.data.defaultModel,
     enabled: parsed.data.enabled,
     allowImageInput: parsed.data.allowImageInput,
@@ -195,6 +202,7 @@ app.get('/api/desktop/bootstrap', async () => ({
           defaultRatio: videoSkill.defaultRatio,
           defaultResolution: videoSkill.defaultResolution,
           enabled: videoSkill.enabled,
+          apiKeyConfigured: videoSkill.apiKeyConfigured,
           name: videoSkill.name,
           provider: videoSkill.provider,
         },

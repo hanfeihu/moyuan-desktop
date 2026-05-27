@@ -1,4 +1,4 @@
-import { VideoCameraOutlined } from '@ant-design/icons'
+import { CheckCircleOutlined, ExclamationCircleOutlined, KeyOutlined, VideoCameraOutlined } from '@ant-design/icons'
 import {
   PageContainer,
   ProCard,
@@ -8,7 +8,7 @@ import {
   ProFormSwitch,
   ProFormText,
 } from '@ant-design/pro-components'
-import { App, Button, Space, Tag, Typography } from 'antd'
+import { Alert, App, Button, Space, Tag, Typography } from 'antd'
 import { useState } from 'react'
 import type { VideoSkillConfig } from '@eaw/shared'
 import { useAdminSnapshot } from '@/hooks/useAdminSnapshot'
@@ -19,14 +19,15 @@ export default function SkillsPage() {
   const snapshot = useAdminSnapshot()
   const [activeSkill, setActiveSkill] = useState<VideoSkillConfig | undefined>()
   const videoSkill = activeSkill ?? snapshot.videoSkill
+  const apiKeyConfigured = videoSkill.apiKeyConfigured
 
   async function save(values: Record<string, unknown>) {
     try {
       const payload = await saveVideoSkill(values)
       setActiveSkill(payload)
       message.success('视频生成技能配置已保存')
-    } catch {
-      message.warning('后台 API 暂不可用，配置未保存')
+    } catch (error) {
+      message.warning(error instanceof Error ? error.message : '后台 API 暂不可用，配置未保存')
     }
   }
 
@@ -40,12 +41,31 @@ export default function SkillsPage() {
       <ProCard
         extra={
           <Space wrap>
-            <Tag color={videoSkill.enabled ? 'green' : 'default'}>{videoSkill.enabled ? '已启用' : '未启用'}</Tag>
-            <Tag>{videoSkill.maskedApiKey}</Tag>
+            <Tag color={videoSkill.enabled ? 'green' : 'default'}>{videoSkill.enabled ? '技能已启用' : '技能未启用'}</Tag>
+            <Tag color={apiKeyConfigured ? 'green' : 'orange'}>{apiKeyConfigured ? 'KEY 已配置' : 'KEY 未配置'}</Tag>
           </Space>
         }
         title="视频生成 · 火山方舟 Seedance"
       >
+        <div className={apiKeyConfigured ? 'skill-key-status configured' : 'skill-key-status missing'}>
+          <div className="skill-key-icon">
+            {apiKeyConfigured ? <CheckCircleOutlined /> : <ExclamationCircleOutlined />}
+          </div>
+          <div className="skill-key-copy">
+            <strong>{apiKeyConfigured ? 'API Key 已配置' : 'API Key 未配置'}</strong>
+            <span>
+              {apiKeyConfigured
+                ? `当前使用 ${videoSkill.maskedApiKey}，输入新 KEY 后会替换；留空保存会沿用现有 KEY。`
+                : '还没有保存可用的火山方舟 KEY。请输入 KEY 后再启用视频技能。'}
+            </span>
+          </div>
+          <Tag color={apiKeyConfigured ? 'green' : 'orange'} icon={<KeyOutlined />}>
+            {videoSkill.maskedApiKey}
+          </Tag>
+        </div>
+        {!apiKeyConfigured && videoSkill.enabled ? (
+          <Alert className="skill-alert" message="当前显示启用但缺少 KEY，请重新保存配置。" showIcon type="warning" />
+        ) : null}
         <ProForm
           grid
           initialValues={{
@@ -71,7 +91,7 @@ export default function SkillsPage() {
             colProps={{ md: 12, xs: 24 }}
             label="API Key"
             name="apiKey"
-            placeholder="留空表示沿用已保存 KEY"
+            placeholder={apiKeyConfigured ? `已配置 ${videoSkill.maskedApiKey}，留空沿用` : '请输入火山方舟 API Key'}
           />
           <ProFormText colProps={{ md: 12, xs: 24 }} label="默认视频模型" name="defaultModel" />
           <ProFormDigit colProps={{ md: 6, xs: 12 }} label="默认时长（秒）" name="defaultDuration" />

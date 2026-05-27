@@ -32,6 +32,7 @@ export const defaultVideoSkill: VideoSkillConfig = {
   provider: 'volcengine-ark',
   baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
   maskedApiKey: '未配置',
+  apiKeyConfigured: false,
   defaultModel: 'doubao-seedance-2-0-260128',
   enabled: false,
   allowImageInput: true,
