@@ -11,6 +11,21 @@ export type ModelProviderConfig = {
   enabled: boolean
 }
 
+export type VideoSkillConfig = {
+  id: string
+  name: string
+  provider: 'volcengine-ark'
+  baseUrl: string
+  maskedApiKey: string
+  defaultModel: string
+  enabled: boolean
+  allowImageInput: boolean
+  defaultDuration: number
+  defaultRatio: string
+  defaultResolution: string
+  monthlyLimit: number
+}
+
 export type EnterprisePolicy = {
   dataBoundary: 'local' | 'hybrid'
   auditEnabled: boolean

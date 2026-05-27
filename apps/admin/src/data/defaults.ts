@@ -1,4 +1,4 @@
-import type { Employee, ModelProviderConfig } from '@eaw/shared'
+import type { Employee, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
 import type { PolicyView } from '@/services/admin'
 
 export const defaultProviders: ModelProviderConfig[] = [
@@ -25,6 +25,21 @@ export const defaultEmployees: Employee[] = [
   { id: 'u-1002', name: '林青', department: '交付中心', title: '实施顾问', source: 'lark', manager: '赵远' },
   { id: 'u-1003', name: '周然', department: '产品部', title: '产品经理', source: 'dingtalk', manager: '陈立' },
 ]
+
+export const defaultVideoSkill: VideoSkillConfig = {
+  id: 'volcengine-seedance',
+  name: '火山方舟 Seedance 视频生成',
+  provider: 'volcengine-ark',
+  baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+  maskedApiKey: '未配置',
+  defaultModel: 'doubao-seedance-2-0-260128',
+  enabled: false,
+  allowImageInput: true,
+  defaultDuration: 5,
+  defaultRatio: '16:9',
+  defaultResolution: '720p',
+  monthlyLimit: 100,
+}
 
 export const defaultPolicy: PolicyView = {
   dataBoundary: '企业内网',

@@ -1,8 +1,10 @@
 import cors from '@fastify/cors'
 import 'dotenv/config'
 import Fastify from 'fastify'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import { z } from 'zod'
-import type { Employee, EnterprisePolicy, ModelProviderConfig } from '@eaw/shared'
+import type { Employee, EnterprisePolicy, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
 
 const app = Fastify({ logger: true })
 
@@ -15,6 +17,23 @@ const modelConfigSchema = z.object({
   defaultModel: z.string().min(1),
   enabled: z.boolean(),
 })
+
+const videoSkillConfigSchema = z.object({
+  baseUrl: z.string().url(),
+  apiKey: z.string().optional(),
+  defaultDuration: z.coerce.number().int().min(1).max(30),
+  defaultModel: z.string().min(1),
+  defaultRatio: z.string().min(1),
+  defaultResolution: z.string().min(1),
+  allowImageInput: z.boolean(),
+  enabled: z.boolean(),
+  monthlyLimit: z.coerce.number().int().min(0),
+})
+
+type StoredAdminConfig = {
+  videoSkillApiKey?: string
+  videoSkill?: Omit<VideoSkillConfig, 'maskedApiKey'>
+}
 
 const employees: Employee[] = [
   { id: 'u-1001', name: '韩飞虎', department: '销售一组', title: '客户经理', source: 'wecom', manager: '王敏' },
@@ -31,6 +50,11 @@ let modelProvider: ModelProviderConfig = {
   enabled: true,
 }
 
+const configFile = process.env.ADMIN_CONFIG_FILE ?? './data/admin-config.json'
+let storedConfig = await loadStoredConfig()
+let videoSkillApiKey = storedConfig.videoSkillApiKey ?? process.env.VOLCENGINE_ARK_API_KEY ?? ''
+let videoSkill: VideoSkillConfig = buildVideoSkillConfig(storedConfig.videoSkill)
+
 const policy: EnterprisePolicy = {
   dataBoundary: 'local',
   auditEnabled: true,
@@ -44,12 +68,85 @@ function maskKey(key: string | undefined) {
   return `${key.slice(0, 6)}************************${key.slice(-4)}`
 }
 
+async function loadStoredConfig(): Promise<StoredAdminConfig> {
+  try {
+    return JSON.parse(await readFile(configFile, 'utf8')) as StoredAdminConfig
+  } catch {
+    return {}
+  }
+}
+
+async function persistStoredConfig() {
+  await mkdir(dirname(configFile), { recursive: true })
+  await writeFile(
+    configFile,
+    JSON.stringify(
+      {
+        videoSkill,
+        videoSkillApiKey,
+      },
+      null,
+      2,
+    ),
+  )
+}
+
+function buildVideoSkillConfig(stored?: Omit<VideoSkillConfig, 'maskedApiKey'>): VideoSkillConfig {
+  return {
+    id: stored?.id ?? 'volcengine-seedance',
+    name: stored?.name ?? '火山方舟 Seedance 视频生成',
+    provider: 'volcengine-ark',
+    baseUrl: stored?.baseUrl ?? process.env.VOLCENGINE_ARK_BASE_URL ?? 'https://ark.cn-beijing.volces.com/api/v3',
+    maskedApiKey: maskKey(videoSkillApiKey),
+    defaultModel: stored?.defaultModel ?? process.env.VOLCENGINE_VIDEO_MODEL ?? 'doubao-seedance-2-0-260128',
+    enabled: stored?.enabled ?? Boolean(videoSkillApiKey),
+    allowImageInput: stored?.allowImageInput ?? true,
+    defaultDuration: stored?.defaultDuration ?? 5,
+    defaultRatio: stored?.defaultRatio ?? '16:9',
+    defaultResolution: stored?.defaultResolution ?? '720p',
+    monthlyLimit: stored?.monthlyLimit ?? 100,
+  }
+}
+
 app.get('/health', async () => ({
   ok: true,
   service: 'enterprise-api',
 }))
 
 app.get('/api/admin/model-provider', async () => ({ data: modelProvider }))
+
+app.get('/api/admin/video-skill', async () => ({ data: videoSkill }))
+
+app.put('/api/admin/video-skill', async (request, reply) => {
+  const parsed = videoSkillConfigSchema.safeParse(request.body)
+
+  if (!parsed.success) {
+    return reply.status(400).send({ error: '视频生成技能配置不完整', detail: parsed.error.flatten() })
+  }
+
+  if (parsed.data.apiKey?.trim()) {
+    videoSkillApiKey = parsed.data.apiKey.trim()
+  }
+
+  videoSkill = {
+    id: 'volcengine-seedance',
+    name: '火山方舟 Seedance 视频生成',
+    provider: 'volcengine-ark',
+    baseUrl: parsed.data.baseUrl,
+    maskedApiKey: maskKey(videoSkillApiKey),
+    defaultModel: parsed.data.defaultModel,
+    enabled: parsed.data.enabled,
+    allowImageInput: parsed.data.allowImageInput,
+    defaultDuration: parsed.data.defaultDuration,
+    defaultRatio: parsed.data.defaultRatio,
+    defaultResolution: parsed.data.defaultResolution,
+    monthlyLimit: parsed.data.monthlyLimit,
+  }
+
+  await persistStoredConfig()
+
+  return { data: videoSkill }
+})
 
 app.put('/api/admin/model-provider', async (request, reply) => {
   const parsed = modelConfigSchema.safeParse(request.body)
@@ -88,6 +185,19 @@ app.get('/api/desktop/bootstrap', async () => ({
         baseUrl: modelProvider.baseUrl,
         defaultModel: modelProvider.defaultModel,
         enabled: modelProvider.enabled,
+      },
+      skills: {
+        videoGeneration: {
+          allowImageInput: videoSkill.allowImageInput,
+          baseUrl: videoSkill.baseUrl,
+          defaultDuration: videoSkill.defaultDuration,
+          defaultModel: videoSkill.defaultModel,
+          defaultRatio: videoSkill.defaultRatio,
+          defaultResolution: videoSkill.defaultResolution,
+          enabled: videoSkill.enabled,
+          name: videoSkill.name,
+          provider: videoSkill.provider,
+        },
       },
     },
   },
