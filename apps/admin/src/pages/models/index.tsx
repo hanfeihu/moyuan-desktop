@@ -3,7 +3,6 @@ import {
   PageContainer,
   ProCard,
   ProForm,
-  ProFormDependency,
   ProFormDigit,
   ProFormSelect,
   ProFormSwitch,
@@ -79,15 +78,6 @@ export default function ModelsPage() {
           <ProFormText colProps={{ md: 8, xs: 24 }} label="默认模型" name="defaultModel" />
           <ProFormDigit colProps={{ md: 8, xs: 24 }} label="月度 Token 额度" name="monthlyLimit" />
           <ProFormSwitch colProps={{ md: 8, xs: 24 }} label="启用该通道" name="enabled" />
-          <ProFormDependency name={['provider']}>
-            {({ provider }) =>
-              provider === 'blector' ? (
-                <Tag className="hint-tag" color="blue">
-                  员工桌面端的 Codex Runtime 将通过该中转地址发起模型请求
-                </Tag>
-              ) : null
-            }
-          </ProFormDependency>
         </ProForm>
       </ProCard>
 
