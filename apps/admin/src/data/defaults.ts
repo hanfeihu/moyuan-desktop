@@ -1,4 +1,4 @@
-import type { Employee, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
+import type { Employee, MailServiceConfig, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
 import type { PolicyView } from '@/services/admin'
 
 export const defaultProviders: ModelProviderConfig[] = [
@@ -40,6 +40,17 @@ export const defaultVideoSkill: VideoSkillConfig = {
   defaultRatio: '16:9',
   defaultResolution: '720p',
   monthlyLimit: 100,
+}
+
+export const defaultMailSettings: MailServiceConfig = {
+  smtpHost: 'smtp.qq.com',
+  smtpPort: 465,
+  secure: true,
+  username: '',
+  fromName: '墨渊',
+  maskedAuthCode: '未配置',
+  authCodeConfigured: false,
+  enabled: false,
 }
 
 export const defaultPolicy: PolicyView = {

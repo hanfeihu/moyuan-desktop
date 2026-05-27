@@ -51,6 +51,7 @@ const require = createRequire(import.meta.url)
 const execFileAsync = promisify(execFile)
 const runtimeToken = process.env.MOYUAN_RUNTIME_TOKEN ?? ''
 const runtimeHost = process.env.CODEX_RUNTIME_HOST ?? '127.0.0.1'
+const enterpriseApiBase = process.env.ENTERPRISE_API_BASE ?? 'http://codex.tminos.com:18080/admin-api'
 
 await app.register(cors, {
   origin(origin, callback) {
@@ -87,10 +88,23 @@ type TaskRecord = {
   streamItemIndexes: Map<string, number>
 }
 
+type EnterpriseMeResponse = {
+  data?: {
+    user?: {
+      tokenBudget: number
+      tokenUsed: number
+      status: string
+    }
+  }
+  error?: string
+}
+
 const taskSchema = z.object({
   prompt: z.string().min(1),
   workspace: z.string().default(process.cwd()),
   employeeId: z.string().min(1),
+  enterpriseApiBase: z.string().url().optional(),
+  enterpriseAuthToken: z.string().optional(),
   parentTaskId: z.string().optional(),
   sessionId: z.string().optional(),
 })
@@ -248,6 +262,40 @@ function getImageConfig() {
     baseUrl: process.env.IMAGE_BASE_URL ?? 'https://codex-manager.tminos.com/v1',
     apiKeyConfigured: Boolean(process.env.IMAGE_API_KEY),
     defaultModel: process.env.IMAGE_MODEL ?? 'gpt-image-2',
+  }
+}
+
+function enterpriseEndpoint(baseUrl: string, pathname: string) {
+  return `${baseUrl.replace(/\/$/, '')}/${pathname.replace(/^\//, '')}`
+}
+
+async function validateEnterpriseQuota(authToken?: string, baseUrl = enterpriseApiBase) {
+  if (!authToken) return { ok: false, statusCode: 401, error: '请先登录墨渊账号' }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 5000)
+
+  try {
+    const response = await fetch(enterpriseEndpoint(baseUrl, '/me'), {
+      headers: { Authorization: `Bearer ${authToken}` },
+      signal: controller.signal,
+    })
+    const payload = (await response.json().catch(() => ({}))) as EnterpriseMeResponse
+    if (!response.ok || !payload.data?.user) {
+      return { ok: false, statusCode: response.status || 401, error: payload.error ?? '登录状态已失效，请重新登录' }
+    }
+
+    const user = payload.data.user
+    if (user.status !== 'active') return { ok: false, statusCode: 403, error: '账号已停用，请联系管理员' }
+    if (user.tokenBudget - user.tokenUsed <= 0) {
+      return { ok: false, statusCode: 402, error: 'Token 额度不足，请联系管理员派发额度' }
+    }
+
+    return { ok: true }
+  } catch {
+    return { ok: false, statusCode: 503, error: '企业后台暂时不可用，无法校验 Token 额度' }
+  } finally {
+    clearTimeout(timeout)
   }
 }
 
@@ -1396,6 +1444,11 @@ app.post('/api/codex/tasks', async (request, reply) => {
 
   if (!parsed.success) {
     return reply.status(400).send({ error: '任务参数不完整', detail: parsed.error.flatten() })
+  }
+
+  const quota = await validateEnterpriseQuota(parsed.data.enterpriseAuthToken, parsed.data.enterpriseApiBase)
+  if (!quota.ok) {
+    return reply.status(quota.statusCode ?? 500).send({ error: quota.error ?? '额度校验失败' })
   }
 
   const now = new Date().toISOString()

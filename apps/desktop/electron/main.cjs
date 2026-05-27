@@ -7,6 +7,7 @@ const net = require('node:net')
 const path = require('node:path')
 
 const devUrl = process.env.MOYUAN_DESKTOP_URL || 'http://127.0.0.1:5170'
+const enterpriseApiBase = process.env.MOYUAN_ENTERPRISE_API_BASE || 'http://codex.tminos.com:18080/admin-api'
 const runtimeHost = '127.0.0.1'
 const defaultRuntimePort = Number(process.env.CODEX_RUNTIME_PORT || 4101)
 const runtimeToken = crypto.randomBytes(32).toString('hex')
@@ -193,6 +194,7 @@ async function createWindow() {
   if (isPackagedApp()) {
     win.loadFile(path.join(__dirname, '../dist/index.html'), {
       query: {
+        enterpriseApiBase,
         runtimeUrl: runtime.url,
         runtimeToken: runtime.token,
       },

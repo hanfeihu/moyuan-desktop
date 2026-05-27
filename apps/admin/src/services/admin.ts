@@ -1,5 +1,5 @@
-import type { Employee, EnterprisePolicy, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
-import { defaultEmployees, defaultPolicy, defaultProviders, defaultVideoSkill } from '@/data/defaults'
+import type { AccountUser, Employee, EnterprisePolicy, MailServiceConfig, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
+import { defaultEmployees, defaultMailSettings, defaultPolicy, defaultProviders, defaultVideoSkill } from '@/data/defaults'
 
 const apiBase = '/admin-api'
 
@@ -105,5 +105,85 @@ export async function saveVideoSkill(values: Record<string, unknown>) {
   })
   const payload = (await response.json()) as { data?: VideoSkillConfig; error?: string }
   if (!response.ok || !payload.data) throw new Error(payload.error ?? '保存失败')
+  return payload.data
+}
+
+export async function loadMailSettings() {
+  try {
+    const payload = await getJson<MailServiceConfig>('/mail-settings')
+    return payload.data
+  } catch {
+    return defaultMailSettings
+  }
+}
+
+export async function saveMailSettings(values: Record<string, unknown>) {
+  const response = await fetch(`${apiBase}/mail-settings`, {
+    body: JSON.stringify({
+      authCode: values.authCode,
+      enabled: Boolean(values.enabled),
+      fromName: values.fromName,
+      secure: Boolean(values.secure),
+      smtpHost: values.smtpHost,
+      smtpPort: values.smtpPort,
+      username: values.username,
+    }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'PUT',
+  })
+  const payload = (await response.json()) as { data?: MailServiceConfig; error?: string }
+  if (!response.ok || !payload.data) throw new Error(payload.error ?? '保存失败')
+  return payload.data
+}
+
+export async function sendTestMail() {
+  const response = await fetch(`${apiBase}/mail-settings/test`, {
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  })
+  const payload = (await response.json()) as { data?: { sent: boolean }; error?: string }
+  if (!response.ok || !payload.data?.sent) throw new Error(payload.error ?? '测试邮件发送失败')
+  return payload.data
+}
+
+export async function loadUsers() {
+  try {
+    const payload = await getJson<AccountUser[]>('/users')
+    return payload.data
+  } catch {
+    return []
+  }
+}
+
+export async function saveUserQuota(userId: string, values: { amount: number; mode: 'grant' | 'set' }) {
+  const response = await fetch(`${apiBase}/users/${encodeURIComponent(userId)}/quota`, {
+    body: JSON.stringify(values),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'PUT',
+  })
+  const payload = (await response.json()) as { data?: AccountUser; error?: string }
+  if (!response.ok || !payload.data) throw new Error(payload.error ?? '额度保存失败')
+  return payload.data
+}
+
+export async function sendAuthCode(email: string) {
+  const response = await fetch(`${apiBase}/auth/send-code`, {
+    body: JSON.stringify({ email }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  })
+  const payload = (await response.json()) as { data?: { sent: boolean }; error?: string }
+  if (!response.ok || !payload.data) throw new Error(payload.error ?? '验证码发送失败')
+  return payload.data
+}
+
+export async function authWithCode(mode: 'login' | 'register', values: { email: string; code: string; name?: string }) {
+  const response = await fetch(`${apiBase}/auth/${mode}`, {
+    body: JSON.stringify(values),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  })
+  const payload = (await response.json()) as { data?: { token: string; user: AccountUser }; error?: string }
+  if (!response.ok || !payload.data) throw new Error(payload.error ?? '登录失败')
   return payload.data
 }

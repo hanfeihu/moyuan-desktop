@@ -21,6 +21,18 @@ body {
   letter-spacing: 0;
 }
 
+.admin-menu-brand {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-inline: 4px;
+  color: #1f2328;
+  font-size: 15px;
+  font-weight: 680;
+  letter-spacing: 0;
+}
+
 .admin-page {
   min-width: 0;
 }
@@ -97,8 +109,92 @@ body {
   margin-bottom: 16px;
 }
 
+.quota-cell {
+  width: 170px;
+  display: grid;
+  gap: 6px;
+}
+
+.quota-cell > div {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.quota-cell strong {
+  color: #1f2328;
+  font-weight: 650;
+}
+
+.quota-cell span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.quota-tag {
+  border-radius: 999px;
+  padding-inline: 10px;
+}
+
+.quota-modal {
+  display: grid;
+  gap: 16px;
+  padding-top: 4px;
+}
+
+.quota-user-card {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  border: 1px solid #eef0f4;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fafbfc;
+}
+
+.quota-user-card strong,
+.quota-user-card span {
+  display: block;
+}
+
+.quota-user-card strong {
+  color: #1f2328;
+  font-weight: 650;
+}
+
+.quota-user-card span {
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.quota-user-icon {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 8px;
+  color: #7a4f05;
+  background: #fff4d6;
+  font-size: 18px;
+}
+
+.quota-input {
+  width: 100%;
+}
+
 .ant-pro-layout .ant-pro-layout-container {
   min-width: 0;
+}
+
+.ant-pro-layout .ant-layout-sider {
+  border-right: 1px solid #e9edf3;
+}
+
+.ant-pro-sider-logo {
+  padding-inline: 14px !important;
 }
 
 .ant-pro-page-container-children-container {

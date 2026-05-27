@@ -21,12 +21,17 @@ export const layout: RunTimeLayoutConfig = () => ({
   },
   disableContentMargin: false,
   footerRender: false,
-  layout: 'mix',
-  logo: <div className="admin-logo-mark">墨</div>,
+  layout: 'side',
+  logo: false,
   menu: {
     locale: false,
   },
-  menuHeaderRender: (_, title) => <div className="admin-logo-title">{title}</div>,
+  menuHeaderRender: () => (
+    <div className="admin-menu-brand">
+      <div className="admin-logo-mark">墨</div>
+      <span>墨渊控制台</span>
+    </div>
+  ),
   navTheme: 'light',
   onMenuHeaderClick: () => history.push('/dashboard'),
   primaryColor: '#1677ff',

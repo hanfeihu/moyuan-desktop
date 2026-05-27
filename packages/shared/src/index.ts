@@ -27,6 +27,31 @@ export type VideoSkillConfig = {
   monthlyLimit: number
 }
 
+export type MailServiceConfig = {
+  smtpHost: string
+  smtpPort: number
+  secure: boolean
+  username: string
+  fromName: string
+  maskedAuthCode: string
+  authCodeConfigured: boolean
+  enabled: boolean
+}
+
+export type AccountUser = {
+  id: string
+  email: string
+  name: string
+  status: 'active' | 'disabled'
+  tokenBudget: number
+  tokenUsed: number
+  promptTokens: number
+  completionTokens: number
+  quotaUpdatedAt?: string
+  createdAt: string
+  lastLoginAt?: string
+}
+
 export type EnterprisePolicy = {
   dataBoundary: 'local' | 'hybrid'
   auditEnabled: boolean

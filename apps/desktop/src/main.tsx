@@ -1,7 +1,7 @@
-import { Bot, Box, Check, ChevronDown, Circle, FolderOpen, Loader2, Plus, Search, Send, Settings, UserRound } from 'lucide-react'
+import { Activity, Bot, Box, Check, ChevronDown, Circle, FolderOpen, Loader2, LogOut, Mail, Plus, Search, Send, Settings, UserRound, Zap } from 'lucide-react'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
-import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
+import type { AccountUser, CodexTask, CodexTaskEvent } from '@eaw/shared'
 import '@fontsource-variable/geist'
 import '@fontsource-variable/noto-sans-sc'
 import './styles.css'
@@ -9,11 +9,17 @@ import './styles.css'
 const launchParams = new URLSearchParams(window.location.search)
 const runtimeUrl = launchParams.get('runtimeUrl') ?? import.meta.env.VITE_CODEX_RUNTIME_URL ?? 'http://127.0.0.1:4101'
 const runtimeToken = launchParams.get('runtimeToken') ?? import.meta.env.VITE_CODEX_RUNTIME_TOKEN ?? ''
+const enterpriseApiBase = launchParams.get('enterpriseApiBase') ?? import.meta.env.VITE_ENTERPRISE_API_BASE ?? 'http://codex.tminos.com:18080/admin-api'
 const defaultWorkspace = import.meta.env.VITE_DEFAULT_WORKSPACE ?? '/Users/a1/Documents/Codex/2026-05-26/codex'
 const localEmployeeId = import.meta.env.VITE_EMPLOYEE_ID ?? 'u-1001'
+const authTokenStorageKey = 'moyuan.auth.token'
+const reportedUsageStorageKey = 'moyuan.usage.reported'
+const appStartedAt = Date.now()
 
 type TranscriptItem = CodexTask['transcript'][number]
 type RuntimeState = 'checking' | 'online' | 'offline'
+type AuthMode = 'login' | 'register'
+type AuthState = 'checking' | 'anonymous' | 'signed-in'
 
 const welcomeTask: CodexTask = {
   id: 'welcome',
@@ -26,6 +32,39 @@ const welcomeTask: CodexTask = {
 
 function nowIso() {
   return new Date().toISOString()
+}
+
+function formatTokenNumber(value: number) {
+  if (value >= 1000000) return `${(value / 1000000).toFixed(value >= 10000000 ? 0 : 1)}M`
+  if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}K`
+  return String(value)
+}
+
+function enterpriseEndpoint(pathname: string) {
+  return `${enterpriseApiBase.replace(/\/$/, '')}/${pathname.replace(/^\//, '')}`
+}
+
+function enterpriseFetch(pathname: string, token = '', init: RequestInit = {}) {
+  const headers = new Headers(init.headers)
+  headers.set('Content-Type', headers.get('Content-Type') ?? 'application/json')
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  return fetch(enterpriseEndpoint(pathname), { ...init, headers })
+}
+
+function estimateTokens(text: string) {
+  const length = Array.from(text.trim()).length
+  if (!length) return 0
+  return Math.max(1, Math.ceil(length / 3.2))
+}
+
+function estimateTaskUsage(task: CodexTask) {
+  const promptTokens = estimateTokens(task.transcript.filter((item) => item.role === 'user').map((item) => item.content).join('\n'))
+  const completionTokens = estimateTokens(task.transcript.filter((item) => item.role === 'assistant').map((item) => item.content).join('\n'))
+  return {
+    completionTokens,
+    promptTokens,
+    totalTokens: promptTokens + completionTokens,
+  }
 }
 
 function statusText(status: CodexTask['status']) {
@@ -172,7 +211,7 @@ function eventStatus(event: CodexTaskEvent, fallback: CodexTask['status']): Code
   if (event.type === 'process.exit') return event.content.includes('完成') ? 'completed' : 'failed'
   if (event.type === 'turn.failed' || event.type === 'error') return 'failed'
   if (event.type === 'turn.completed') return 'completed'
-  if (event.type === 'turn.started' || event.type === 'thread.started' || event.type === 'tool') return 'running'
+  if (event.type === 'turn.started' || event.type === 'thread.started' || event.type === 'tool' || event.type === 'message' || event.type === 'message_delta') return 'running'
   return fallback
 }
 
@@ -295,7 +334,116 @@ function toUserFacingError(error: unknown) {
   if (/Failed to fetch|NetworkError|offline|ECONNREFUSED|fetch failed/i.test(message)) {
     return '本地服务暂时没连上，我会继续尝试恢复。'
   }
+  if (/Token 额度不足|额度不足|请先登录墨渊账号|登录状态已失效|账号已停用|企业后台暂时不可用/i.test(message)) {
+    return message
+  }
   return '任务没有正常完成，请稍后再试。'
+}
+
+function AuthScreen({
+  authMode,
+  busy,
+  message,
+  onModeChange,
+  onSendCode,
+  onSubmit,
+}: {
+  authMode: AuthMode
+  busy: boolean
+  message: string
+  onModeChange: (mode: AuthMode) => void
+  onSendCode: (email: string) => Promise<void>
+  onSubmit: (values: { code: string; email: string; name: string }) => Promise<void>
+}) {
+  const [email, setEmail] = useState('')
+  const [name, setName] = useState('')
+  const [code, setCode] = useState('')
+  const [codeSent, setCodeSent] = useState(false)
+
+  async function sendCode() {
+    await onSendCode(email.trim())
+    setCodeSent(true)
+  }
+
+  return (
+    <main className="auth-shell">
+      <section className="auth-card">
+        <div className="auth-brand">
+          <div className="auth-logo">
+            <Bot size={20} />
+          </div>
+          <div>
+            <strong>墨渊</strong>
+            <span>企业桌面 AI 工作台</span>
+          </div>
+        </div>
+
+        <div className="auth-copy">
+          <h1>{authMode === 'login' ? '登录企业账号' : '注册企业账号'}</h1>
+          <p>使用邮箱验证码进入客户端，Token 用量会像水电一样持续计量。</p>
+        </div>
+
+        <div className="auth-tabs">
+          <button className={authMode === 'login' ? 'active' : ''} onClick={() => onModeChange('login')} type="button">
+            登录
+          </button>
+          <button className={authMode === 'register' ? 'active' : ''} onClick={() => onModeChange('register')} type="button">
+            注册
+          </button>
+        </div>
+
+        <div className="auth-form">
+          {authMode === 'register' ? (
+            <label>
+              <span>姓名</span>
+              <input onChange={(event) => setName(event.target.value)} placeholder="你的名字" value={name} />
+            </label>
+          ) : null}
+          <label>
+            <span>邮箱</span>
+            <input onChange={(event) => setEmail(event.target.value)} placeholder="name@example.com" value={email} />
+          </label>
+          <div className="auth-code-row">
+            <label>
+              <span>验证码</span>
+              <input onChange={(event) => setCode(event.target.value)} placeholder="6 位验证码" value={code} />
+            </label>
+            <button disabled={busy || !email.trim()} onClick={sendCode} type="button">
+              {codeSent ? '重发' : '发送'}
+            </button>
+          </div>
+          {message ? <div className="auth-message">{message}</div> : null}
+          <button className="auth-submit" disabled={busy || !email.trim() || !code.trim()} onClick={() => onSubmit({ code, email, name })} type="button">
+            {busy ? <Loader2 className="spin" size={16} /> : <Mail size={16} />}
+            {authMode === 'login' ? '登录' : '注册并登录'}
+          </button>
+        </div>
+      </section>
+    </main>
+  )
+}
+
+function TokenMeter({ user }: { user: AccountUser }) {
+  const percent = user.tokenBudget > 0 ? Math.min(100, Math.round((user.tokenUsed / user.tokenBudget) * 100)) : 0
+  const remaining = Math.max(0, user.tokenBudget - user.tokenUsed)
+  const state = user.tokenBudget <= 0 ? 'unissued' : remaining <= 0 ? 'depleted' : 'normal'
+  return (
+    <div className={`token-meter ${state}`} title={`已用 ${user.tokenUsed} / ${user.tokenBudget} Token`}>
+      <div className="token-meter-icon">
+        <Zap size={14} />
+      </div>
+      <div className="token-meter-copy">
+        <span>{state === 'unissued' ? '待派发' : state === 'depleted' ? '已耗尽' : 'Token 水电'}</span>
+        <strong>
+          {formatTokenNumber(remaining)}
+          <em> 可用</em>
+        </strong>
+      </div>
+      <div className="token-meter-bar">
+        <i style={{ width: `${percent}%` }} />
+      </div>
+    </div>
+  )
 }
 
 function isCommandToolContent(content: string) {
@@ -594,12 +742,19 @@ function renderInline(text: string) {
 }
 
 function DesktopApp() {
+  const [authMode, setAuthMode] = useState<AuthMode>('login')
+  const [authState, setAuthState] = useState<AuthState>('checking')
+  const [authToken, setAuthToken] = useState(() => window.localStorage.getItem(authTokenStorageKey) ?? '')
+  const [authUser, setAuthUser] = useState<AccountUser | null>(null)
+  const [authBusy, setAuthBusy] = useState(false)
+  const [authMessage, setAuthMessage] = useState('')
   const [tasks, setTasks] = useState<CodexTask[]>([welcomeTask])
   const [activeTaskId, setActiveTaskId] = useState(welcomeTask.id)
   const [draftByTaskId, setDraftByTaskId] = useState<Record<string, string>>({})
   const workspace = defaultWorkspace
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [runtimeState, setRuntimeState] = useState<RuntimeState>('checking')
+  const [quotaNotice, setQuotaNotice] = useState('')
   const mainPaneRef = useRef<HTMLElement | null>(null)
   const transcriptRef = useRef<HTMLDivElement | null>(null)
   const transcriptBottomRef = useRef<HTMLDivElement | null>(null)
@@ -608,6 +763,7 @@ function DesktopApp() {
   const seenEventsRef = useRef<Set<string>>(new Set())
   const previousTaskIdRef = useRef(activeTaskId)
   const pinTranscriptToBottomRef = useRef(true)
+  const reportedUsageRef = useRef<Set<string>>(new Set(JSON.parse(window.localStorage.getItem(reportedUsageStorageKey) ?? '[]') as string[]))
 
   const activeTask = useMemo(() => tasks.find((task) => task.id === activeTaskId) ?? tasks[0], [activeTaskId, tasks])
   const visibleTranscript = useMemo(() => activeTask.transcript.filter(shouldShowMessage), [activeTask.transcript])
@@ -616,9 +772,105 @@ function DesktopApp() {
   const latestVisibleItem = visibleTranscript.at(-1)
   const shouldShowThinking = isBusy && latestVisibleItem?.role !== 'assistant'
   const prompt = draftByTaskId[activeTask.id] ?? ''
-  const placeholder = isBusy ? '当前任务运行中，完成后继续发送' : '让墨渊做点什么...'
-  const canSubmit = !isSubmitting && !isBusy && Boolean(prompt.trim())
+  const remainingTokens = authUser ? authUser.tokenBudget - authUser.tokenUsed : 0
+  const quotaDepleted = remainingTokens <= 0
+  const placeholder = quotaDepleted ? '等待管理员派发 Token 额度' : isBusy ? '当前任务运行中，完成后继续发送' : '让墨渊做点什么...'
+  const canSubmit = !isSubmitting && !isBusy && !quotaDepleted && Boolean(prompt.trim())
   const showStatusBadge = !isWelcome && (activeTask.status !== 'completed' || runtimeState === 'offline')
+
+  async function loadSignedInUser(token: string) {
+    const response = await enterpriseFetch('/me', token)
+    const payload = (await response.json()) as { data?: { user: AccountUser }; error?: string }
+    if (!response.ok || !payload.data?.user) throw new Error(payload.error ?? '登录状态已失效')
+    return payload.data.user
+  }
+
+  useEffect(() => {
+    if (!authToken) {
+      setAuthState('anonymous')
+      return
+    }
+
+    loadSignedInUser(authToken)
+      .then((user) => {
+        setAuthUser(user)
+        setAuthState('signed-in')
+      })
+      .catch(() => {
+        window.localStorage.removeItem(authTokenStorageKey)
+        setAuthToken('')
+        setAuthUser(null)
+        setAuthState('anonymous')
+      })
+  }, [authToken])
+
+  useEffect(() => {
+    if (authState !== 'signed-in' || !authToken) return
+
+    const refreshUser = () => {
+      loadSignedInUser(authToken)
+        .then(setAuthUser)
+        .catch(() => {})
+    }
+
+    const timer = window.setInterval(refreshUser, 15000)
+    return () => window.clearInterval(timer)
+  }, [authState, authToken])
+
+  async function requestAuthCode(email: string) {
+    if (!email) return
+    setAuthBusy(true)
+    setAuthMessage('')
+    try {
+      const response = await enterpriseFetch('/auth/send-code', '', {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      })
+      const payload = (await response.json()) as { data?: { sent: boolean }; error?: string }
+      if (!response.ok || !payload.data?.sent) throw new Error(payload.error ?? '验证码发送失败')
+      setAuthMessage('验证码已发送，请查看邮箱。')
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : '验证码发送失败')
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  async function submitAuth(values: { code: string; email: string; name: string }) {
+    setAuthBusy(true)
+    setAuthMessage('')
+    try {
+      const response = await enterpriseFetch(`/auth/${authMode}`, '', {
+        method: 'POST',
+        body: JSON.stringify({
+          code: values.code.trim(),
+          email: values.email.trim(),
+          name: values.name.trim(),
+        }),
+      })
+      const payload = (await response.json()) as { data?: { token: string; user: AccountUser }; error?: string }
+      if (!response.ok || !payload.data) throw new Error(payload.error ?? '登录失败')
+      window.localStorage.setItem(authTokenStorageKey, payload.data.token)
+      setAuthToken(payload.data.token)
+      setAuthUser(payload.data.user)
+      setAuthState('signed-in')
+      setAuthMessage('')
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : '登录失败')
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  function logout() {
+    window.localStorage.removeItem(authTokenStorageKey)
+    setAuthToken('')
+    setAuthUser(null)
+    setAuthState('anonymous')
+    setQuotaNotice('')
+    setTasks([welcomeTask])
+    setActiveTaskId(welcomeTask.id)
+  }
 
   function setPrompt(value: string, taskId = activeTask.id) {
     setDraftByTaskId((current) => ({ ...current, [taskId]: value }))
@@ -658,6 +910,8 @@ function DesktopApp() {
   }
 
   useEffect(() => {
+    if (authState !== 'signed-in') return
+
     runtimeFetch('/health')
       .then((response) => {
         if (!response.ok) throw new Error('offline')
@@ -691,7 +945,36 @@ function DesktopApp() {
           },
         ])
       })
-  }, [])
+  }, [authState])
+
+  useEffect(() => {
+    if (!authToken || !authUser) return
+
+    const reportable = tasks.filter((task) => {
+      if (task.id === 'welcome' || task.status !== 'completed') return false
+      const updatedAt = new Date(task.updatedAt ?? task.createdAt ?? 0).getTime()
+      if (Number.isFinite(updatedAt) && updatedAt < appStartedAt - 10000) return false
+      const key = `${task.id}:${task.updatedAt ?? task.transcript.length}`
+      return !reportedUsageRef.current.has(key)
+    })
+
+    for (const task of reportable) {
+      const key = `${task.id}:${task.updatedAt ?? task.transcript.length}`
+      const usage = estimateTaskUsage(task)
+      if (!usage.totalTokens) continue
+      reportedUsageRef.current.add(key)
+      window.localStorage.setItem(reportedUsageStorageKey, JSON.stringify(Array.from(reportedUsageRef.current).slice(-500)))
+      enterpriseFetch('/me/usage', authToken, {
+        method: 'POST',
+        body: JSON.stringify({ ...usage, taskId: task.id }),
+      })
+        .then((response) => response.json().then((payload) => ({ ok: response.ok, payload })))
+        .then(({ ok, payload }: { ok: boolean; payload: { data?: { user: AccountUser } } }) => {
+          if (ok && payload.data?.user) setAuthUser(payload.data.user)
+        })
+        .catch(() => {})
+    }
+  }, [authToken, authUser, tasks])
 
   useEffect(() => {
     const transcript = transcriptRef.current
@@ -745,7 +1028,7 @@ function DesktopApp() {
     const textarea = textareaRef.current
     if (!textarea) return
     textarea.style.height = 'auto'
-    const compactHeight = prompt.trim() ? Math.max(34, textarea.scrollHeight) : 34
+    const compactHeight = prompt.trim() ? Math.max(44, textarea.scrollHeight) : 44
     textarea.style.height = `${Math.min(118, compactHeight)}px`
     window.dispatchEvent(new Event('moyuan:composer-resized'))
   }, [prompt, activeTask?.id])
@@ -839,9 +1122,29 @@ function DesktopApp() {
   async function submitTask() {
     const promptText = prompt.trim()
     const workspacePath = workspace.trim() || defaultWorkspace
-    if (!promptText || isSubmitting) return
+    if (!promptText || isSubmitting || !authToken) return
+    if (quotaDepleted) {
+      setQuotaNotice('当前没有可用 Token，等待管理员在后台派发额度。')
+      window.setTimeout(() => setQuotaNotice(''), 3600)
+      return
+    }
 
     setIsSubmitting(true)
+    try {
+      const freshUser = await loadSignedInUser(authToken)
+      setAuthUser(freshUser)
+      if (freshUser.tokenBudget - freshUser.tokenUsed <= 0) {
+        setQuotaNotice('当前没有可用 Token，等待管理员在后台派发额度。')
+        window.setTimeout(() => setQuotaNotice(''), 3600)
+        setIsSubmitting(false)
+        return
+      }
+    } catch {
+      setRuntimeState('offline')
+      setIsSubmitting(false)
+      return
+    }
+
     pinTranscriptToBottomRef.current = true
     const shouldResume = activeTask.id !== 'welcome' && Boolean(activeTask.sessionId)
     const pendingTask = shouldResume ? appendPendingTurn(activeTask, promptText, workspacePath) : buildPendingTask(promptText, workspacePath)
@@ -854,7 +1157,9 @@ function DesktopApp() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          employeeId: localEmployeeId,
+          employeeId: authUser?.id ?? localEmployeeId,
+          enterpriseApiBase,
+          enterpriseAuthToken: authToken,
           workspace: workspacePath,
           prompt: promptText,
           parentTaskId: shouldResume ? activeTask.id : undefined,
@@ -876,6 +1181,19 @@ function DesktopApp() {
       setIsSubmitting(false)
       window.requestAnimationFrame(() => textareaRef.current?.focus())
     }
+  }
+
+  if (authState !== 'signed-in' || !authUser) {
+    return (
+      <AuthScreen
+        authMode={authMode}
+        busy={authBusy || authState === 'checking'}
+        message={authState === 'checking' ? '正在检查登录状态...' : authMessage}
+        onModeChange={setAuthMode}
+        onSendCode={requestAuthCode}
+        onSubmit={submitAuth}
+      />
+    )
   }
 
   return (
@@ -945,6 +1263,7 @@ function DesktopApp() {
             )}
           </div>
           <div className="topbar-actions">
+            <TokenMeter user={authUser} />
             <div
               className={`runtime-dot ${runtimeState}`}
               title={runtimeState === 'online' ? '本地 Runtime 正常运行' : runtimeState === 'checking' ? '正在连接本地 Runtime' : '本地 Runtime 未连接'}
@@ -958,6 +1277,11 @@ function DesktopApp() {
                 {runtimeState === 'offline' ? '未连接' : statusText(activeTask.status)}
               </div>
             )}
+            <button className="account-chip" onClick={logout} title={`退出 ${authUser.email}`} type="button">
+              <UserRound size={14} />
+              <span>{authUser.name || authUser.email}</span>
+              <LogOut size={13} />
+            </button>
           </div>
         </header>
 
@@ -994,6 +1318,12 @@ function DesktopApp() {
             }}
             placeholder={placeholder}
           />
+          {quotaDepleted || quotaNotice ? (
+            <div className="composer-quota-note">
+              <Zap size={13} />
+              <span>{quotaNotice || '当前账号暂无可用 Token，管理员派发额度后会自动刷新。'}</span>
+            </div>
+          ) : null}
           <div className="composer-toolbar">
             <div className="composer-tools">
               <button className="composer-icon-button" title="添加上下文" type="button">
@@ -1012,7 +1342,7 @@ function DesktopApp() {
               <button className="composer-soft-button compact" title="推理强度" type="button">
                 medium
               </button>
-              <button className="send-button" disabled={!canSubmit} onClick={submitTask} title="发送" type="button">
+              <button className="send-button" disabled={!canSubmit} onClick={submitTask} title={quotaDepleted ? '等待后台派发 Token 额度' : '发送'} type="button">
                 {isSubmitting ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
               </button>
             </div>
