@@ -118,7 +118,7 @@ function isInternalCodexJson(content: string) {
 }
 
 function isMutedTranscriptStatus(content: string) {
-  return content.trim() === '正在生成图片...'
+  return /^正在生成图片[.。…]*$/.test(content.trim())
 }
 
 function sanitizeTask(task: CodexTask): CodexTask {
@@ -842,7 +842,7 @@ app.post('/api/codex/tasks', async (request, reply) => {
 })
 
 app.get('/api/codex/tasks', async () => ({
-  data: Array.from(records.values()).map((record) => record.task),
+  data: Array.from(records.values()).map((record) => sanitizeTask(record.task)),
 }))
 
 app.post('/api/images/generations', async (request, reply) => {
@@ -897,7 +897,7 @@ app.get('/api/codex/tasks/:taskId', async (request, reply) => {
     return reply.status(404).send({ error: '任务不存在' })
   }
 
-  return { data: record.task }
+  return { data: sanitizeTask(record.task) }
 })
 
 app.post('/api/codex/tasks/:taskId/fork', async (request, reply) => {

@@ -1,4 +1,4 @@
-import { Bot, Box, Check, ChevronDown, ChevronRight, Circle, FolderOpen, GitBranch, Loader2, Plus, Search, Send, Settings, Terminal, UserRound } from 'lucide-react'
+import { Bot, Box, Check, ChevronDown, Circle, FolderOpen, Loader2, Plus, Search, Send, Settings, Terminal, UserRound } from 'lucide-react'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
@@ -21,11 +21,6 @@ const welcomeTask: CodexTask = {
   status: 'completed',
   workspace: defaultWorkspace,
   transcript: [
-    {
-      role: 'assistant',
-      content: '说一句你想让我做的事。我会使用内置 Codex 在本地工作区执行，可以读文件、运行命令、修改代码、跑测试。',
-      timestamp: new Date().toISOString(),
-    },
   ],
 }
 
@@ -87,7 +82,7 @@ function replaceTask(tasks: CodexTask[], oldTaskId: string, next: CodexTask) {
 function shouldShowMessage(item: TranscriptItem) {
   const content = item.content.trim()
   if (!content) return false
-  if (content === '正在生成图片...') return false
+  if (/^正在生成图片[.。…]*$/.test(content)) return false
   if (isInternalCodexJson(content)) return false
   if (item.role !== 'system') return true
   return (
@@ -144,10 +139,6 @@ function taskMeta(task: CodexTask) {
   if (task.sessionId) return `${assistantTurns} 轮 · 可续聊`
   if (commandTurns) return `${commandTurns} 次命令`
   return statusText(task.status)
-}
-
-function workspaceName(workspacePath: string) {
-  return workspacePath.split('/').filter(Boolean).pop() ?? workspacePath
 }
 
 function eventStatus(event: CodexTaskEvent, fallback: CodexTask['status']): CodexTask['status'] {
@@ -498,7 +489,7 @@ function DesktopApp() {
   const [tasks, setTasks] = useState<CodexTask[]>([welcomeTask])
   const [activeTaskId, setActiveTaskId] = useState(welcomeTask.id)
   const [draftByTaskId, setDraftByTaskId] = useState<Record<string, string>>({})
-  const [workspace, setWorkspace] = useState(defaultWorkspace)
+  const workspace = defaultWorkspace
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [runtimeState, setRuntimeState] = useState<RuntimeState>('checking')
   const mainPaneRef = useRef<HTMLElement | null>(null)
@@ -512,11 +503,12 @@ function DesktopApp() {
 
   const activeTask = useMemo(() => tasks.find((task) => task.id === activeTaskId) ?? tasks[0], [activeTaskId, tasks])
   const visibleTranscript = useMemo(() => activeTask.transcript.filter(shouldShowMessage), [activeTask.transcript])
+  const isWelcome = activeTask.id === 'welcome'
   const isBusy = activeTask.status === 'queued' || activeTask.status === 'running'
   const prompt = draftByTaskId[activeTask.id] ?? ''
-  const promptSuggestions = ['整理这个项目结构', '检查最近代码改动', '运行测试并修复问题']
   const placeholder = isBusy ? '当前任务运行中，完成后继续发送' : '让墨渊做点什么...'
   const canSubmit = !isSubmitting && !isBusy && Boolean(prompt.trim())
+  const showStatusBadge = !isWelcome && (activeTask.status !== 'completed' || runtimeState === 'offline')
 
   function setPrompt(value: string, taskId = activeTask.id) {
     setDraftByTaskId((current) => ({ ...current, [taskId]: value }))
@@ -776,7 +768,7 @@ function DesktopApp() {
         </div>
         <nav className="sidebar-nav" aria-label="主导航">
           <button
-            className={activeTask.id === 'welcome' ? 'nav-item active' : 'nav-item'}
+            className={isWelcome ? 'nav-item active' : 'nav-item'}
             onClick={() => {
               setPrompt('', welcomeTask.id)
               selectTask(welcomeTask.id)
@@ -825,50 +817,36 @@ function DesktopApp() {
       </aside>
 
       <section className="main-pane" ref={mainPaneRef}>
-        <header className="topbar">
+        <header className={`topbar ${isWelcome ? 'welcome' : ''}`}>
           <div className="topbar-title">
-            <h1>{activeTask.title}</h1>
-            <label className="workspace-field">
-              <ChevronRight size={15} />
-              <input value={workspace} onChange={(event) => setWorkspace(event.target.value)} />
-            </label>
+            {!isWelcome && (
+              <>
+                <h1>{activeTask.title}</h1>
+              </>
+            )}
           </div>
           <div className="topbar-actions">
-            <div className="workspace-chip">
-              <GitBranch size={14} />
-              {workspaceName(workspace)}
-            </div>
-            <div className={`runtime-dot ${runtimeState}`}>
+            <div
+              className={`runtime-dot ${runtimeState}`}
+              title={runtimeState === 'online' ? '本地 Runtime 正常运行' : runtimeState === 'checking' ? '正在连接本地 Runtime' : '本地 Runtime 未连接'}
+            >
               <span />
-              {runtimeState === 'online' ? '本地运行' : runtimeState === 'checking' ? '连接中' : '未连接'}
+              <b>{runtimeState === 'online' ? '本地运行' : runtimeState === 'checking' ? '连接中' : '未连接'}</b>
             </div>
-            <div className={`status-badge ${activeTask.status}`}>
-              {activeTask.status === 'running' || activeTask.status === 'queued' ? <Loader2 size={15} className="spin" /> : <Check size={15} />}
-              {runtimeState === 'offline' ? '未连接' : statusText(activeTask.status)}
-            </div>
+            {showStatusBadge && (
+              <div className={`status-badge ${activeTask.status}`}>
+                {activeTask.status === 'running' || activeTask.status === 'queued' ? <Loader2 size={15} className="spin" /> : <Check size={15} />}
+                {runtimeState === 'offline' ? '未连接' : statusText(activeTask.status)}
+              </div>
+            )}
           </div>
         </header>
 
-        <div className="transcript" ref={transcriptRef}>
+        <div className={`transcript ${isWelcome ? 'welcome' : ''}`} ref={transcriptRef}>
           {visibleTranscript.map((item, index) => {
             const isLatestAssistant = item.role === 'assistant' && index === visibleTranscript.length - 1 && activeTask.status === 'running'
             return <TranscriptMessage animate={isLatestAssistant} item={item} key={`${item.timestamp}-${index}`} label={messageLabel(item.role)} />
           })}
-          {activeTask.id === 'welcome' && (
-            <div className="quick-prompts">
-              {promptSuggestions.map((suggestion) => (
-                <button
-                  key={suggestion}
-                  onClick={() => {
-                    setPrompt(suggestion)
-                    window.requestAnimationFrame(() => textareaRef.current?.focus())
-                  }}
-                >
-                  {suggestion}
-                </button>
-              ))}
-            </div>
-          )}
           {isBusy && !hasCodexActivity(activeTask) && (
             <article className="message assistant pending">
               <div className="message-label">
