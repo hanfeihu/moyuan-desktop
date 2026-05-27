@@ -82,6 +82,7 @@ export type CodexTask = {
   updatedAt?: string
   exitCode?: number | null
   generatedImages?: ImageGenerationResult[]
+  generatedVideos?: VideoGenerationResult[]
   transcript: Array<{
     role: 'user' | 'assistant' | 'tool' | 'system'
     content: string
@@ -95,6 +96,17 @@ export type ImageGenerationResult = {
   model: string
   size: string
   url: string
+  createdAt: string
+}
+
+export type VideoGenerationResult = {
+  id: string
+  prompt: string
+  model: string
+  url: string
+  duration?: number
+  ratio?: string
+  resolution?: string
   createdAt: string
 }
 

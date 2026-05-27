@@ -1225,6 +1225,26 @@ button:disabled {
   box-shadow: 0 10px 30px rgba(31, 35, 40, 0.06);
 }
 
+.video-result {
+  width: min(560px, 100%);
+  margin: 2px 0 0;
+}
+
+.video-result video {
+  width: 100%;
+  display: block;
+  border: 1px solid #e7e5df;
+  border-radius: 12px;
+  background: #101114;
+  box-shadow: 0 14px 36px rgba(31, 35, 40, 0.1);
+}
+
+.video-result figcaption {
+  margin-top: 8px;
+  color: #6e747b;
+  font-size: 12.5px;
+}
+
 .spin {
   animation: spin 1s linear infinite;
 }

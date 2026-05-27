@@ -20,6 +20,7 @@ export default defineConfig({
   request: {},
   routes: [
     { path: '/', redirect: '/dashboard' },
+    { path: '/login', layout: false, component: './login' },
     { path: '/dashboard', name: '总览', icon: 'DashboardOutlined', component: './dashboard' },
     { path: '/models', name: '模型与密钥', icon: 'ApiOutlined', component: './models' },
     { path: '/skills', name: '技能配置', icon: 'VideoCameraOutlined', component: './skills' },

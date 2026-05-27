@@ -411,7 +411,7 @@ function AuthScreen({
 
         <div className="auth-copy">
           <h1>{authMode === 'login' ? '登录企业账号' : '注册企业账号'}</h1>
-          <p>使用邮箱验证码进入客户端，Token 用量会像水电一样持续计量。</p>
+          <p>使用邮箱验证码进入客户端，企业额度会持续记录并同步到后台。</p>
         </div>
 
         <div className="auth-tabs">
@@ -464,7 +464,7 @@ function TokenMeter({ user }: { user: AccountUser }) {
         <Zap size={14} />
       </div>
       <div className="token-meter-copy">
-        <span>{state === 'unissued' ? '待派发' : state === 'depleted' ? '已耗尽' : 'Token 水电'}</span>
+        <span>{state === 'unissued' ? '待派发' : state === 'depleted' ? '已耗尽' : 'Token 额度'}</span>
         <strong>
           {formatTokenNumber(remaining)}
           <em> 可用</em>
@@ -613,6 +613,15 @@ function MarkdownText({ content }: { content: string }) {
           )
         }
 
+        if (block.type === 'video') {
+          return (
+            <figure className="video-result" key={index}>
+              <video controls onLoadedMetadata={() => window.dispatchEvent(new Event('moyuan:content-resized'))} src={resolveRuntimeAssetUrl(block.src)} />
+              {block.alt ? <figcaption>{block.alt}</figcaption> : null}
+            </figure>
+          )
+        }
+
         return <p key={index}>{renderInline(block.text)}</p>
       })}
     </div>
@@ -623,6 +632,7 @@ type MarkdownBlock =
   | { type: 'paragraph' | 'heading' | 'quote'; text: string }
   | { type: 'code'; code: string; language?: string }
   | { type: 'image'; alt: string; src: string }
+  | { type: 'video'; alt: string; src: string }
   | { type: 'list'; ordered: boolean; start?: number; items: Array<{ body: string; meta?: string }> }
 
 function resolveRuntimeAssetUrl(src: string) {
@@ -700,7 +710,12 @@ function markdownBlocks(content: string): MarkdownBlock[] {
     if (imageMatch) {
       flushParagraph()
       flushList()
-      blocks.push({ type: 'image', alt: imageMatch[1], src: imageMatch[2] })
+      const src = imageMatch[2]
+      if (/\.(mp4|webm|mov)(\?|#|$)/i.test(src)) {
+        blocks.push({ type: 'video', alt: imageMatch[1], src })
+      } else {
+        blocks.push({ type: 'image', alt: imageMatch[1], src })
+      }
       continue
     }
 

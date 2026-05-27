@@ -89,7 +89,7 @@ export default function AccountsPage() {
           发送测试邮件
         </Button>
       }
-      subTitle="管理员工邮箱注册登录、SMTP 授权码和企业 Token 水电用量"
+      subTitle="管理员工邮箱注册登录、SMTP 授权码和企业 Token 额度"
       title="账号与用量"
     >
       <StatisticCard.Group className="dashboard-stats">

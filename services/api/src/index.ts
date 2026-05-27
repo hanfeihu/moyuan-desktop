@@ -2,7 +2,7 @@ import cors from '@fastify/cors'
 import 'dotenv/config'
 import Fastify from 'fastify'
 import nodemailer from 'nodemailer'
-import { createHash, randomInt, randomUUID } from 'node:crypto'
+import { createHash, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { z } from 'zod'
@@ -32,6 +32,18 @@ const videoSkillConfigSchema = z.object({
   monthlyLimit: z.coerce.number().int().min(0),
 })
 
+const videoGenerationSchema = z
+  .object({
+    content: z.array(z.unknown()).optional(),
+    duration: z.coerce.number().int().min(1).max(30).optional(),
+    generate_audio: z.boolean().optional(),
+    model: z.string().optional(),
+    prompt: z.string().optional(),
+    ratio: z.string().optional(),
+    watermark: z.boolean().optional(),
+  })
+  .passthrough()
+
 const mailConfigSchema = z.object({
   smtpHost: z.string().min(1),
   smtpPort: z.coerce.number().int().min(1).max(65535),
@@ -52,6 +64,11 @@ const authSchema = z.object({
   name: z.string().optional(),
 })
 
+const adminAuthSchema = z.object({
+  username: z.string().min(3).max(64),
+  password: z.string().min(8).max(128),
+})
+
 const usageSchema = z.object({
   promptTokens: z.coerce.number().int().min(0).default(0),
   completionTokens: z.coerce.number().int().min(0).default(0),
@@ -69,12 +86,27 @@ const userIdParamSchema = z.object({
 })
 
 type StoredAdminConfig = {
+  adminAuth?: AdminAuthConfig
+  adminSessions?: AdminSession[]
   videoSkillApiKey?: string
   videoSkill?: Omit<VideoSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>
   mailAuthCode?: string
   mailSettings?: Omit<MailServiceConfig, 'maskedAuthCode' | 'authCodeConfigured'>
   users?: AccountUser[]
   sessions?: Array<{ tokenHash: string; userId: string; createdAt: string; lastSeenAt: string }>
+}
+
+type AdminAuthConfig = {
+  username: string
+  passwordHash: string
+  passwordSalt: string
+  updatedAt: string
+}
+
+type AdminSession = {
+  tokenHash: string
+  createdAt: string
+  lastSeenAt: string
 }
 
 const employees: Employee[] = [
@@ -100,6 +132,8 @@ let mailAuthCode = storedConfig.mailAuthCode ?? process.env.QQ_MAIL_AUTH_CODE ??
 let mailSettings: MailServiceConfig = buildMailSettings(storedConfig.mailSettings)
 let users: AccountUser[] = storedConfig.users ?? []
 let sessions = storedConfig.sessions ?? []
+let adminAuth: AdminAuthConfig | undefined = storedConfig.adminAuth ?? buildAdminAuthFromEnv()
+let adminSessions: AdminSession[] = storedConfig.adminSessions ?? []
 const verificationCodes = new Map<string, { code: string; expiresAt: number; createdAt: number }>()
 
 const policy: EnterprisePolicy = {
@@ -131,6 +165,8 @@ async function persistStoredConfig() {
       {
         videoSkill,
         videoSkillApiKey,
+        adminAuth,
+        adminSessions,
         mailSettings,
         mailAuthCode,
         users,
@@ -179,6 +215,33 @@ function tokenHash(token: string) {
   return createHash('sha256').update(token).digest('hex')
 }
 
+function hashPassword(password: string, salt: string) {
+  return createHash('sha256').update(`${salt}:${password}`).digest('hex')
+}
+
+function buildAdminAuth(username: string, password: string): AdminAuthConfig {
+  const passwordSalt = randomUUID()
+  return {
+    username: username.trim(),
+    passwordSalt,
+    passwordHash: hashPassword(password, passwordSalt),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function buildAdminAuthFromEnv() {
+  const username = process.env.ADMIN_USERNAME?.trim()
+  const password = process.env.ADMIN_PASSWORD?.trim()
+  if (!username || !password) return undefined
+  return buildAdminAuth(username, password)
+}
+
+function verifyPassword(password: string, auth: AdminAuthConfig) {
+  const expected = Buffer.from(auth.passwordHash)
+  const actual = Buffer.from(hashPassword(password, auth.passwordSalt))
+  return expected.length === actual.length && timingSafeEqual(expected, actual)
+}
+
 function sanitizeUser(user: AccountUser): AccountUser {
   return { ...user }
 }
@@ -191,10 +254,28 @@ function createSession(userId: string) {
   return token
 }
 
+function createAdminSession() {
+  const token = randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '')
+  const now = new Date().toISOString()
+  adminSessions = [{ tokenHash: tokenHash(token), createdAt: now, lastSeenAt: now }, ...adminSessions].slice(0, 100)
+  void persistStoredConfig()
+  return token
+}
+
 function getAuthToken(request: { headers: Record<string, unknown> }) {
   const authHeader = String(request.headers.authorization ?? '')
   if (authHeader.startsWith('Bearer ')) return authHeader.slice('Bearer '.length)
   return String(request.headers['x-moyuan-auth-token'] ?? '')
+}
+
+function getRequestAdmin(request: { headers: Record<string, unknown> }) {
+  if (!adminAuth) return undefined
+  const token = getAuthToken(request)
+  if (!token) return undefined
+  const session = adminSessions.find((item) => item.tokenHash === tokenHash(token))
+  if (!session) return undefined
+  session.lastSeenAt = new Date().toISOString()
+  return { username: adminAuth.username }
 }
 
 function getUserByToken(token: string) {
@@ -221,6 +302,21 @@ async function requireUser(request: { headers: Record<string, unknown> }, reply:
   }
   return user
 }
+
+app.addHook('preHandler', async (request, reply) => {
+  const pathname = request.url.split('?')[0]
+  if (!pathname.startsWith('/api/admin/')) return
+  if (pathname.startsWith('/api/admin/admin-auth/')) return
+  if (pathname.startsWith('/api/admin/auth/')) return
+  if (pathname.startsWith('/api/admin/skills/')) return
+  if (pathname === '/api/admin/desktop/bootstrap') return
+  if (pathname === '/api/admin/me' || pathname === '/api/admin/me/usage') return
+
+  if (!adminAuth) return
+  if (!getRequestAdmin(request)) {
+    return reply.status(401).send({ error: adminAuth ? '请先登录管理员账号' : '请先初始化管理员账号' })
+  }
+})
 
 function verifyCode(email: string, code: string) {
   const normalized = email.toLowerCase()
@@ -279,16 +375,169 @@ async function sendTestMail() {
   })
 }
 
+function buildDesktopBootstrap() {
+  return {
+    employee: employees[0],
+    policy,
+    runtime: {
+      codexRuntimeUrl: process.env.CODEX_RUNTIME_URL ?? 'http://localhost:4100',
+      modelProvider: {
+        name: modelProvider.name,
+        baseUrl: modelProvider.baseUrl,
+        defaultModel: modelProvider.defaultModel,
+        enabled: modelProvider.enabled,
+      },
+      skills: {
+        videoGeneration: {
+          allowImageInput: videoSkill.allowImageInput,
+          baseUrl: videoSkill.baseUrl,
+          defaultDuration: videoSkill.defaultDuration,
+          defaultModel: videoSkill.defaultModel,
+          defaultRatio: videoSkill.defaultRatio,
+          defaultResolution: videoSkill.defaultResolution,
+          enabled: videoSkill.enabled,
+          apiKeyConfigured: videoSkill.apiKeyConfigured,
+          name: videoSkill.name,
+          provider: videoSkill.provider,
+        },
+      },
+    },
+  }
+}
+
+function videoSkillTaskUrl(taskId?: string) {
+  const base = videoSkill.baseUrl.replace(/\/$/, '')
+  const path = taskId ? `/contents/generations/tasks/${encodeURIComponent(taskId)}` : '/contents/generations/tasks'
+  return `${base}${path}`
+}
+
+function findFirstString(payload: unknown, keys: string[]): string | undefined {
+  if (!payload || typeof payload !== 'object') return undefined
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const found = findFirstString(item, keys)
+      if (found) return found
+    }
+    return undefined
+  }
+
+  const record = payload as Record<string, unknown>
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string' && value) return value
+  }
+  for (const value of Object.values(record)) {
+    const found = findFirstString(value, keys)
+    if (found) return found
+  }
+  return undefined
+}
+
+function findFirstVideoUrl(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object') return undefined
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const found = findFirstVideoUrl(item)
+      if (found) return found
+    }
+    return undefined
+  }
+
+  const record = payload as Record<string, unknown>
+  for (const [key, value] of Object.entries(record)) {
+    if (typeof value === 'string' && /^https?:\/\//i.test(value) && (/\.(mp4|webm|mov)(\?|#|$)/i.test(value) || /video/i.test(key))) {
+      return value
+    }
+  }
+  for (const value of Object.values(record)) {
+    const found = findFirstVideoUrl(value)
+    if (found) return found
+  }
+  return undefined
+}
+
+async function readUpstreamJson(response: Response) {
+  const text = await response.text()
+  if (!text) return {}
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return { message: text }
+  }
+}
+
+async function callVideoSkillApi(url: string, init: RequestInit) {
+  if (!videoSkill.enabled || !videoSkillApiKey) {
+    return { ok: false as const, status: 400, payload: { error: '视频生成技能未启用，请管理员在后台配置并启用火山方舟 KEY' } }
+  }
+
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${videoSkillApiKey}`,
+      'Content-Type': 'application/json',
+      ...(init.headers ?? {}),
+    },
+  })
+  const payload = await readUpstreamJson(response)
+  return { ok: response.ok, status: response.status, payload }
+}
+
 app.get('/health', async () => ({
   ok: true,
   service: 'enterprise-api',
 }))
+
+app.get('/api/admin/admin-auth/state', async () => ({
+  data: {
+    configured: Boolean(adminAuth),
+    username: adminAuth?.username ?? '',
+  },
+}))
+
+app.post('/api/admin/admin-auth/setup', async (request, reply) => {
+  if (adminAuth) return reply.status(409).send({ error: '管理员账号已初始化' })
+  const parsed = adminAuthSchema.safeParse(request.body)
+  if (!parsed.success) return reply.status(400).send({ error: '管理员账号或密码不完整', detail: parsed.error.flatten() })
+
+  adminAuth = buildAdminAuth(parsed.data.username, parsed.data.password)
+  adminSessions = []
+  const token = createAdminSession()
+  await persistStoredConfig()
+  return { data: { token, username: adminAuth.username } }
+})
+
+app.post('/api/admin/admin-auth/login', async (request, reply) => {
+  if (!adminAuth) return reply.status(409).send({ error: '请先初始化管理员账号' })
+  const parsed = adminAuthSchema.safeParse(request.body)
+  if (!parsed.success) return reply.status(400).send({ error: '管理员账号或密码不完整', detail: parsed.error.flatten() })
+  if (parsed.data.username.trim() !== adminAuth.username || !verifyPassword(parsed.data.password, adminAuth)) {
+    return reply.status(401).send({ error: '管理员账号或密码不正确' })
+  }
+
+  const token = createAdminSession()
+  await persistStoredConfig()
+  return { data: { token, username: adminAuth.username } }
+})
+
+app.get('/api/admin/admin-auth/me', async (request, reply) => {
+  const admin = getRequestAdmin(request)
+  if (!admin) return reply.status(401).send({ error: '请先登录管理员账号' })
+  await persistStoredConfig()
+  return { data: admin }
+})
 
 app.get('/api/admin/model-provider', async () => ({ data: modelProvider }))
 
 app.get('/api/admin/video-skill', async () => ({ data: videoSkill }))
 
 app.get('/api/admin/mail-settings', async () => ({ data: mailSettings }))
+
+app.get('/api/admin/desktop/bootstrap', async (request, reply) => {
+  const user = getRequestUser(request)
+  if (!user) return unauthorized(reply)
+  return { data: buildDesktopBootstrap() }
+})
 
 app.put('/api/admin/mail-settings', async (request, reply) => {
   const parsed = mailConfigSchema.safeParse(request.body)
@@ -449,6 +698,79 @@ app.post('/api/admin/me/usage', async (request, reply) => {
   return { data: { user: sanitizeUser(user) } }
 })
 
+app.post('/api/admin/skills/video/generations', async (request, reply) => {
+  const user = getRequestUser(request)
+  if (!user) return unauthorized(reply)
+
+  const parsed = videoGenerationSchema.safeParse(request.body)
+  if (!parsed.success) {
+    return reply.status(400).send({ error: '视频生成参数不完整', detail: parsed.error.flatten() })
+  }
+
+  const content = parsed.data.content?.length
+    ? parsed.data.content
+    : parsed.data.prompt
+      ? [{ type: 'text', text: parsed.data.prompt }]
+      : undefined
+
+  if (!content?.length) {
+    return reply.status(400).send({ error: '视频生成需要 prompt 或 content' })
+  }
+
+  const body = {
+    ...parsed.data,
+    content,
+    duration: parsed.data.duration ?? videoSkill.defaultDuration,
+    generate_audio: parsed.data.generate_audio ?? true,
+    model: parsed.data.model ?? videoSkill.defaultModel,
+    ratio: parsed.data.ratio ?? videoSkill.defaultRatio,
+    watermark: parsed.data.watermark ?? false,
+  }
+  delete (body as { prompt?: unknown }).prompt
+
+  const upstream = await callVideoSkillApi(videoSkillTaskUrl(), {
+    body: JSON.stringify(body),
+    method: 'POST',
+  })
+
+  if (!upstream.ok) {
+    const message = findFirstString(upstream.payload, ['message', 'error', 'msg']) ?? `火山方舟返回 ${upstream.status}`
+    return reply.status(upstream.status).send({ error: message, upstream: upstream.payload })
+  }
+
+  const taskId = findFirstString(upstream.payload, ['id', 'task_id', 'taskId'])
+  return {
+    data: {
+      taskId,
+      status: findFirstString(upstream.payload, ['status']),
+      videoUrl: findFirstVideoUrl(upstream.payload),
+      raw: upstream.payload,
+    },
+  }
+})
+
+app.get('/api/admin/skills/video/generations/:taskId', async (request, reply) => {
+  const user = getRequestUser(request)
+  if (!user) return unauthorized(reply)
+
+  const params = z.object({ taskId: z.string().min(1) }).parse(request.params)
+  const upstream = await callVideoSkillApi(videoSkillTaskUrl(params.taskId), { method: 'GET' })
+
+  if (!upstream.ok) {
+    const message = findFirstString(upstream.payload, ['message', 'error', 'msg']) ?? `火山方舟返回 ${upstream.status}`
+    return reply.status(upstream.status).send({ error: message, upstream: upstream.payload })
+  }
+
+  return {
+    data: {
+      taskId: params.taskId,
+      status: findFirstString(upstream.payload, ['status']),
+      videoUrl: findFirstVideoUrl(upstream.payload),
+      raw: upstream.payload,
+    },
+  }
+})
+
 app.put('/api/admin/video-skill', async (request, reply) => {
   const parsed = videoSkillConfigSchema.safeParse(request.body)
 
@@ -512,33 +834,7 @@ app.get('/api/admin/employees', async () => ({
 app.get('/api/admin/policy', async () => ({ data: policy }))
 
 app.get('/api/desktop/bootstrap', async () => ({
-  data: {
-    employee: employees[0],
-    policy,
-    runtime: {
-      codexRuntimeUrl: process.env.CODEX_RUNTIME_URL ?? 'http://localhost:4100',
-      modelProvider: {
-        name: modelProvider.name,
-        baseUrl: modelProvider.baseUrl,
-        defaultModel: modelProvider.defaultModel,
-        enabled: modelProvider.enabled,
-      },
-      skills: {
-        videoGeneration: {
-          allowImageInput: videoSkill.allowImageInput,
-          baseUrl: videoSkill.baseUrl,
-          defaultDuration: videoSkill.defaultDuration,
-          defaultModel: videoSkill.defaultModel,
-          defaultRatio: videoSkill.defaultRatio,
-          defaultResolution: videoSkill.defaultResolution,
-          enabled: videoSkill.enabled,
-          apiKeyConfigured: videoSkill.apiKeyConfigured,
-          name: videoSkill.name,
-          provider: videoSkill.provider,
-        },
-      },
-    },
-  },
+  data: buildDesktopBootstrap(),
 }))
 
 const port = Number(process.env.API_PORT ?? 4000)

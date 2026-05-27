@@ -211,6 +211,78 @@ body {
   overflow-x: auto;
 }
 
+.admin-login-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px 18px;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(22, 119, 255, 0.08), transparent 34%),
+    #f6f8fb;
+}
+
+.admin-login-panel {
+  width: min(430px, 100%);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 12px;
+  padding: 28px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 22px 60px rgba(15, 23, 42, 0.1);
+}
+
+.admin-login-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.admin-login-mark {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 9px;
+  color: #fff;
+  font-weight: 760;
+  background: linear-gradient(145deg, #101828, #1677ff);
+}
+
+.admin-login-brand strong,
+.admin-login-brand span {
+  display: block;
+}
+
+.admin-login-brand strong {
+  color: #111827;
+  font-size: 16px;
+}
+
+.admin-login-brand span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.admin-login-copy {
+  margin: 28px 0 18px;
+}
+
+.admin-login-copy h1 {
+  margin: 0 0 8px;
+  color: #111827;
+  font-size: 25px;
+  line-height: 1.2;
+}
+
+.admin-login-copy p {
+  margin: 0;
+  color: #64748b;
+  line-height: 1.65;
+}
+
+.admin-login-switch {
+  margin-bottom: 20px;
+}
+
 @media (max-width: 900px) {
   .ant-pro-page-container-children-container {
     padding-inline: 16px;

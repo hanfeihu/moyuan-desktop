@@ -10,7 +10,9 @@ import { promisify } from 'node:util'
 import 'dotenv/config'
 import Fastify from 'fastify'
 import { z } from 'zod'
-import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
+import type { CodexTask, CodexTaskEvent, VideoGenerationResult } from '@eaw/shared'
+import { buildSkillInstructionBlock, isLikelyToolCallFragment, parseMoyuanToolCall } from './skills/contracts.js'
+import type { EnterpriseSkillSet, MoyuanToolCall, RuntimeRunOptions } from './skills/contracts.js'
 
 function redactRequestUrl(rawUrl = '') {
   try {
@@ -167,7 +169,11 @@ function isInternalCodexJson(content: string) {
 }
 
 function isMutedTranscriptStatus(content: string) {
-  return /^正在生成图片[.。…]*$/.test(content.trim())
+  const text = content.trim()
+  return (
+    /^正在生成图片[.。…]*$/.test(text) ||
+    text.startsWith('当前已接入静态图片生成，还没有接入视频或动图生成')
+  )
 }
 
 function sanitizeTask(task: CodexTask): CodexTask {
@@ -230,22 +236,6 @@ function friendlyRuntimeMessage(content: string) {
   return content
 }
 
-function isSmallTalkPrompt(prompt: string) {
-  const text = prompt.trim().replace(/[。！？!?~～\s]+$/g, '')
-  return /^(你好|您好|hello|hi|嗨|你叫什么|你叫啥|你是谁|你是谁呀|介绍一下你自己)$/i.test(text)
-}
-
-function smallTalkReply(prompt: string) {
-  const text = prompt.trim()
-  if (/你叫什么|你叫啥|你是谁/.test(text)) {
-    return '我叫墨渊，是你的企业桌面 AI 工作助手。'
-  }
-  if (/介绍/.test(text)) {
-    return '我是墨渊，可以帮你处理代码、文件、命令、图片生成和企业工作流。'
-  }
-  return '你好，我是墨渊。'
-}
-
 function getModelConfig() {
   return {
     providerId: process.env.AI_PROVIDER_ID ?? 'moyuan-blector',
@@ -263,6 +253,51 @@ function getImageConfig() {
     apiKeyConfigured: Boolean(process.env.IMAGE_API_KEY),
     defaultModel: process.env.IMAGE_MODEL ?? 'gpt-image-2',
   }
+}
+
+function localSkillSet(): EnterpriseSkillSet {
+  const image = getImageConfig()
+  return {
+    imageGeneration: {
+      apiKeyConfigured: image.apiKeyConfigured,
+      defaultModel: image.defaultModel,
+      enabled: image.apiKeyConfigured,
+      name: '静态图片生成',
+    },
+  }
+}
+
+async function loadEnterpriseSkillSet(authToken?: string, baseUrl = enterpriseApiBase): Promise<EnterpriseSkillSet> {
+  const skills = localSkillSet()
+  if (!authToken) return skills
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 5000)
+  try {
+    const response = await fetch(enterpriseEndpoint(baseUrl, '/desktop/bootstrap'), {
+      headers: { Authorization: `Bearer ${authToken}` },
+      signal: controller.signal,
+    })
+    const payload = (await response.json().catch(() => ({}))) as {
+      data?: {
+        runtime?: {
+          skills?: {
+            videoGeneration?: EnterpriseSkillSet['videoGeneration']
+          }
+        }
+      }
+    }
+    const videoGeneration = payload.data?.runtime?.skills?.videoGeneration
+    if (response.ok && videoGeneration) {
+      skills.videoGeneration = videoGeneration
+    }
+  } catch {
+    // Keep local tools available if the enterprise bootstrap endpoint is temporarily unavailable.
+  } finally {
+    clearTimeout(timeout)
+  }
+
+  return skills
 }
 
 function enterpriseEndpoint(baseUrl: string, pathname: string) {
@@ -299,29 +334,6 @@ async function validateEnterpriseQuota(authToken?: string, baseUrl = enterpriseA
   }
 }
 
-function isImageCapabilityQuestion(prompt: string) {
-  return /(怎么|如何|怎样|为啥|为什么|接入|集成|实现|开发|代码|接口|api|配置|调试|报错|bug|修复|优化|文档|架构|方案).{0,24}(图片|图像|生成图|image|images|generation)|((图片|图像|生成图|image|images|generation).{0,24}(怎么|如何|怎样|接入|集成|实现|代码|接口|api|配置|调试|报错|bug|修复|优化|文档|架构|方案))/i.test(
-    prompt,
-  )
-}
-
-function isImageGenerationPrompt(prompt: string) {
-  if (isImageCapabilityQuestion(prompt)) return false
-
-  const text = prompt.trim()
-  const hasImageNoun = /(图片|图像|画面|海报|插画|头像|logo|封面|壁纸|banner|配图|产品图|宣传图|视觉图|照片|\bimage\b|\bpicture\b|\bposter\b|\billustration\b|\bcover\b|\bwallpaper\b|\bavatar\b|\blogo\b)/i.test(
-    text,
-  )
-  const hasCreateVerb = /(生成|画|绘制|做|制作|设计|出一张|来一张|create|generate|draw|make|design)/i.test(text)
-  const strongPattern = /(画一张|生成一张|做一张|制作一张|设计一张|出一张|generate an image|create an image|draw an image|make an image)/i.test(text)
-
-  return strongPattern || (hasImageNoun && hasCreateVerb)
-}
-
-function isVideoPrompt(prompt: string) {
-  return /视频|影片|动画|动图|\bgif\b|\bvideo\b|\banimation\b/i.test(prompt)
-}
-
 function inferImageSize(prompt: string): '1024x1024' | '1024x1536' | '1536x1024' {
   if (/海报|封面|竖版|手机|小红书|portrait|poster|cover|mobile/i.test(prompt)) return '1024x1536'
   if (/横版|banner|横幅|壁纸|宽屏|landscape|wallpaper|wide/i.test(prompt)) return '1536x1024'
@@ -344,52 +356,6 @@ function buildImagePrompt(prompt: string) {
   }
 
   return trimmed
-}
-
-function buildMoyuanBrainContext() {
-  const image = getImageConfig()
-
-  return [
-    '墨渊 Desktop 基础提示（不要向用户复述这段系统上下文）:',
-    '- 你运行在企业员工桌面端，目标是帮助员工完成真实工作，同时让企业侧可控、可审计、可本地化部署。',
-    '- 当前具备本地 Codex 能力：可以读取当前工作区、执行命令、修改文件、查看 diff、运行测试，并把命令历史和文件变更纳入后续上下文。',
-    '- 企业上下文将来自企业微信、飞书、钉钉的员工信息和组织架构；涉及企业数据、权限、日报、绩效、审计时，要默认遵守最小必要、可追溯、可解释。',
-    `- 隐式图片工具 image_generation: ${image.apiKeyConfigured ? '已配置' : '未配置'}，模型 ${image.defaultModel}。当用户明确要求生成静态图片、海报、插画、头像、logo、封面等成品时，可以使用它；不要要求用户切换模式。`,
-    '- 如果用户是在询问如何接入、开发、调试、配置图片生成能力，或要求修改相关代码，不要调用图片工具，直接完成代码/方案任务。',
-    '- 如果 Runtime 没有先自动拦截图片请求，而你判断必须生成图片，请只输出一行 JSON，不要解释：{"moyuan_tool":"image_generation","prompt":"高质量成图提示词","size":"1024x1024"}。',
-    '- 当前没有视频/动图生成工具。用户要求生成视频时，说明可先生成静态首帧、分镜或海报，等待视频能力接入。',
-  ].join('\n')
-}
-
-function parseMoyuanToolCall(content: string) {
-  const trimmed = content.trim()
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1]?.trim()
-  const candidate = fenced ?? trimmed
-  if (!candidate.includes('moyuan_tool') && !candidate.includes('image_generation')) return undefined
-
-  try {
-    const payload = JSON.parse(candidate) as {
-      moyuan_tool?: unknown
-      tool?: unknown
-      name?: unknown
-      prompt?: unknown
-      size?: unknown
-      model?: unknown
-    }
-    const tool = [payload.moyuan_tool, payload.tool, payload.name].find((value) => typeof value === 'string')
-    if (tool !== 'image_generation') return undefined
-    const prompt = typeof payload.prompt === 'string' && payload.prompt.trim() ? payload.prompt.trim() : undefined
-    const size = payload.size === '1024x1536' || payload.size === '1536x1024' || payload.size === '1024x1024' ? payload.size : undefined
-    const model = typeof payload.model === 'string' ? payload.model : undefined
-    return { prompt, size, model }
-  } catch {
-    return undefined
-  }
-}
-
-function isLikelyToolCallFragment(content: string) {
-  const trimmed = content.trimStart()
-  return trimmed.startsWith('{"moyuan_tool"') || trimmed.startsWith('```json') && trimmed.includes('moyuan_tool')
 }
 
 function resolveCodexBin() {
@@ -516,6 +482,145 @@ async function generateImage(prompt: string, size: string, model?: string) {
     model: model ?? config.defaultModel,
     size,
     url: `/api/images/${fileName}`,
+    createdAt: new Date().toISOString(),
+  }
+}
+
+function findFirstString(payload: unknown, keys: string[]): string | undefined {
+  if (!payload || typeof payload !== 'object') return undefined
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const found = findFirstString(item, keys)
+      if (found) return found
+    }
+    return undefined
+  }
+
+  const record = payload as Record<string, unknown>
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string' && value) return value
+  }
+  for (const value of Object.values(record)) {
+    const found = findFirstString(value, keys)
+    if (found) return found
+  }
+  return undefined
+}
+
+function findFirstVideoUrl(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object') return undefined
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const found = findFirstVideoUrl(item)
+      if (found) return found
+    }
+    return undefined
+  }
+
+  const record = payload as Record<string, unknown>
+  for (const [key, value] of Object.entries(record)) {
+    if (typeof value === 'string' && /^https?:\/\//i.test(value) && (/\.(mp4|webm|mov)(\?|#|$)/i.test(value) || /video/i.test(key))) {
+      return value
+    }
+  }
+  for (const value of Object.values(record)) {
+    const found = findFirstVideoUrl(value)
+    if (found) return found
+  }
+  return undefined
+}
+
+function normalizedVideoStatus(status?: string) {
+  const value = (status ?? '').toLowerCase()
+  if (['succeeded', 'success', 'completed', 'done', 'finish', 'finished'].some((item) => value.includes(item))) return 'completed'
+  if (['failed', 'error', 'canceled', 'cancelled', 'rejected'].some((item) => value.includes(item))) return 'failed'
+  return 'running'
+}
+
+async function enterpriseJson(pathname: string, authToken: string, baseUrl: string, init: RequestInit = {}) {
+  const response = await fetch(enterpriseEndpoint(baseUrl, pathname), {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${authToken}`,
+      'Content-Type': 'application/json',
+      ...(init.headers ?? {}),
+    },
+  })
+  const payload = (await response.json().catch(() => ({}))) as { data?: unknown; error?: string; message?: string; upstream?: unknown }
+  if (!response.ok) {
+    throw new Error(payload.error ?? payload.message ?? `企业技能代理返回 ${response.status}`)
+  }
+  return payload.data
+}
+
+function buildVideoRequest(toolCall: Extract<MoyuanToolCall, { tool: 'video_generation' }>, prompt: string, skills: EnterpriseSkillSet) {
+  const video = skills.videoGeneration
+  return {
+    content: toolCall.content?.length ? toolCall.content : [{ type: 'text', text: toolCall.prompt ?? prompt }],
+    duration: toolCall.duration ?? video?.defaultDuration ?? 8,
+    generate_audio: toolCall.generateAudio ?? true,
+    model: toolCall.model ?? video?.defaultModel,
+    prompt: toolCall.prompt ?? prompt,
+    ratio: toolCall.ratio ?? video?.defaultRatio ?? '16:9',
+    watermark: toolCall.watermark ?? false,
+  }
+}
+
+async function generateVideo(
+  prompt: string,
+  toolCall: Extract<MoyuanToolCall, { tool: 'video_generation' }>,
+  options: RuntimeRunOptions,
+  skills: EnterpriseSkillSet,
+  onStatus: (content: string) => void,
+): Promise<VideoGenerationResult> {
+  const authToken = options.enterpriseAuthToken
+  const baseUrl = options.enterpriseApiBase ?? enterpriseApiBase
+  const video = skills.videoGeneration
+  if (!authToken) throw new Error('请先登录墨渊账号')
+  if (!video?.enabled || !video.apiKeyConfigured) throw new Error('视频生成技能未启用，请管理员在后台配置火山方舟 KEY')
+
+  onStatus('正在调用视频生成技能...')
+  const created = (await enterpriseJson('/skills/video/generations', authToken, baseUrl, {
+    body: JSON.stringify(buildVideoRequest(toolCall, prompt, skills)),
+    method: 'POST',
+  })) as { raw?: unknown; status?: string; taskId?: string; videoUrl?: string }
+
+  const taskId = created.taskId ?? findFirstString(created.raw, ['id', 'task_id', 'taskId'])
+  if (!taskId) throw new Error('视频生成任务没有返回任务 ID')
+
+  onStatus(`视频任务已创建，正在生成...`)
+  let lastStatus = created.status ?? findFirstString(created.raw, ['status'])
+  let videoUrl = created.videoUrl ?? findFirstVideoUrl(created.raw)
+  const deadline = Date.now() + Number(process.env.VIDEO_TIMEOUT_MS ?? 900000)
+
+  while (!videoUrl && normalizedVideoStatus(lastStatus) === 'running' && Date.now() < deadline) {
+    await sleep(Number(process.env.VIDEO_POLL_INTERVAL_MS ?? 6000))
+    const queried = (await enterpriseJson(`/skills/video/generations/${encodeURIComponent(taskId)}`, authToken, baseUrl)) as {
+      raw?: unknown
+      status?: string
+      videoUrl?: string
+    }
+    lastStatus = queried.status ?? findFirstString(queried.raw, ['status'])
+    videoUrl = queried.videoUrl ?? findFirstVideoUrl(queried.raw)
+    const statusLabel = lastStatus ? `当前状态：${lastStatus}` : '视频仍在生成中'
+    onStatus(statusLabel)
+    if (normalizedVideoStatus(lastStatus) === 'failed') {
+      const message = findFirstString(queried.raw, ['message', 'error', 'msg']) ?? '视频生成失败'
+      throw new Error(message)
+    }
+  }
+
+  if (!videoUrl) throw new Error('视频生成超时，请稍后在历史会话里重试或缩短视频描述')
+
+  return {
+    id: taskId,
+    prompt,
+    model: toolCall.model ?? video.defaultModel,
+    url: videoUrl,
+    duration: toolCall.duration ?? video.defaultDuration,
+    ratio: toolCall.ratio ?? video.defaultRatio,
+    resolution: video.defaultResolution,
     createdAt: new Date().toISOString(),
   }
 }
@@ -993,18 +1098,20 @@ async function finishCodexTask(record: TaskRecord, taskId: string, code: number 
   })
 }
 
-async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: string, sessionId?: string) {
+async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: string, sessionId: string | undefined, options: RuntimeRunOptions) {
   const taskId = record.task.id
   const codexHome = await createCodexHome()
   const codexBin = resolveCodexBin()
   const config = getModelConfig()
+  const skills = await loadEnterpriseSkillSet(options.enterpriseAuthToken, options.enterpriseApiBase)
+  const skillInstructions = buildSkillInstructionBlock(skills)
   const port = await findOpenPort()
   const appServerUrl = `ws://127.0.0.1:${port}`
   const memory = workspaceMemory.get(workspace)
   const commandContext = record.task.commandHistory?.slice(-8).join('\n\n')
   const diffSummary = await getGitDiff(workspace)
   const contextBlock = [
-    buildMoyuanBrainContext(),
+    skillInstructions,
     memory ? `工作区记忆:\n${memory}` : '',
     commandContext ? `最近命令历史:\n${commandContext}` : '',
     diffSummary ? `当前文件变更摘要:\n${diffSummary}` : '',
@@ -1075,7 +1182,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
       if (item?.type === 'agentMessage' && typeof item.text === 'string') {
         const toolCall = parseMoyuanToolCall(item.text)
         if (toolCall) {
-          void runImageGeneration(record, toolCall.prompt ?? prompt, toolCall.size ?? inferImageSize(toolCall.prompt ?? prompt), toolCall.model)
+          void runMoyuanToolCall(record, toolCall, prompt, options, skills)
           return
         }
         pushEvent(record, {
@@ -1150,7 +1257,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
           runtimeWorkspaceRoots: [workspace],
           approvalPolicy: 'never',
           sandbox: 'workspace-write',
-          baseInstructions: buildMoyuanBrainContext(),
+          baseInstructions: skillInstructions,
           persistExtendedHistory: false,
         })
       : await connection.request('thread/start', {
@@ -1159,7 +1266,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
           runtimeWorkspaceRoots: [workspace],
           approvalPolicy: 'never',
           sandbox: 'workspace-write',
-          baseInstructions: buildMoyuanBrainContext(),
+          baseInstructions: skillInstructions,
           threadSource: 'user',
           experimentalRawEvents: false,
           persistExtendedHistory: false,
@@ -1196,20 +1303,22 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
   }
 }
 
-async function runCodex(record: TaskRecord, prompt: string, workspace: string, sessionId?: string) {
+async function runCodex(record: TaskRecord, prompt: string, workspace: string, sessionId: string | undefined, options: RuntimeRunOptions = {}) {
   if (process.env.MOYUAN_CODEX_TRANSPORT === 'exec') {
-    await runCodexExec(record, prompt, workspace, sessionId)
+    await runCodexExec(record, prompt, workspace, sessionId, options)
     return
   }
 
-  await runCodexAppServer(record, prompt, workspace, sessionId)
+  await runCodexAppServer(record, prompt, workspace, sessionId, options)
 }
 
-async function runCodexExec(record: TaskRecord, prompt: string, workspace: string, sessionId?: string) {
+async function runCodexExec(record: TaskRecord, prompt: string, workspace: string, sessionId: string | undefined, options: RuntimeRunOptions) {
   const taskId = record.task.id
   const codexHome = await createCodexHome()
   const codexBin = resolveCodexBin()
   const config = getModelConfig()
+  const skills = await loadEnterpriseSkillSet(options.enterpriseAuthToken, options.enterpriseApiBase)
+  const skillInstructions = buildSkillInstructionBlock(skills)
   const commonArgs = [
     '--json',
     '--skip-git-repo-check',
@@ -1228,7 +1337,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
   const commandContext = record.task.commandHistory?.slice(-8).join('\n\n')
   const diffSummary = await getGitDiff(workspace)
   const contextBlock = [
-    buildMoyuanBrainContext(),
+    skillInstructions,
     memory ? `工作区记忆:\n${memory}` : '',
     commandContext ? `最近命令历史:\n${commandContext}` : '',
     diffSummary ? `当前文件变更摘要:\n${diffSummary}` : '',
@@ -1272,7 +1381,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
         if (event.type === 'message' && event.role === 'assistant') {
           const toolCall = parseMoyuanToolCall(event.content)
           if (toolCall) {
-            void runImageGeneration(record, toolCall.prompt ?? prompt, toolCall.size ?? inferImageSize(toolCall.prompt ?? prompt), toolCall.model)
+            void runMoyuanToolCall(record, toolCall, prompt, options, skills)
             continue
           }
           pendingAssistantStreams.push(streamAssistantMessage(record, event))
@@ -1363,66 +1472,64 @@ async function runImageGeneration(record: TaskRecord, prompt: string, size: stri
   }
 }
 
-async function runUnsupportedVideoResponse(record: TaskRecord) {
-  record.task.status = 'completed'
-  pushEvent(record, {
-    taskId: record.task.id,
-    type: 'message',
-    role: 'assistant',
-    content: '当前已接入静态图片生成，还没有接入视频或动图生成。可以先让我生成首帧、分镜图或视频海报，等视频工具接入后再无感调用。',
-  })
-  pushEvent(record, {
-    taskId: record.task.id,
-    type: 'turn.completed',
-    role: 'system',
-    content: '任务完成',
-  })
-  await saveStore()
+async function runVideoGeneration(
+  record: TaskRecord,
+  prompt: string,
+  toolCall: Extract<MoyuanToolCall, { tool: 'video_generation' }>,
+  options: RuntimeRunOptions,
+  skills: EnterpriseSkillSet,
+) {
+  try {
+    record.task.status = 'running'
+    record.task.updatedAt = new Date().toISOString()
+    await saveStore()
+
+    const video = await generateVideo(prompt, toolCall, options, skills, (content) => {
+      pushEvent(record, {
+        taskId: record.task.id,
+        type: 'tool',
+        role: 'tool',
+        content,
+      })
+    })
+    record.task.status = 'completed'
+    record.task.generatedVideos = [...(record.task.generatedVideos ?? []), video]
+    pushEvent(record, {
+      taskId: record.task.id,
+      type: 'message',
+      role: 'assistant',
+      content: `![${prompt}](${video.url})`,
+    })
+    pushEvent(record, {
+      taskId: record.task.id,
+      type: 'turn.completed',
+      role: 'system',
+      content: '视频生成完成',
+    })
+  } catch (error) {
+    record.task.status = 'failed'
+    pushEvent(record, {
+      taskId: record.task.id,
+      type: 'turn.failed',
+      role: 'system',
+      content: `视频生成失败：${error instanceof Error ? error.message : String(error)}`,
+    })
+  } finally {
+    await saveStore()
+  }
+}
+
+async function runMoyuanToolCall(record: TaskRecord, toolCall: MoyuanToolCall, prompt: string, options: RuntimeRunOptions, skills: EnterpriseSkillSet) {
+  if (toolCall.tool === 'image_generation') {
+    await runImageGeneration(record, toolCall.prompt ?? prompt, toolCall.size ?? inferImageSize(toolCall.prompt ?? prompt), toolCall.model)
+    return
+  }
+
+  await runVideoGeneration(record, toolCall.prompt ?? prompt, toolCall, options, skills)
 }
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-async function runDirectAssistantResponse(record: TaskRecord, content: string) {
-  const raw = { item: { id: `direct-${record.task.id}`, type: 'agent_message' } }
-
-  record.task.status = 'running'
-  pushEvent(record, {
-    taskId: record.task.id,
-    type: 'turn.started',
-    role: 'system',
-    content: '正在处理',
-  })
-
-  let visible = ''
-  for (const char of content) {
-    visible += char
-    pushEvent(record, {
-      taskId: record.task.id,
-      type: 'message_delta',
-      role: 'assistant',
-      content: visible,
-      raw,
-    })
-    await sleep(16)
-  }
-
-  pushEvent(record, {
-    taskId: record.task.id,
-    type: 'message',
-    role: 'assistant',
-    content,
-    raw,
-  })
-  record.task.status = 'completed'
-  pushEvent(record, {
-    taskId: record.task.id,
-    type: 'turn.completed',
-    role: 'system',
-    content: '任务完成',
-  })
-  await saveStore()
 }
 
 app.get('/health', async () => ({
@@ -1481,23 +1588,18 @@ app.post('/api/codex/tasks', async (request, reply) => {
   records.set(task.id, record)
   await saveStore()
 
-  if (isSmallTalkPrompt(parsed.data.prompt)) {
-    void runDirectAssistantResponse(record, smallTalkReply(parsed.data.prompt))
-  } else if (isVideoPrompt(parsed.data.prompt) && !isImageCapabilityQuestion(parsed.data.prompt)) {
-    void runUnsupportedVideoResponse(record)
-  } else if (isImageGenerationPrompt(parsed.data.prompt)) {
-    void runImageGeneration(record, parsed.data.prompt, inferImageSize(parsed.data.prompt))
-  } else {
-    void runCodex(record, parsed.data.prompt, parsed.data.workspace, parsed.data.sessionId ?? task.sessionId).catch((error: unknown) => {
-      task.status = 'failed'
-      pushEvent(record, {
-        taskId: task.id,
-        type: 'turn.failed',
-        role: 'system',
-        content: error instanceof Error ? error.message : String(error),
-      })
+  void runCodex(record, parsed.data.prompt, parsed.data.workspace, parsed.data.sessionId ?? task.sessionId, {
+    enterpriseApiBase: parsed.data.enterpriseApiBase,
+    enterpriseAuthToken: parsed.data.enterpriseAuthToken,
+  }).catch((error: unknown) => {
+    task.status = 'failed'
+    pushEvent(record, {
+      taskId: task.id,
+      type: 'turn.failed',
+      role: 'system',
+      content: error instanceof Error ? error.message : String(error),
     })
-  }
+  })
 
   return { data: task }
 })

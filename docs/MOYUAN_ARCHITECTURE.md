@@ -1,0 +1,43 @@
+# 墨渊架构原则
+
+墨渊的核心是 Codex。桌面端不做业务关键词规则，所有用户请求先进入 Codex 任务；图片、视频、搜索、企业知识库、组织架构、文件系统、命令行等外部能力都作为 Skill 提供给 Codex 决策调用。
+
+## 分层
+
+- `apps/desktop`: 员工桌面客户端，只负责登录、会话、流式渲染、附件/工作区上下文和本地 Runtime 启停。
+- `apps/admin`: 企业后台，负责模型、技能、员工、额度、审计、安全策略配置。
+- `services/codex-runtime`: 本地 Codex 内核适配层，负责会话续聊、上下文拼装、Codex app-server/exec、工具调用和本地文件结果托管。
+- `services/api`: 企业控制面服务，负责账号、额度、后台配置、技能密钥托管和需要服务端代理的第三方能力。
+- `packages/shared`: 两端共享的数据类型，避免接口结构散落在 UI 和服务代码里。
+
+## 技能模型
+
+每个技能都应该拆成四段：
+
+1. Admin Config: 后台配置 Key、开关、默认参数、额度和权限。
+2. Skill Manifest: Runtime 拉取到的可用能力说明，不包含明文密钥。
+3. Tool Contract: 注入给 Codex 的工具说明和 JSON 调用格式。
+4. Executor: Runtime 或企业 API 负责真正执行，返回流式状态和结果。
+
+当前第一版已经把图片、火山方舟视频接入到 `moyuan_tool` 契约里：
+
+- `image_generation`: 本地 Runtime 直接调用图片生成接口。
+- `video_generation`: Runtime 通过企业 API 代理调用火山方舟 `POST /contents/generations/tasks`，再轮询任务结果。
+
+## 目录演进
+
+Runtime 后续继续拆成：
+
+- `services/codex-runtime/src/codex`: Codex app-server/exec 适配。
+- `services/codex-runtime/src/context`: 工作区记忆、diff、命令历史、transcript。
+- `services/codex-runtime/src/skills`: 技能契约、注册表、工具执行器。
+- `services/codex-runtime/src/storage`: 本地任务和结果存储。
+
+Desktop 后续继续拆成：
+
+- `apps/desktop/src/components`: 纯 UI 组件，如 `TokenMeter`、`Composer`、`Transcript`。
+- `apps/desktop/src/features/auth`: 注册登录。
+- `apps/desktop/src/features/chat`: 会话、流式事件、消息渲染。
+- `apps/desktop/src/features/runtime`: Runtime 健康检查和任务提交。
+
+原则：新增能力先加 Skill，不改聊天入口规则；新增页面先拆 feature，不堆进一个大文件。
