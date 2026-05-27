@@ -1,0 +1,123 @@
+body {
+  margin: 0;
+  overflow-x: hidden;
+  background: #f4f7fb;
+}
+
+.admin-logo-mark {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 7px;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  background: linear-gradient(145deg, #0f172a, #1677ff);
+}
+
+.admin-logo-title {
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.admin-page {
+  min-width: 0;
+}
+
+.section-card {
+  margin-top: 16px;
+}
+
+.quiet-note {
+  margin-top: 12px;
+  color: #64748b;
+}
+
+.hint-tag {
+  max-width: 100%;
+  white-space: normal;
+  line-height: 1.7;
+}
+
+.dashboard-stats {
+  margin-bottom: 16px;
+}
+
+.ant-pro-layout .ant-pro-layout-container {
+  min-width: 0;
+}
+
+.ant-pro-page-container-children-container {
+  padding-inline: 24px;
+}
+
+.ant-card,
+.ant-pro-card,
+.ant-table-wrapper {
+  min-width: 0;
+}
+
+.ant-table-wrapper {
+  overflow-x: auto;
+}
+
+@media (max-width: 900px) {
+  .ant-pro-page-container-children-container {
+    padding-inline: 16px;
+  }
+
+  .ant-pro-page-container-warp-page-header {
+    padding-inline: 16px;
+  }
+
+  .ant-page-header-heading {
+    align-items: flex-start !important;
+    gap: 10px !important;
+  }
+
+  .ant-page-header-heading-left {
+    min-width: 0 !important;
+    flex: 1 1 100% !important;
+    flex-wrap: wrap !important;
+  }
+
+  .ant-page-header-heading-title {
+    overflow: visible !important;
+    text-overflow: clip !important;
+    white-space: normal !important;
+    font-size: 20px !important;
+    line-height: 1.35 !important;
+  }
+
+  .ant-page-header-heading-sub-title {
+    display: block !important;
+    width: 100% !important;
+    margin-top: 4px !important;
+    margin-inline-start: 0 !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    white-space: normal !important;
+    line-height: 1.5 !important;
+  }
+
+  .ant-page-header-heading-extra {
+    width: 100% !important;
+    margin-inline-start: 0 !important;
+  }
+
+  .ant-pro-card-col {
+    max-width: 100% !important;
+    flex-basis: 100% !important;
+  }
+
+  .dashboard-stats > .ant-pro-card-body {
+    flex-wrap: wrap !important;
+  }
+
+  .dashboard-stats .ant-pro-card-col,
+  .dashboard-stats .ant-pro-card {
+    width: 100% !important;
+    min-width: 100% !important;
+  }
+}

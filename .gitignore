@@ -5,6 +5,8 @@ release
 *.exe
 *.zip
 *.tsbuildinfo
+**/src/.umi
+**/src/.umi-production
 src/**/*.js
 src/**/*.d.ts
 .env

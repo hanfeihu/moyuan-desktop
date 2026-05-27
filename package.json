@@ -26,6 +26,8 @@
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
   "devDependencies": {
+    "@types/react": "^18.3.25",
+    "@types/react-dom": "^18.3.7",
     "typescript": "^5.9.3"
   }
 }
