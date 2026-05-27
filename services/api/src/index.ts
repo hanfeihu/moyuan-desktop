@@ -6,11 +6,29 @@ import { createHash, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { z } from 'zod'
-import type { AccountUser, Employee, EnterprisePolicy, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
+import type {
+  AccountUser,
+  Employee,
+  EnterprisePolicy,
+  ImageSkillConfig,
+  MailServiceConfig,
+  ModelProviderConfig,
+  VideoRatio,
+  VideoResolution,
+  VideoSkillConfig,
+} from '@eaw/shared'
 
 const app = Fastify({ logger: true })
 
 await app.register(cors, { origin: true })
+
+const videoRatioOptions = ['adaptive', '16:9', '4:3', '1:1', '3:4', '9:16', '21:9'] as const satisfies readonly VideoRatio[]
+const videoResolutionOptions = ['480p', '720p', '1080p'] as const satisfies readonly VideoResolution[]
+
+function defaultVideoRatioForModel(model?: string): VideoRatio {
+  const normalized = (model ?? '').toLowerCase().replace(/[_.\s]+/g, '-')
+  return normalized.includes('seedance-2') || normalized.includes('seedance-1-5-pro') ? 'adaptive' : '16:9'
+}
 
 const modelConfigSchema = z.object({
   name: z.string().min(1),
@@ -25,8 +43,8 @@ const videoSkillConfigSchema = z.object({
   apiKey: z.string().optional(),
   defaultDuration: z.coerce.number().int().min(1).max(30),
   defaultModel: z.string().min(1),
-  defaultRatio: z.string().min(1),
-  defaultResolution: z.string().min(1),
+  defaultRatio: z.enum(videoRatioOptions),
+  defaultResolution: z.enum(videoResolutionOptions),
   allowImageInput: z.boolean(),
   enabled: z.boolean(),
   monthlyLimit: z.coerce.number().int().min(0),
@@ -55,7 +73,8 @@ const videoGenerationSchema = z
     generate_audio: z.boolean().optional(),
     model: z.string().optional(),
     prompt: z.string().optional(),
-    ratio: z.string().optional(),
+    ratio: z.enum(videoRatioOptions).optional(),
+    resolution: z.enum(videoResolutionOptions).optional(),
     watermark: z.boolean().optional(),
   })
   .passthrough()
@@ -245,6 +264,16 @@ function toStoredVideoSkillConfig(skill: VideoSkillConfig): Omit<VideoSkillConfi
   }
 }
 
+function normalizeVideoRatio(value: unknown, model?: string): VideoRatio {
+  if (typeof value === 'string' && videoRatioOptions.includes(value as VideoRatio)) return value as VideoRatio
+  return defaultVideoRatioForModel(model)
+}
+
+function normalizeVideoResolution(value: unknown): VideoResolution {
+  if (typeof value === 'string' && videoResolutionOptions.includes(value as VideoResolution)) return value as VideoResolution
+  return '720p'
+}
+
 function buildImageSkillConfig(stored?: StoredAdminConfig['imageSkill']): ImageSkillConfig {
   const apiKeyConfigured = Boolean(imageSkillApiKey)
   return {
@@ -263,6 +292,7 @@ function buildImageSkillConfig(stored?: StoredAdminConfig['imageSkill']): ImageS
 
 function buildVideoSkillConfig(stored?: StoredAdminConfig['videoSkill']): VideoSkillConfig {
   const apiKeyConfigured = Boolean(videoSkillApiKey)
+  const defaultModel = stored?.defaultModel ?? process.env.VOLCENGINE_VIDEO_MODEL ?? 'doubao-seedance-2-0-260128'
   return {
     id: stored?.id ?? 'volcengine-seedance',
     name: stored?.name ?? '火山方舟 Seedance 视频生成',
@@ -270,12 +300,12 @@ function buildVideoSkillConfig(stored?: StoredAdminConfig['videoSkill']): VideoS
     baseUrl: stored?.baseUrl ?? process.env.VOLCENGINE_ARK_BASE_URL ?? 'https://ark.cn-beijing.volces.com/api/v3',
     maskedApiKey: maskKey(videoSkillApiKey),
     apiKeyConfigured,
-    defaultModel: stored?.defaultModel ?? process.env.VOLCENGINE_VIDEO_MODEL ?? 'doubao-seedance-2-0-260128',
+    defaultModel,
     enabled: stored?.enabled ?? apiKeyConfigured,
     allowImageInput: stored?.allowImageInput ?? true,
     defaultDuration: stored?.defaultDuration ?? 5,
-    defaultRatio: stored?.defaultRatio ?? '16:9',
-    defaultResolution: stored?.defaultResolution ?? '720p',
+    defaultRatio: normalizeVideoRatio(stored?.defaultRatio, defaultModel),
+    defaultResolution: normalizeVideoResolution(stored?.defaultResolution),
     monthlyLimit: stored?.monthlyLimit ?? 100,
   }
 }
@@ -920,6 +950,7 @@ app.post('/api/admin/skills/video/generations', async (request, reply) => {
     generate_audio: parsed.data.generate_audio ?? true,
     model: parsed.data.model ?? videoSkill.defaultModel,
     ratio: parsed.data.ratio ?? videoSkill.defaultRatio,
+    resolution: parsed.data.resolution ?? videoSkill.defaultResolution,
     watermark: parsed.data.watermark ?? false,
   }
   delete (body as { prompt?: unknown }).prompt

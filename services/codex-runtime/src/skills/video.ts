@@ -1,7 +1,7 @@
 import type { VideoGenerationResult } from '@eaw/shared'
 import { defaultEnterpriseApiBase } from '../config.js'
 import { enterpriseJson } from '../enterprise/client.js'
-import type { EnterpriseSkillSet, MoyuanToolCall, RuntimeRunOptions } from './contracts.js'
+import { defaultVideoRatioForModel, type EnterpriseSkillSet, type MoyuanToolCall, type RuntimeRunOptions } from './contracts.js'
 
 type VideoToolCall = Extract<MoyuanToolCall, { tool: 'video_generation' }>
 
@@ -73,13 +73,14 @@ function toFriendlyVideoError(message: string) {
 
 export function buildVideoRequest(toolCall: VideoToolCall, prompt: string, skills: EnterpriseSkillSet) {
   const video = skills.videoGeneration
+  const model = toolCall.model ?? video?.defaultModel
   return {
     content: toolCall.content?.length ? toolCall.content : [{ type: 'text', text: toolCall.prompt ?? prompt }],
     duration: toolCall.duration ?? video?.defaultDuration ?? 8,
     generate_audio: toolCall.generateAudio ?? true,
-    model: toolCall.model ?? video?.defaultModel,
+    model,
     prompt: toolCall.prompt ?? prompt,
-    ratio: toolCall.ratio ?? video?.defaultRatio ?? '16:9',
+    ratio: toolCall.ratio ?? video?.defaultRatio ?? defaultVideoRatioForModel(model),
     watermark: toolCall.watermark ?? false,
   }
 }

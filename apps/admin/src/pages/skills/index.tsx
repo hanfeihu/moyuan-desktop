@@ -10,10 +10,26 @@ import {
 } from '@ant-design/pro-components'
 import { Alert, App, Button, Space, Tag, Typography } from 'antd'
 import { useState } from 'react'
-import type { ImageSkillConfig, VideoSkillConfig } from '@eaw/shared'
+import { videoRatioOptions, videoResolutionOptions, type ImageSkillConfig, type VideoRatio, type VideoResolution, type VideoSkillConfig } from '@eaw/shared'
 import { defaultImageSkill, defaultVideoSkill } from '@/data/defaults'
 import { useAdminSnapshot } from '@/hooks/useAdminSnapshot'
 import { saveImageSkill, saveVideoSkill } from '@/services/admin'
+
+const ratioLabels: Record<VideoRatio, string> = {
+  adaptive: 'adaptive（Seedance 2.0 推荐）',
+  '16:9': '16:9 横屏',
+  '4:3': '4:3 标准横屏',
+  '1:1': '1:1 方形',
+  '3:4': '3:4 竖向',
+  '9:16': '9:16 短视频竖屏',
+  '21:9': '21:9 超宽屏',
+}
+
+const resolutionLabels: Record<VideoResolution, string> = {
+  '480p': '480p',
+  '720p': '720p',
+  '1080p': '1080p',
+}
 
 export default function SkillsPage() {
   const { message } = App.useApp()
@@ -190,23 +206,14 @@ export default function SkillsPage() {
             colProps={{ md: 6, xs: 12 }}
             label="默认比例"
             name="defaultRatio"
-            options={[
-              { label: '16:9', value: '16:9' },
-              { label: '9:16', value: '9:16' },
-              { label: '1:1', value: '1:1' },
-              { label: '4:3', value: '4:3' },
-              { label: '3:4', value: '3:4' },
-            ]}
+            fieldProps={{ optionLabelProp: 'value' }}
+            options={videoRatioOptions.map((value) => ({ label: ratioLabels[value], value }))}
           />
           <ProFormSelect
             colProps={{ md: 6, xs: 12 }}
             label="默认清晰度"
             name="defaultResolution"
-            options={[
-              { label: '480p', value: '480p' },
-              { label: '720p', value: '720p' },
-              { label: '1080p', value: '1080p' },
-            ]}
+            options={videoResolutionOptions.map((value) => ({ label: resolutionLabels[value], value }))}
           />
           <ProFormDigit colProps={{ md: 6, xs: 12 }} label="月度任务额度" name="monthlyLimit" />
           <ProFormSwitch colProps={{ md: 6, xs: 12 }} label="启用视频技能" name="enabled" />

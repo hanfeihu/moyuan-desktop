@@ -1,4 +1,4 @@
-import type { Employee, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
+import { defaultVideoRatioForModel, type Employee, type ImageSkillConfig, type MailServiceConfig, type ModelProviderConfig, type VideoSkillConfig } from '@eaw/shared'
 import type { PolicyView } from '@/services/admin'
 
 export const defaultProviders: ModelProviderConfig[] = [
@@ -37,7 +37,7 @@ export const defaultVideoSkill: VideoSkillConfig = {
   enabled: false,
   allowImageInput: true,
   defaultDuration: 5,
-  defaultRatio: '16:9',
+  defaultRatio: defaultVideoRatioForModel('doubao-seedance-2-0-260128'),
   defaultResolution: '720p',
   monthlyLimit: 100,
 }

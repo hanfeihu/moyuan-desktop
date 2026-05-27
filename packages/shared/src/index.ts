@@ -11,6 +11,21 @@ export type ModelProviderConfig = {
   enabled: boolean
 }
 
+export const videoRatioOptions = ['adaptive', '16:9', '4:3', '1:1', '3:4', '9:16', '21:9'] as const
+export type VideoRatio = (typeof videoRatioOptions)[number]
+
+export const videoResolutionOptions = ['480p', '720p', '1080p'] as const
+export type VideoResolution = (typeof videoResolutionOptions)[number]
+
+export function isAdaptiveVideoRatioModel(model?: string) {
+  const normalized = (model ?? '').toLowerCase().replace(/[_.\s]+/g, '-')
+  return normalized.includes('seedance-2') || normalized.includes('seedance-1-5-pro')
+}
+
+export function defaultVideoRatioForModel(model?: string): VideoRatio {
+  return isAdaptiveVideoRatioModel(model) ? 'adaptive' : '16:9'
+}
+
 export type VideoSkillConfig = {
   id: string
   name: string
@@ -22,8 +37,8 @@ export type VideoSkillConfig = {
   enabled: boolean
   allowImageInput: boolean
   defaultDuration: number
-  defaultRatio: string
-  defaultResolution: string
+  defaultRatio: VideoRatio
+  defaultResolution: VideoResolution
   monthlyLimit: number
 }
 
