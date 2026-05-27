@@ -7,6 +7,7 @@ release
 *.tsbuildinfo
 **/src/.umi
 **/src/.umi-production
+apps/desktop/.moyuan-runtime
 src/**/*.js
 src/**/*.d.ts
 .env

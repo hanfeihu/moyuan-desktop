@@ -1,6 +1,6 @@
 {
   "name": "@eaw/desktop",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Moyuan Desktop, an enterprise local AI workbench with bundled Codex-style runtime.",
   "author": "Han Feihu",
   "license": "MIT",
@@ -48,21 +48,8 @@
     ],
     "extraResources": [
       {
-        "from": "../../services/codex-runtime/dist",
-        "to": "app/services/codex-runtime/dist"
-      },
-      {
-        "from": "../../services/codex-runtime/package.json",
-        "to": "app/services/codex-runtime/package.json"
-      },
-      {
-        "from": "../../node_modules",
-        "to": "app/node_modules",
-        "filter": [
-          "**/*",
-          "!@eaw",
-          "!@eaw/**/*"
-        ]
+        "from": ".moyuan-runtime/services",
+        "to": "app/services"
       }
     ],
     "extraMetadata": {
