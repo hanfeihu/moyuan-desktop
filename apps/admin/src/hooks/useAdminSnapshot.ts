@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { defaultEmployees, defaultPolicy, defaultProviders, defaultVideoSkill } from '@/data/defaults'
+import { defaultEmployees, defaultImageSkill, defaultPolicy, defaultProviders, defaultVideoSkill } from '@/data/defaults'
 import { loadAdminSnapshot, type AdminSnapshot } from '@/services/admin'
 
 const initialSnapshot: AdminSnapshot = {
@@ -8,6 +8,7 @@ const initialSnapshot: AdminSnapshot = {
   modelProvider: defaultProviders[0],
   policy: defaultPolicy,
   providers: defaultProviders,
+  imageSkill: defaultImageSkill,
   videoSkill: defaultVideoSkill,
 }
 

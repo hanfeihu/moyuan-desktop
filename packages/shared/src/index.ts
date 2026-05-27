@@ -27,6 +27,19 @@ export type VideoSkillConfig = {
   monthlyLimit: number
 }
 
+export type ImageSkillConfig = {
+  id: string
+  name: string
+  provider: 'openai-compatible-image'
+  baseUrl: string
+  maskedApiKey: string
+  apiKeyConfigured: boolean
+  defaultModel: string
+  enabled: boolean
+  defaultSize: '1024x1024' | '1024x1536' | '1536x1024'
+  monthlyLimit: number
+}
+
 export type MailServiceConfig = {
   smtpHost: string
   smtpPort: number
@@ -47,6 +60,7 @@ export type AccountUser = {
   tokenUsed: number
   promptTokens: number
   completionTokens: number
+  skillTokens: number
   quotaUpdatedAt?: string
   createdAt: string
   lastLoginAt?: string
@@ -87,6 +101,7 @@ export type CodexTask = {
     role: 'user' | 'assistant' | 'tool' | 'system'
     content: string
     timestamp: string
+    itemId?: string
   }>
 }
 
@@ -96,6 +111,7 @@ export type ImageGenerationResult = {
   model: string
   size: string
   url: string
+  usageTokens?: number
   createdAt: string
 }
 
@@ -117,5 +133,6 @@ export type CodexTaskEvent = {
   role: 'user' | 'assistant' | 'tool' | 'system'
   content: string
   timestamp: string
+  itemId?: string
   raw?: unknown
 }

@@ -165,7 +165,7 @@ export default function AccountsPage() {
             { title: '姓名', dataIndex: 'name' },
             { title: '状态', dataIndex: 'status', render: (_, row) => <Tag color={row.status === 'active' ? 'green' : 'default'}>{row.status === 'active' ? '启用' : '停用'}</Tag> },
             {
-              title: 'Token 水位',
+              title: 'Token 使用进度',
               dataIndex: 'tokenUsed',
               render: (_, row) => {
                 const percent = row.tokenBudget > 0 ? Math.min(100, Math.round((row.tokenUsed / row.tokenBudget) * 100)) : 0
@@ -186,9 +186,11 @@ export default function AccountsPage() {
               dataIndex: 'tokenBudget',
               render: (_, row) => {
                 const remaining = Math.max(0, row.tokenBudget - row.tokenUsed)
+                const quotaState = row.tokenBudget <= 0 ? '尚未派发' : remaining <= 0 ? '已耗尽' : `${formatNumber(remaining)} 可用`
+                const quotaColor = row.tokenBudget <= 0 ? 'default' : remaining <= 0 ? 'red' : 'blue'
                 return (
-                  <Tag className="quota-tag" color={remaining > 0 ? 'blue' : 'orange'}>
-                    {remaining > 0 ? `${formatNumber(remaining)} 可用` : '等待派发'}
+                  <Tag className="quota-tag" color={quotaColor}>
+                    {quotaState}
                   </Tag>
                 )
               },

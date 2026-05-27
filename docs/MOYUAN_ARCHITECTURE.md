@@ -26,11 +26,20 @@
 
 ## 目录演进
 
+Runtime 已经先拆出第一层技能边界：
+
+- `services/codex-runtime/src/config.ts`: 模型、图片接口和企业后台地址配置。
+- `services/codex-runtime/src/enterprise/client.ts`: 企业后台 bootstrap、额度校验和技能代理调用。
+- `services/codex-runtime/src/skills/contracts.ts`: 注入给 Codex 的技能契约和工具调用解析。
+- `services/codex-runtime/src/skills/executor.ts`: 标准 `moyuan_tool` 执行入口。
+- `services/codex-runtime/src/skills/image.ts`: 图片生成适配器。
+- `services/codex-runtime/src/skills/video.ts`: 视频生成适配器。
+- `services/codex-runtime/src/tasks/types.ts`: Runtime 任务记录类型。
+
 Runtime 后续继续拆成：
 
 - `services/codex-runtime/src/codex`: Codex app-server/exec 适配。
 - `services/codex-runtime/src/context`: 工作区记忆、diff、命令历史、transcript。
-- `services/codex-runtime/src/skills`: 技能契约、注册表、工具执行器。
 - `services/codex-runtime/src/storage`: 本地任务和结果存储。
 
 Desktop 后续继续拆成：

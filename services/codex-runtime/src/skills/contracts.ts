@@ -2,8 +2,10 @@ export type EnterpriseSkillSet = {
   imageGeneration: {
     apiKeyConfigured: boolean
     defaultModel: string
+    defaultSize?: '1024x1024' | '1024x1536' | '1536x1024'
     enabled: boolean
     name: string
+    provider?: string
   }
   videoGeneration?: {
     allowImageInput: boolean
@@ -37,6 +39,47 @@ export type MoyuanToolCall =
       watermark?: boolean
     }
 
+function extractJsonObject(content: string) {
+  const trimmed = content.trim()
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1]?.trim()
+  if (fenced) return fenced
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed
+
+  const marker = trimmed.indexOf('moyuan_tool')
+  if (marker < 0) return undefined
+
+  const start = trimmed.lastIndexOf('{', marker)
+  if (start < 0) return undefined
+
+  let depth = 0
+  let inString = false
+  let escaped = false
+
+  for (let index = start; index < trimmed.length; index += 1) {
+    const char = trimmed[index]
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (char === '\\') {
+      escaped = true
+      continue
+    }
+    if (char === '"') {
+      inString = !inString
+      continue
+    }
+    if (inString) continue
+    if (char === '{') depth += 1
+    if (char === '}') {
+      depth -= 1
+      if (depth === 0) return trimmed.slice(start, index + 1)
+    }
+  }
+
+  return undefined
+}
+
 export function buildSkillInstructionBlock(skills: EnterpriseSkillSet) {
   const image = skills.imageGeneration
   const video = skills.videoGeneration
@@ -50,7 +93,8 @@ export function buildSkillInstructionBlock(skills: EnterpriseSkillSet) {
     '',
     '可用技能工具（它们是你的手脚架，由你判断是否调用；不要让用户切换模式）:',
     `1. image_generation: ${image.enabled && image.apiKeyConfigured ? '已启用' : '未配置'}，默认模型 ${image.defaultModel}。用于生成静态图片、海报、插画、头像、logo、封面等。`,
-    `   调用方式：只输出一行 JSON，不要解释：{"moyuan_tool":"image_generation","prompt":"高质量成图提示词","size":"1024x1024"}`,
+    `   调用方式：只输出一行 JSON，不要解释：{"moyuan_tool":"image_generation","prompt":"高质量成图提示词","size":"1024x1024"}；size 可选 1024x1024、1024x1536、1536x1024，由你按用户意图判断。`,
+    '   如果图片涉及真实公众人物、新闻人物或容易误导的场景，应在 prompt 中明确非写实、插画、漫画或编辑风格，避免生成误导性真实照片。',
     `2. video_generation: ${videoStatus}${video ? `，默认模型 ${video.defaultModel}，默认比例 ${video.defaultRatio}，默认时长 ${video.defaultDuration}s` : ''}。用于文生视频、图生视频、参考视频/音频驱动的视频生成。`,
     '   火山方舟技能契约来自官方 Contents Generations Tasks：Runtime 会把你的 JSON 转成 POST /contents/generations/tasks，KEY 由企业后台代理保存。',
     '   文生视频调用：{"moyuan_tool":"video_generation","prompt":"视频创意描述","generate_audio":true,"ratio":"16:9","duration":8,"watermark":false}',
@@ -61,9 +105,8 @@ export function buildSkillInstructionBlock(skills: EnterpriseSkillSet) {
 }
 
 export function parseMoyuanToolCall(content: string): MoyuanToolCall | undefined {
-  const trimmed = content.trim()
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1]?.trim()
-  const candidate = fenced ?? trimmed
+  const candidate = extractJsonObject(content)
+  if (!candidate) return undefined
   if (!candidate.includes('moyuan_tool') && !candidate.includes('image_generation') && !candidate.includes('video_generation')) return undefined
 
   try {
@@ -109,7 +152,11 @@ export function parseMoyuanToolCall(content: string): MoyuanToolCall | undefined
   return undefined
 }
 
+export function isMoyuanToolCallContent(content: string) {
+  return Boolean(parseMoyuanToolCall(content))
+}
+
 export function isLikelyToolCallFragment(content: string) {
   const trimmed = content.trimStart()
-  return trimmed.startsWith('{"moyuan_tool"') || trimmed.startsWith('```json') && trimmed.includes('moyuan_tool')
+  return trimmed === '' || trimmed.startsWith('{') || trimmed.startsWith('```json') || trimmed.includes('moyuan_tool')
 }

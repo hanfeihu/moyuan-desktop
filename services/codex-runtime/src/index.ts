@@ -1,6 +1,5 @@
 import cors from '@fastify/cors'
 import { execFile, spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
@@ -10,9 +9,13 @@ import { promisify } from 'node:util'
 import 'dotenv/config'
 import Fastify from 'fastify'
 import { z } from 'zod'
-import type { CodexTask, CodexTaskEvent, VideoGenerationResult } from '@eaw/shared'
-import { buildSkillInstructionBlock, isLikelyToolCallFragment, parseMoyuanToolCall } from './skills/contracts.js'
-import type { EnterpriseSkillSet, MoyuanToolCall, RuntimeRunOptions } from './skills/contracts.js'
+import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
+import { defaultEnterpriseApiBase as enterpriseApiBase, getImageConfig, getModelConfig } from './config.js'
+import { loadEnterpriseSkillSet, validateEnterpriseQuota } from './enterprise/client.js'
+import { buildSkillInstructionBlock, isLikelyToolCallFragment, isMoyuanToolCallContent, parseMoyuanToolCall } from './skills/contracts.js'
+import type { RuntimeRunOptions } from './skills/contracts.js'
+import { runImageGenerationTool, runMoyuanToolCall } from './skills/executor.js'
+import type { TaskRecord } from './tasks/types.js'
 
 function redactRequestUrl(rawUrl = '') {
   try {
@@ -53,7 +56,6 @@ const require = createRequire(import.meta.url)
 const execFileAsync = promisify(execFile)
 const runtimeToken = process.env.MOYUAN_RUNTIME_TOKEN ?? ''
 const runtimeHost = process.env.CODEX_RUNTIME_HOST ?? '127.0.0.1'
-const enterpriseApiBase = process.env.ENTERPRISE_API_BASE ?? 'http://codex.tminos.com:18080/admin-api'
 
 await app.register(cors, {
   origin(origin, callback) {
@@ -83,24 +85,6 @@ app.addHook('onRequest', async (request, reply) => {
   return reply.status(401).send({ error: '未授权的本地 Runtime 请求' })
 })
 
-type TaskRecord = {
-  task: CodexTask
-  events: CodexTaskEvent[]
-  subscribers: Set<(event: CodexTaskEvent) => void>
-  streamItemIndexes: Map<string, number>
-}
-
-type EnterpriseMeResponse = {
-  data?: {
-    user?: {
-      tokenBudget: number
-      tokenUsed: number
-      status: string
-    }
-  }
-  error?: string
-}
-
 const taskSchema = z.object({
   prompt: z.string().min(1),
   workspace: z.string().default(process.cwd()),
@@ -125,6 +109,8 @@ const imageGenerationSchema = z.object({
   prompt: z.string().min(1),
   workspace: z.string().default(process.cwd()),
   employeeId: z.string().min(1),
+  enterpriseApiBase: z.string().url().optional(),
+  enterpriseAuthToken: z.string().optional(),
   model: z.string().optional(),
   size: z.enum(['1024x1024', '1024x1536', '1536x1024']).default('1024x1024'),
 })
@@ -172,7 +158,11 @@ function isMutedTranscriptStatus(content: string) {
   const text = content.trim()
   return (
     /^正在生成图片[.。…]*$/.test(text) ||
-    text.startsWith('当前已接入静态图片生成，还没有接入视频或动图生成')
+    text.startsWith('当前已接入静态图片生成，还没有接入视频或动图生成') ||
+    text === '正在调用视频生成技能...' ||
+    text === '视频任务已创建，正在生成...' ||
+    text === '视频仍在生成中' ||
+    text.startsWith('当前状态：')
   )
 }
 
@@ -181,7 +171,7 @@ function sanitizeTask(task: CodexTask): CodexTask {
     task.transcript
       .filter((item) => {
         const content = item.content.trim()
-        return content && !isInternalCodexJson(content) && !isMutedTranscriptStatus(content) && !isRawRuntimeFailure(content)
+        return content && !isInternalCodexJson(content) && !isMoyuanToolCallContent(content) && !isMutedTranscriptStatus(content) && !isRawRuntimeFailure(content)
       })
       .map((item) => ({ ...item, content: friendlyRuntimeMessage(item.content) })),
   )
@@ -204,8 +194,15 @@ function compactTranscript(items: CodexTask['transcript']) {
   return items.reduce<CodexTask['transcript']>((merged, item) => {
     const previous = merged.at(-1)
     if (previous?.role === 'assistant' && item.role === 'assistant') {
+      if (previous.itemId && item.itemId && previous.itemId === item.itemId) {
+        merged[merged.length - 1] = {
+          ...item,
+          content: mergeAssistantContent(previous.content, item.content),
+        }
+        return merged
+      }
       if (item.content.startsWith(previous.content)) {
-        merged[merged.length - 1] = item
+        merged[merged.length - 1] = { ...item, content: mergeAssistantContent(previous.content, item.content) }
         return merged
       }
       if (previous.content.startsWith(item.content)) return merged
@@ -213,6 +210,25 @@ function compactTranscript(items: CodexTask['transcript']) {
     merged.push(item)
     return merged
   }, [])
+}
+
+function sharedPrefixSuffixLength(left: string, right: string) {
+  const maxLength = Math.min(left.length, right.length)
+  for (let length = maxLength; length > 0; length -= 1) {
+    if (left.endsWith(right.slice(0, length))) return length
+  }
+  return 0
+}
+
+function mergeAssistantContent(current: string, incoming: string) {
+  if (!current) return incoming
+  if (!incoming) return current
+  if (current === incoming) return current
+  if (incoming.startsWith(current)) return incoming
+  if (current.startsWith(incoming)) return current
+
+  const overlap = sharedPrefixSuffixLength(current, incoming)
+  return `${current}${incoming.slice(overlap)}`
 }
 
 function isRawRuntimeFailure(content: string) {
@@ -227,135 +243,16 @@ function isRawRuntimeFailure(content: string) {
 }
 
 function friendlyRuntimeMessage(content: string) {
+  if (/not activated the model|has not activated the model|activate the model service/i.test(content)) {
+    return '火山方舟视频模型还没有开通，请管理员到 Ark 控制台开通当前视频模型后再试。'
+  }
   if (/OPENAI_API_KEY|invalid api key|403 Forbidden/i.test(content)) {
     return '模型服务暂时不可用，请检查模型密钥或稍后重试。'
   }
   if (/Codex app-server|Codex Runtime|ECONNREFUSED|connection/i.test(content)) {
     return '本地 Codex 内核暂时没有启动成功，我会继续尝试恢复。'
   }
-  return content
-}
-
-function getModelConfig() {
-  return {
-    providerId: process.env.AI_PROVIDER_ID ?? 'moyuan-blector',
-    providerName: process.env.AI_PROVIDER_NAME ?? 'Moyuan OpenAI Compatible Proxy',
-    baseUrl: process.env.AI_BASE_URL ?? 'https://ai.blector.com/v1',
-    apiKeyConfigured: Boolean(process.env.AI_API_KEY),
-    envKey: 'OPENAI_API_KEY',
-    defaultModel: process.env.AI_MODEL ?? 'gpt-5.5',
-  }
-}
-
-function getImageConfig() {
-  return {
-    baseUrl: process.env.IMAGE_BASE_URL ?? 'https://codex-manager.tminos.com/v1',
-    apiKeyConfigured: Boolean(process.env.IMAGE_API_KEY),
-    defaultModel: process.env.IMAGE_MODEL ?? 'gpt-image-2',
-  }
-}
-
-function localSkillSet(): EnterpriseSkillSet {
-  const image = getImageConfig()
-  return {
-    imageGeneration: {
-      apiKeyConfigured: image.apiKeyConfigured,
-      defaultModel: image.defaultModel,
-      enabled: image.apiKeyConfigured,
-      name: '静态图片生成',
-    },
-  }
-}
-
-async function loadEnterpriseSkillSet(authToken?: string, baseUrl = enterpriseApiBase): Promise<EnterpriseSkillSet> {
-  const skills = localSkillSet()
-  if (!authToken) return skills
-
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 5000)
-  try {
-    const response = await fetch(enterpriseEndpoint(baseUrl, '/desktop/bootstrap'), {
-      headers: { Authorization: `Bearer ${authToken}` },
-      signal: controller.signal,
-    })
-    const payload = (await response.json().catch(() => ({}))) as {
-      data?: {
-        runtime?: {
-          skills?: {
-            videoGeneration?: EnterpriseSkillSet['videoGeneration']
-          }
-        }
-      }
-    }
-    const videoGeneration = payload.data?.runtime?.skills?.videoGeneration
-    if (response.ok && videoGeneration) {
-      skills.videoGeneration = videoGeneration
-    }
-  } catch {
-    // Keep local tools available if the enterprise bootstrap endpoint is temporarily unavailable.
-  } finally {
-    clearTimeout(timeout)
-  }
-
-  return skills
-}
-
-function enterpriseEndpoint(baseUrl: string, pathname: string) {
-  return `${baseUrl.replace(/\/$/, '')}/${pathname.replace(/^\//, '')}`
-}
-
-async function validateEnterpriseQuota(authToken?: string, baseUrl = enterpriseApiBase) {
-  if (!authToken) return { ok: false, statusCode: 401, error: '请先登录墨渊账号' }
-
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 5000)
-
-  try {
-    const response = await fetch(enterpriseEndpoint(baseUrl, '/me'), {
-      headers: { Authorization: `Bearer ${authToken}` },
-      signal: controller.signal,
-    })
-    const payload = (await response.json().catch(() => ({}))) as EnterpriseMeResponse
-    if (!response.ok || !payload.data?.user) {
-      return { ok: false, statusCode: response.status || 401, error: payload.error ?? '登录状态已失效，请重新登录' }
-    }
-
-    const user = payload.data.user
-    if (user.status !== 'active') return { ok: false, statusCode: 403, error: '账号已停用，请联系管理员' }
-    if (user.tokenBudget - user.tokenUsed <= 0) {
-      return { ok: false, statusCode: 402, error: 'Token 额度不足，请联系管理员派发额度' }
-    }
-
-    return { ok: true }
-  } catch {
-    return { ok: false, statusCode: 503, error: '企业后台暂时不可用，无法校验 Token 额度' }
-  } finally {
-    clearTimeout(timeout)
-  }
-}
-
-function inferImageSize(prompt: string): '1024x1024' | '1024x1536' | '1536x1024' {
-  if (/海报|封面|竖版|手机|小红书|portrait|poster|cover|mobile/i.test(prompt)) return '1024x1536'
-  if (/横版|banner|横幅|壁纸|宽屏|landscape|wallpaper|wide/i.test(prompt)) return '1536x1024'
-  return '1024x1024'
-}
-
-function buildImagePrompt(prompt: string) {
-  const trimmed = prompt.trim()
-  const asksForPublicFigure = /特朗普|川普|donald\s+trump|trump/i.test(trimmed)
-  const asksForHotpot = /火锅|hot\s*pot|hotpot/i.test(trimmed)
-
-  if (asksForPublicFigure && asksForHotpot) {
-    return [
-      'Editorial cartoon style illustration, clearly fictional and non-photorealistic.',
-      'Donald Trump eating spicy Chongqing hot pot at a lively Chinese hot pot restaurant.',
-      'Red chili oil broth, steam rising, Sichuan peppers, plates of vegetables and beef on the table.',
-      'Warm restaurant lighting, humorous but respectful expression, high detail, polished digital art.',
-      'Do not include text, logos, watermarks, or political campaign symbols.',
-    ].join(' ')
-  }
-
-  return trimmed
+  return content.replace(/%!s\(int64=(\d+)\)/g, '$1')
 }
 
 function resolveCodexBin() {
@@ -418,213 +315,6 @@ async function getGitDiff(workspace: string) {
   }
 }
 
-async function generateImage(prompt: string, size: string, model?: string) {
-  const config = getImageConfig()
-  const apiKey = process.env.IMAGE_API_KEY
-
-  if (!apiKey) {
-    throw new Error('图片生成密钥未配置，请在 Runtime 环境变量中设置 IMAGE_API_KEY')
-  }
-
-  const imagePrompt = buildImagePrompt(prompt)
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), Number(process.env.IMAGE_TIMEOUT_MS ?? 300000))
-
-  let response: Response
-  try {
-    response = await fetch(`${config.baseUrl.replace(/\/$/, '')}/images/generations`, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: model ?? config.defaultModel,
-        prompt: imagePrompt,
-        size,
-        n: 1,
-      }),
-    })
-  } catch (error) {
-    if (controller.signal.aborted) {
-      throw new Error('图片生成超时，请稍后重试或换一个更具体的描述')
-    }
-    throw error
-  } finally {
-    clearTimeout(timeout)
-  }
-
-  const payload = (await response.json().catch(() => ({}))) as {
-    data?: Array<{ b64_json?: string; url?: string }>
-    error?: { message?: string }
-    message?: string
-  }
-
-  if (!response.ok) {
-    throw new Error(payload.error?.message ?? payload.message ?? `图片生成接口返回 ${response.status}`)
-  }
-
-  const b64Json = payload.data?.[0]?.b64_json
-  if (!b64Json) {
-    throw new Error('图片生成接口没有返回 b64_json')
-  }
-
-  const id = randomUUID()
-  const fileName = `${id}.png`
-  const imageDir = path.join(runtimeRoot, 'images')
-  await mkdir(imageDir, { recursive: true })
-  await writeFile(path.join(imageDir, fileName), Buffer.from(b64Json, 'base64'))
-
-  return {
-    id,
-    prompt,
-    model: model ?? config.defaultModel,
-    size,
-    url: `/api/images/${fileName}`,
-    createdAt: new Date().toISOString(),
-  }
-}
-
-function findFirstString(payload: unknown, keys: string[]): string | undefined {
-  if (!payload || typeof payload !== 'object') return undefined
-  if (Array.isArray(payload)) {
-    for (const item of payload) {
-      const found = findFirstString(item, keys)
-      if (found) return found
-    }
-    return undefined
-  }
-
-  const record = payload as Record<string, unknown>
-  for (const key of keys) {
-    const value = record[key]
-    if (typeof value === 'string' && value) return value
-  }
-  for (const value of Object.values(record)) {
-    const found = findFirstString(value, keys)
-    if (found) return found
-  }
-  return undefined
-}
-
-function findFirstVideoUrl(payload: unknown): string | undefined {
-  if (!payload || typeof payload !== 'object') return undefined
-  if (Array.isArray(payload)) {
-    for (const item of payload) {
-      const found = findFirstVideoUrl(item)
-      if (found) return found
-    }
-    return undefined
-  }
-
-  const record = payload as Record<string, unknown>
-  for (const [key, value] of Object.entries(record)) {
-    if (typeof value === 'string' && /^https?:\/\//i.test(value) && (/\.(mp4|webm|mov)(\?|#|$)/i.test(value) || /video/i.test(key))) {
-      return value
-    }
-  }
-  for (const value of Object.values(record)) {
-    const found = findFirstVideoUrl(value)
-    if (found) return found
-  }
-  return undefined
-}
-
-function normalizedVideoStatus(status?: string) {
-  const value = (status ?? '').toLowerCase()
-  if (['succeeded', 'success', 'completed', 'done', 'finish', 'finished'].some((item) => value.includes(item))) return 'completed'
-  if (['failed', 'error', 'canceled', 'cancelled', 'rejected'].some((item) => value.includes(item))) return 'failed'
-  return 'running'
-}
-
-async function enterpriseJson(pathname: string, authToken: string, baseUrl: string, init: RequestInit = {}) {
-  const response = await fetch(enterpriseEndpoint(baseUrl, pathname), {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${authToken}`,
-      'Content-Type': 'application/json',
-      ...(init.headers ?? {}),
-    },
-  })
-  const payload = (await response.json().catch(() => ({}))) as { data?: unknown; error?: string; message?: string; upstream?: unknown }
-  if (!response.ok) {
-    throw new Error(payload.error ?? payload.message ?? `企业技能代理返回 ${response.status}`)
-  }
-  return payload.data
-}
-
-function buildVideoRequest(toolCall: Extract<MoyuanToolCall, { tool: 'video_generation' }>, prompt: string, skills: EnterpriseSkillSet) {
-  const video = skills.videoGeneration
-  return {
-    content: toolCall.content?.length ? toolCall.content : [{ type: 'text', text: toolCall.prompt ?? prompt }],
-    duration: toolCall.duration ?? video?.defaultDuration ?? 8,
-    generate_audio: toolCall.generateAudio ?? true,
-    model: toolCall.model ?? video?.defaultModel,
-    prompt: toolCall.prompt ?? prompt,
-    ratio: toolCall.ratio ?? video?.defaultRatio ?? '16:9',
-    watermark: toolCall.watermark ?? false,
-  }
-}
-
-async function generateVideo(
-  prompt: string,
-  toolCall: Extract<MoyuanToolCall, { tool: 'video_generation' }>,
-  options: RuntimeRunOptions,
-  skills: EnterpriseSkillSet,
-  onStatus: (content: string) => void,
-): Promise<VideoGenerationResult> {
-  const authToken = options.enterpriseAuthToken
-  const baseUrl = options.enterpriseApiBase ?? enterpriseApiBase
-  const video = skills.videoGeneration
-  if (!authToken) throw new Error('请先登录墨渊账号')
-  if (!video?.enabled || !video.apiKeyConfigured) throw new Error('视频生成技能未启用，请管理员在后台配置火山方舟 KEY')
-
-  onStatus('正在调用视频生成技能...')
-  const created = (await enterpriseJson('/skills/video/generations', authToken, baseUrl, {
-    body: JSON.stringify(buildVideoRequest(toolCall, prompt, skills)),
-    method: 'POST',
-  })) as { raw?: unknown; status?: string; taskId?: string; videoUrl?: string }
-
-  const taskId = created.taskId ?? findFirstString(created.raw, ['id', 'task_id', 'taskId'])
-  if (!taskId) throw new Error('视频生成任务没有返回任务 ID')
-
-  onStatus(`视频任务已创建，正在生成...`)
-  let lastStatus = created.status ?? findFirstString(created.raw, ['status'])
-  let videoUrl = created.videoUrl ?? findFirstVideoUrl(created.raw)
-  const deadline = Date.now() + Number(process.env.VIDEO_TIMEOUT_MS ?? 900000)
-
-  while (!videoUrl && normalizedVideoStatus(lastStatus) === 'running' && Date.now() < deadline) {
-    await sleep(Number(process.env.VIDEO_POLL_INTERVAL_MS ?? 6000))
-    const queried = (await enterpriseJson(`/skills/video/generations/${encodeURIComponent(taskId)}`, authToken, baseUrl)) as {
-      raw?: unknown
-      status?: string
-      videoUrl?: string
-    }
-    lastStatus = queried.status ?? findFirstString(queried.raw, ['status'])
-    videoUrl = queried.videoUrl ?? findFirstVideoUrl(queried.raw)
-    const statusLabel = lastStatus ? `当前状态：${lastStatus}` : '视频仍在生成中'
-    onStatus(statusLabel)
-    if (normalizedVideoStatus(lastStatus) === 'failed') {
-      const message = findFirstString(queried.raw, ['message', 'error', 'msg']) ?? '视频生成失败'
-      throw new Error(message)
-    }
-  }
-
-  if (!videoUrl) throw new Error('视频生成超时，请稍后在历史会话里重试或缩短视频描述')
-
-  return {
-    id: taskId,
-    prompt,
-    model: toolCall.model ?? video.defaultModel,
-    url: videoUrl,
-    duration: toolCall.duration ?? video.defaultDuration,
-    ratio: toolCall.ratio ?? video.defaultRatio,
-    resolution: video.defaultResolution,
-    createdAt: new Date().toISOString(),
-  }
-}
-
 async function createCodexHome() {
   const config = getModelConfig()
   const codexHome = process.env.MOYUAN_CODEX_HOME ?? path.join(tmpdir(), 'moyuan-codex', 'default')
@@ -655,12 +345,33 @@ async function createCodexHome() {
   return codexHome
 }
 
+function resolveAssistantItemId(record: TaskRecord, event: CodexTaskEvent) {
+  if (event.role !== 'assistant') return undefined
+
+  const explicitItemId = event.itemId ?? rawItemId(event.raw)
+  if (explicitItemId) {
+    record.activeAssistantItemId = explicitItemId
+    return explicitItemId
+  }
+
+  if (event.type === 'message_delta') {
+    record.activeAssistantItemId ??= `assistant-${record.task.id}-${record.events.length + 1}`
+    return record.activeAssistantItemId
+  }
+
+  if (event.type === 'message' && record.activeAssistantItemId) return record.activeAssistantItemId
+
+  return `assistant-${record.task.id}-${record.events.length + 1}`
+}
+
 function pushEvent(record: TaskRecord, event: Omit<CodexTaskEvent, 'id' | 'timestamp'>) {
-  const next: CodexTaskEvent = {
+  let next: CodexTaskEvent = {
     ...event,
     id: `${event.taskId}-${record.events.length + 1}`,
     timestamp: new Date().toISOString(),
   }
+  const assistantItemId = resolveAssistantItemId(record, next)
+  if (assistantItemId) next = { ...next, itemId: assistantItemId }
 
   if (next.type === 'thread.started' && next.raw && typeof next.raw === 'object') {
     const threadId = (next.raw as { thread_id?: unknown }).thread_id
@@ -674,7 +385,7 @@ function pushEvent(record: TaskRecord, event: Omit<CodexTaskEvent, 'id' | 'times
   record.events.push(next)
 
   if (next.type === 'message_delta') {
-    const itemId = rawItemId(next.raw) ?? `assistant-${record.events.length}`
+    const itemId = next.itemId ?? `assistant-${record.events.length}`
     const existingIndex = record.streamItemIndexes.get(itemId)
 
     if (existingIndex === undefined) {
@@ -682,30 +393,34 @@ function pushEvent(record: TaskRecord, event: Omit<CodexTaskEvent, 'id' | 'times
       record.task.transcript.push({
         role: 'assistant',
         content: next.content,
+        itemId,
         timestamp: next.timestamp,
       })
     } else {
       const current = record.task.transcript[existingIndex]
-      const content = next.content.startsWith(current.content) ? next.content : `${current.content}${next.content}`
+      const content = mergeAssistantContent(current.content, next.content)
       record.task.transcript[existingIndex] = { ...current, content, timestamp: next.timestamp }
     }
   } else if (next.type === 'message' && next.role === 'assistant') {
-    const itemId = rawItemId(next.raw)
+    const itemId = next.itemId ?? rawItemId(next.raw)
     const existingIndex = itemId ? record.streamItemIndexes.get(itemId) : undefined
     if (existingIndex !== undefined) {
       const current = record.task.transcript[existingIndex]
-      record.task.transcript[existingIndex] = { ...current, content: next.content, timestamp: next.timestamp }
+      record.task.transcript[existingIndex] = { ...current, content: mergeAssistantContent(current.content, next.content), timestamp: next.timestamp }
     } else if (record.task.transcript.at(-1)?.role !== 'assistant' || record.task.transcript.at(-1)?.content !== next.content) {
       record.task.transcript.push({
         role: next.role,
         content: next.content,
+        itemId,
         timestamp: next.timestamp,
       })
     }
+    if (record.activeAssistantItemId === itemId) record.activeAssistantItemId = undefined
   } else if (next.content) {
     record.task.transcript.push({
       role: next.role,
       content: next.content,
+      itemId: next.itemId,
       timestamp: next.timestamp,
     })
   }
@@ -723,10 +438,12 @@ function pushEvent(record: TaskRecord, event: Omit<CodexTaskEvent, 'id' | 'times
 
 function rawItemId(raw: unknown) {
   if (!raw || typeof raw !== 'object') return undefined
+  const direct = firstString((raw as { itemId?: unknown }).itemId, (raw as { item_id?: unknown }).item_id)
+  if (direct) return direct
   const item = (raw as { item?: unknown }).item
   if (!item || typeof item !== 'object') return undefined
-  const id = (item as { id?: unknown }).id
-  return typeof id === 'string' ? id : undefined
+  const id = firstString((item as { id?: unknown }).id, (item as { itemId?: unknown }).itemId, (item as { item_id?: unknown }).item_id)
+  return id || undefined
 }
 
 function rawWithItemId(raw: unknown, fallbackId: string) {
@@ -775,6 +492,53 @@ function firstString(...values: unknown[]) {
   return ''
 }
 
+function normalizedType(value: unknown) {
+  return typeof value === 'string' ? value.replace(/[_-]/g, '').toLowerCase() : ''
+}
+
+function isAgentMessageItem(item: Record<string, unknown> | null): item is Record<string, unknown> {
+  return normalizedType(item?.type) === 'agentmessage'
+}
+
+function isCommandExecutionItem(item: Record<string, unknown> | null): item is Record<string, unknown> {
+  return normalizedType(item?.type) === 'commandexecution'
+}
+
+function textFromContent(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (!Array.isArray(value)) return ''
+
+  return value
+    .map((part) => {
+      if (typeof part === 'string') return part
+      if (!part || typeof part !== 'object') return ''
+      const record = part as Record<string, unknown>
+      return firstString(record.text, record.content, record.value)
+    })
+    .filter(Boolean)
+    .join('')
+}
+
+function assistantTextFromItem(item: Record<string, unknown> | null, params?: Record<string, unknown>) {
+  if (!item) return ''
+  return firstString(
+    item.text,
+    item.outputText,
+    item.output_text,
+    item.message,
+    textFromContent(item.content),
+    params?.text,
+    params?.outputText,
+    params?.output_text,
+    params?.message,
+    textFromContent(params?.content),
+  )
+}
+
+function assistantDeltaFromParams(params: Record<string, unknown>) {
+  return firstString(params.delta, params.text, params.outputText, params.output_text, params.message, textFromContent(params.content))
+}
+
 function compactJson(payload: unknown) {
   try {
     return JSON.stringify(payload)
@@ -788,44 +552,49 @@ function eventFromJson(taskId: string, payload: unknown): Omit<CodexTaskEvent, '
   const type = typeof obj.type === 'string' ? obj.type : 'message'
   const message = typeof obj.message === 'string' ? obj.message : ''
   const item = obj.item && typeof obj.item === 'object' ? (obj.item as Record<string, unknown>) : null
+  const itemId = rawItemId(payload)
 
-  if (type === 'item.updated' && item?.type === 'agent_message') {
-    const content = firstString(item.text, item.delta, obj.delta, obj.text)
+  if (type === 'item.updated' && isAgentMessageItem(item)) {
+    const content = firstString(item.text, item.delta, obj.delta, obj.text, textFromContent(item.content), textFromContent(obj.content))
 
     return {
       taskId,
       type: 'message_delta',
       role: 'assistant',
       content,
+      itemId,
       raw: payload,
     }
   }
 
-  if (type === 'item.completed' && item?.type === 'agent_message' && typeof item.text === 'string') {
+  if (type === 'item.completed' && isAgentMessageItem(item)) {
     return {
       taskId,
       type: 'message',
       role: 'assistant',
-      content: item.text,
+      content: assistantTextFromItem(item, obj),
+      itemId,
       raw: payload,
     }
   }
 
-  if ((type === 'item.started' || type === 'item.completed') && item?.type === 'command_execution') {
+  if ((type === 'item.started' || type === 'item.completed') && isCommandExecutionItem(item)) {
     if (type === 'item.started') {
       return {
         taskId,
         type: 'tool',
         role: 'tool',
         content: '',
+        itemId,
         raw: payload,
       }
     }
 
-    const command = typeof item.command === 'string' ? item.command : ''
-    const output = typeof item.aggregated_output === 'string' ? item.aggregated_output.trim() : ''
+    const command = firstString(item.command, item.commandLine, item.command_line)
+    const output = firstString(item.aggregated_output, item.aggregatedOutput, item.output).trim()
     const status = typeof item.status === 'string' ? item.status : 'completed'
-    const exitCode = typeof item.exit_code === 'number' ? `\nexit ${item.exit_code}` : ''
+    const rawExitCode = typeof item.exit_code === 'number' ? item.exit_code : typeof item.exitCode === 'number' ? item.exitCode : undefined
+    const exitCode = typeof rawExitCode === 'number' ? `\nexit ${rawExitCode}` : ''
     const body = output ? `$ ${command}\n${output}${exitCode}` : `$ ${command}\n${status}`
 
     return {
@@ -833,6 +602,7 @@ function eventFromJson(taskId: string, payload: unknown): Omit<CodexTaskEvent, '
       type: 'tool',
       role: 'tool',
       content: body,
+      itemId,
       raw: payload,
     }
   }
@@ -1078,7 +848,7 @@ function terminateProcessTree(child: ReturnType<typeof spawn>) {
 
 async function finishCodexTask(record: TaskRecord, taskId: string, code: number | null) {
   record.task.exitCode = code
-  record.task.status = code === 0 ? 'completed' : 'failed'
+  record.task.status = code === 0 && record.task.status !== 'failed' ? 'completed' : 'failed'
   record.task.updatedAt = new Date().toISOString()
   const diff = await getGitDiff(record.task.workspace)
   record.task.diffSummary = diff
@@ -1094,7 +864,7 @@ async function finishCodexTask(record: TaskRecord, taskId: string, code: number 
     taskId,
     type: 'process.exit',
     role: 'system',
-    content: code === 0 ? 'Codex 任务已完成' : `Codex 任务退出，代码 ${code ?? 'unknown'}`,
+    content: record.task.status === 'completed' ? 'Codex 任务已完成' : `Codex 任务退出，代码 ${code ?? 'unknown'}`,
   })
 }
 
@@ -1124,6 +894,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
   await saveStore()
 
   let activeTurnId = ''
+  let fallbackAssistantItemId = ''
   let completed = false
   let failed = false
   let resolveTurn: (() => void) | undefined
@@ -1132,6 +903,32 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
     resolveTurn = resolve
     rejectTurn = reject
   })
+  const assistantDeltaBuffers = new Map<string, string>()
+  const pendingToolRuns: Promise<void>[] = []
+
+  const startToolRun = (toolCall: ReturnType<typeof parseMoyuanToolCall>) => {
+    if (!toolCall) return false
+    const toolRun = runMoyuanToolCall({ record, toolCall, prompt, options, skills, runtimeRoot, saveStore, pushEvent })
+    pendingToolRuns.push(toolRun)
+    void toolRun
+    return true
+  }
+
+  const flushBufferedAssistantItems = () => {
+    for (const [itemId, content] of Array.from(assistantDeltaBuffers.entries())) {
+      const toolCall = parseMoyuanToolCall(content)
+      assistantDeltaBuffers.delete(itemId)
+      if (startToolRun(toolCall)) continue
+      if (!content.trim()) continue
+      pushEvent(record, {
+        taskId,
+        type: 'message',
+        role: 'assistant',
+        content,
+        raw: appServerRaw(itemId),
+      })
+    }
+  }
 
   const child = spawn(process.execPath, [codexBin, 'app-server', '--listen', appServerUrl, '--disable', 'remote_plugin', '--disable', 'plugin_sharing'], {
     cwd: workspace,
@@ -1160,46 +957,85 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
 
   const connection = await connectAppServer(appServerUrl, (message) => {
     const method = typeof message.method === 'string' ? message.method : ''
+    const methodKey = method.replace(/[\/_.-]/g, '').toLowerCase()
     const params = message.params && typeof message.params === 'object' ? (message.params as Record<string, unknown>) : {}
+    const item =
+      params.item && typeof params.item === 'object'
+        ? (params.item as Record<string, unknown>)
+        : params.type
+          ? params
+          : null
+    const explicitItemId = firstString(params.itemId, params.item_id, item?.id)
+    const isAssistantNotification =
+      (methodKey.includes('agentmessage') && (methodKey.includes('delta') || methodKey.includes('completed'))) ||
+      (methodKey === 'itemupdated' && isAgentMessageItem(item)) ||
+      (methodKey === 'itemcompleted' && isAgentMessageItem(item))
+    const itemId = explicitItemId || (isAssistantNotification ? fallbackAssistantItemId || `app-assistant-${activeTurnId || taskId}` : `app-item-${record.events.length}`)
+    if (isAssistantNotification && !explicitItemId) fallbackAssistantItemId = itemId
 
-    if (method === 'item/agentMessage/delta') {
-      const itemId = typeof params.itemId === 'string' ? params.itemId : `app-delta-${record.events.length}`
-      const delta = typeof params.delta === 'string' ? params.delta : ''
+    if ((methodKey.includes('agentmessage') && methodKey.includes('delta')) || (methodKey === 'itemupdated' && isAgentMessageItem(item))) {
+      const delta = assistantDeltaFromParams(params) || firstString(item?.delta, item?.text, textFromContent(item?.content))
       if (!delta) return
+      const buffered = assistantDeltaBuffers.get(itemId)
+      const combined = `${buffered ?? ''}${delta}`
+      if (buffered !== undefined || isLikelyToolCallFragment(combined)) {
+        if (isLikelyToolCallFragment(combined)) {
+          assistantDeltaBuffers.set(itemId, combined)
+          return
+        }
+        assistantDeltaBuffers.delete(itemId)
+        pushEvent(record, {
+          taskId,
+          type: 'message_delta',
+          role: 'assistant',
+          content: combined,
+          itemId,
+          raw: appServerRaw(itemId),
+        })
+        return
+      }
       pushEvent(record, {
         taskId,
         type: 'message_delta',
         role: 'assistant',
         content: delta,
+        itemId,
         raw: appServerRaw(itemId),
       })
       return
     }
 
-    if (method === 'item/completed') {
-      const item = params.item && typeof params.item === 'object' ? (params.item as Record<string, unknown>) : null
-      const itemId = typeof item?.id === 'string' ? item.id : `app-item-${record.events.length}`
-      if (item?.type === 'agentMessage' && typeof item.text === 'string') {
-        const toolCall = parseMoyuanToolCall(item.text)
-        if (toolCall) {
-          void runMoyuanToolCall(record, toolCall, prompt, options, skills)
+    if (methodKey === 'itemcompleted' || (methodKey.includes('agentmessage') && methodKey.includes('completed'))) {
+      if (isAgentMessageItem(item)) {
+        const content = assistantTextFromItem(item, params) || assistantDeltaBuffers.get(itemId) || ''
+        assistantDeltaBuffers.delete(itemId)
+        const toolCall = parseMoyuanToolCall(content)
+        if (startToolRun(toolCall)) {
+          if (fallbackAssistantItemId === itemId) fallbackAssistantItemId = ''
           return
         }
+        if (!content.trim()) return
         pushEvent(record, {
           taskId,
           type: 'message',
           role: 'assistant',
-          content: item.text,
+          content,
+          itemId,
           raw: appServerRaw(itemId),
         })
+        if (fallbackAssistantItemId === itemId) fallbackAssistantItemId = ''
         return
       }
 
-      if (item?.type === 'commandExecution' && typeof item.command === 'string') {
-        const output = typeof item.aggregatedOutput === 'string' ? item.aggregatedOutput.trim() : ''
-        const status = typeof item.status === 'string' ? item.status : 'completed'
-        const exitCode = typeof item.exitCode === 'number' ? `\nexit ${item.exitCode}` : ''
-        const body = output ? `$ ${item.command}\n${output}${exitCode}` : `$ ${item.command}\n${status}`
+      if (isCommandExecutionItem(item)) {
+        const commandItem = item as Record<string, unknown>
+        const command = firstString(commandItem.command, commandItem.commandLine, commandItem.command_line)
+        const output = firstString(commandItem.aggregatedOutput, commandItem.aggregated_output, commandItem.output).trim()
+        const status = typeof commandItem.status === 'string' ? commandItem.status : 'completed'
+        const rawExitCode =
+          typeof commandItem.exitCode === 'number' ? commandItem.exitCode : typeof commandItem.exit_code === 'number' ? commandItem.exit_code : undefined
+        const exitCode = typeof rawExitCode === 'number' ? `\nexit ${rawExitCode}` : ''
+        const body = output ? `$ ${command}\n${output}${exitCode}` : `$ ${command}\n${status}`
         pushEvent(record, {
           taskId,
           type: 'tool',
@@ -1211,9 +1047,10 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
       return
     }
 
-    if (method === 'turn/completed') {
+    if (methodKey === 'turncompleted') {
       completed = true
-      record.task.status = 'completed'
+      flushBufferedAssistantItems()
+      if (!pendingToolRuns.length) record.task.status = 'completed'
       pushEvent(record, {
         taskId,
         type: 'turn.completed',
@@ -1224,7 +1061,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
       return
     }
 
-    if (method === 'error') {
+    if (methodKey === 'error') {
       const willRetry = params.willRetry === true
       if (willRetry) return
       failed = true
@@ -1236,6 +1073,39 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
         content: typeof error.message === 'string' ? friendlyRuntimeMessage(error.message) : '模型服务暂时不可用，请稍后重试。',
       })
       rejectTurn?.(new Error(typeof error.message === 'string' ? error.message : 'Codex app-server turn failed'))
+      return
+    }
+
+    const rawPayload =
+      params.type && typeof params.type === 'string'
+        ? params
+        : message.type && typeof message.type === 'string'
+          ? message
+          : undefined
+    if (rawPayload) {
+      const event = eventFromJson(taskId, rawPayload)
+      if (event.type === 'message_delta' && event.role === 'assistant') {
+        const itemIdFromRaw = rawItemId(event.raw) ?? itemId
+        const combined = `${assistantDeltaBuffers.get(itemIdFromRaw) ?? ''}${event.content}`
+        if (isLikelyToolCallFragment(combined)) {
+          assistantDeltaBuffers.set(itemIdFromRaw, combined)
+          return
+        }
+      }
+      const eventWithItemId = event.role === 'assistant' ? { ...event, itemId: rawItemId(event.raw) ?? itemId } : event
+      if (eventWithItemId.type === 'message' && eventWithItemId.role === 'assistant') {
+        const toolCall = parseMoyuanToolCall(eventWithItemId.content)
+        if (startToolRun(toolCall)) return
+      }
+      if (eventWithItemId.type === 'turn.completed') {
+        completed = true
+        flushBufferedAssistantItems()
+        if (!pendingToolRuns.length) record.task.status = 'completed'
+        pushEvent(record, eventWithItemId)
+        resolveTurn?.()
+        return
+      }
+      pushEvent(record, eventWithItemId)
     }
   })
 
@@ -1292,6 +1162,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
     })
     activeTurnId = appServerTurnId(turnResult) ?? ''
     await turnFinished
+    await Promise.allSettled(pendingToolRuns)
     await finishCodexTask(record, taskId, 0)
   } catch (error) {
     record.task.status = 'failed'
@@ -1364,6 +1235,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
 
   let buffer = ''
   const pendingAssistantStreams: Promise<void>[] = []
+  const pendingToolRuns: Promise<void>[] = []
 
   child.stdout.on('data', (chunk: Buffer) => {
     buffer += chunk.toString('utf8')
@@ -1381,7 +1253,9 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
         if (event.type === 'message' && event.role === 'assistant') {
           const toolCall = parseMoyuanToolCall(event.content)
           if (toolCall) {
-            void runMoyuanToolCall(record, toolCall, prompt, options, skills)
+            const toolRun = runMoyuanToolCall({ record, toolCall, prompt, options, skills, runtimeRoot, saveStore, pushEvent })
+            pendingToolRuns.push(toolRun)
+            void toolRun
             continue
           }
           pendingAssistantStreams.push(streamAssistantMessage(record, event))
@@ -1416,7 +1290,8 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
     record.task.exitCode = code
     void (async () => {
       await Promise.allSettled(pendingAssistantStreams)
-      record.task.status = code === 0 ? 'completed' : 'failed'
+      await Promise.allSettled(pendingToolRuns)
+      record.task.status = code === 0 && record.task.status !== 'failed' ? 'completed' : 'failed'
       record.task.updatedAt = new Date().toISOString()
       const diff = await getGitDiff(record.task.workspace)
       record.task.diffSummary = diff
@@ -1432,100 +1307,10 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
         taskId,
         type: 'process.exit',
         role: 'system',
-        content: code === 0 ? 'Codex 任务已完成' : `Codex 任务退出，代码 ${code ?? 'unknown'}`,
+        content: record.task.status === 'completed' ? 'Codex 任务已完成' : `Codex 任务退出，代码 ${code ?? 'unknown'}`,
       })
     })()
   })
-}
-
-async function runImageGeneration(record: TaskRecord, prompt: string, size: string, model?: string) {
-  try {
-    record.task.status = 'running'
-    record.task.updatedAt = new Date().toISOString()
-    await saveStore()
-
-    const image = await generateImage(prompt, size, model)
-    record.task.status = 'completed'
-    record.task.generatedImages = [...(record.task.generatedImages ?? []), image]
-    pushEvent(record, {
-      taskId: record.task.id,
-      type: 'message',
-      role: 'assistant',
-      content: `![${prompt}](${image.url})`,
-    })
-    pushEvent(record, {
-      taskId: record.task.id,
-      type: 'turn.completed',
-      role: 'system',
-      content: '图片生成完成',
-    })
-  } catch (error) {
-    record.task.status = 'failed'
-    pushEvent(record, {
-      taskId: record.task.id,
-      type: 'turn.failed',
-      role: 'system',
-      content: `图片生成失败：${error instanceof Error ? error.message : String(error)}`,
-    })
-  } finally {
-    await saveStore()
-  }
-}
-
-async function runVideoGeneration(
-  record: TaskRecord,
-  prompt: string,
-  toolCall: Extract<MoyuanToolCall, { tool: 'video_generation' }>,
-  options: RuntimeRunOptions,
-  skills: EnterpriseSkillSet,
-) {
-  try {
-    record.task.status = 'running'
-    record.task.updatedAt = new Date().toISOString()
-    await saveStore()
-
-    const video = await generateVideo(prompt, toolCall, options, skills, (content) => {
-      pushEvent(record, {
-        taskId: record.task.id,
-        type: 'tool',
-        role: 'tool',
-        content,
-      })
-    })
-    record.task.status = 'completed'
-    record.task.generatedVideos = [...(record.task.generatedVideos ?? []), video]
-    pushEvent(record, {
-      taskId: record.task.id,
-      type: 'message',
-      role: 'assistant',
-      content: `![${prompt}](${video.url})`,
-    })
-    pushEvent(record, {
-      taskId: record.task.id,
-      type: 'turn.completed',
-      role: 'system',
-      content: '视频生成完成',
-    })
-  } catch (error) {
-    record.task.status = 'failed'
-    pushEvent(record, {
-      taskId: record.task.id,
-      type: 'turn.failed',
-      role: 'system',
-      content: `视频生成失败：${error instanceof Error ? error.message : String(error)}`,
-    })
-  } finally {
-    await saveStore()
-  }
-}
-
-async function runMoyuanToolCall(record: TaskRecord, toolCall: MoyuanToolCall, prompt: string, options: RuntimeRunOptions, skills: EnterpriseSkillSet) {
-  if (toolCall.tool === 'image_generation') {
-    await runImageGeneration(record, toolCall.prompt ?? prompt, toolCall.size ?? inferImageSize(toolCall.prompt ?? prompt), toolCall.model)
-    return
-  }
-
-  await runVideoGeneration(record, toolCall.prompt ?? prompt, toolCall, options, skills)
 }
 
 function sleep(ms: number) {
@@ -1635,7 +1420,21 @@ app.post('/api/images/generations', async (request, reply) => {
   const record: TaskRecord = { task, events: [], subscribers: new Set(), streamItemIndexes: new Map() }
   records.set(task.id, record)
   await saveStore()
-  void runImageGeneration(record, parsed.data.prompt, parsed.data.size, parsed.data.model)
+  const skills = await loadEnterpriseSkillSet(parsed.data.enterpriseAuthToken, parsed.data.enterpriseApiBase)
+  void runImageGenerationTool({
+    record,
+    prompt: parsed.data.prompt,
+    runtimeRoot,
+    saveStore,
+    pushEvent,
+    size: parsed.data.size,
+    model: parsed.data.model,
+    options: {
+      enterpriseApiBase: parsed.data.enterpriseApiBase,
+      enterpriseAuthToken: parsed.data.enterpriseAuthToken,
+    },
+    skills,
+  })
 
   return { data: task }
 })

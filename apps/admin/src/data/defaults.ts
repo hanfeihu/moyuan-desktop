@@ -1,4 +1,4 @@
-import type { Employee, MailServiceConfig, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
+import type { Employee, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
 import type { PolicyView } from '@/services/admin'
 
 export const defaultProviders: ModelProviderConfig[] = [
@@ -40,6 +40,19 @@ export const defaultVideoSkill: VideoSkillConfig = {
   defaultRatio: '16:9',
   defaultResolution: '720p',
   monthlyLimit: 100,
+}
+
+export const defaultImageSkill: ImageSkillConfig = {
+  id: 'gpt-image-2',
+  name: 'gpt-image-2 图片生成',
+  provider: 'openai-compatible-image',
+  baseUrl: 'https://codex-manager.tminos.com/v1',
+  maskedApiKey: '未配置',
+  apiKeyConfigured: false,
+  defaultModel: 'gpt-image-2',
+  enabled: false,
+  defaultSize: '1024x1024',
+  monthlyLimit: 1000,
 }
 
 export const defaultMailSettings: MailServiceConfig = {

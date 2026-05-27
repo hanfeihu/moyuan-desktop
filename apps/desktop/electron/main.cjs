@@ -15,7 +15,7 @@ let runtimeProcess = null
 let runtimeLog = null
 const startupLogPath = path.join(app.getPath('temp'), 'moyuan-desktop-startup.log')
 
-app.setName('Moyuan Desktop')
+app.setName('墨渊')
 app.setPath('userData', path.join(app.getPath('appData'), 'Moyuan Desktop'))
 
 function logStartup(message, error) {
@@ -180,7 +180,7 @@ async function createWindow() {
     height: 940,
     minWidth: 1180,
     minHeight: 760,
-    title: '墨渊 Desktop',
+    title: '墨渊',
     backgroundColor: '#f7f7f5',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 18, y: 18 },

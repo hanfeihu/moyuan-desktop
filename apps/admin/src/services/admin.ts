@@ -1,5 +1,5 @@
-import type { AccountUser, Employee, EnterprisePolicy, MailServiceConfig, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
-import { defaultEmployees, defaultMailSettings, defaultPolicy, defaultProviders, defaultVideoSkill } from '@/data/defaults'
+import type { AccountUser, Employee, EnterprisePolicy, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
+import { defaultEmployees, defaultImageSkill, defaultMailSettings, defaultPolicy, defaultProviders, defaultVideoSkill } from '@/data/defaults'
 
 const apiBase = '/admin-api'
 const adminTokenStorageKey = 'moyuan.admin.token'
@@ -19,6 +19,7 @@ export type AdminSnapshot = {
   modelProvider: ModelProviderConfig
   policy: PolicyView
   providers: ModelProviderConfig[]
+  imageSkill: ImageSkillConfig
   videoSkill: VideoSkillConfig
 }
 
@@ -29,6 +30,24 @@ type AdminPayload<T> = {
 export type AdminAuthState = {
   configured: boolean
   username: string
+}
+
+function normalizeImageSkill(skill?: Partial<ImageSkillConfig> | null): ImageSkillConfig {
+  return {
+    ...defaultImageSkill,
+    ...skill,
+    apiKeyConfigured: skill?.apiKeyConfigured ?? defaultImageSkill.apiKeyConfigured,
+    maskedApiKey: skill?.maskedApiKey ?? defaultImageSkill.maskedApiKey,
+  }
+}
+
+function normalizeVideoSkill(skill?: Partial<VideoSkillConfig> | null): VideoSkillConfig {
+  return {
+    ...defaultVideoSkill,
+    ...skill,
+    apiKeyConfigured: skill?.apiKeyConfigured ?? defaultVideoSkill.apiKeyConfigured,
+    maskedApiKey: skill?.maskedApiKey ?? defaultVideoSkill.maskedApiKey,
+  }
 }
 
 export function getAdminToken() {
@@ -120,10 +139,11 @@ export function policyText(policy: EnterprisePolicy): PolicyView {
 
 export async function loadAdminSnapshot(): Promise<AdminSnapshot> {
   try {
-    const [modelPayload, employeePayload, policyPayload, videoSkillPayload] = await Promise.all([
+    const [modelPayload, employeePayload, policyPayload, imageSkillPayload, videoSkillPayload] = await Promise.all([
       getJson<ModelProviderConfig>('/model-provider'),
       getJson<Employee[]>('/employees'),
       getJson<EnterprisePolicy>('/policy'),
+      getJson<ImageSkillConfig>('/image-skill'),
       getJson<VideoSkillConfig>('/video-skill'),
     ])
     const providers = [modelPayload.data, ...defaultProviders.filter((item) => item.id !== modelPayload.data.id)]
@@ -133,7 +153,8 @@ export async function loadAdminSnapshot(): Promise<AdminSnapshot> {
       modelProvider: modelPayload.data,
       policy: policyText(policyPayload.data),
       providers,
-      videoSkill: videoSkillPayload.data,
+      imageSkill: normalizeImageSkill(imageSkillPayload.data),
+      videoSkill: normalizeVideoSkill(videoSkillPayload.data),
     }
   } catch {
     return {
@@ -142,6 +163,7 @@ export async function loadAdminSnapshot(): Promise<AdminSnapshot> {
       modelProvider: defaultProviders[0],
       policy: defaultPolicy,
       providers: defaultProviders,
+      imageSkill: defaultImageSkill,
       videoSkill: defaultVideoSkill,
     }
   }
@@ -182,7 +204,25 @@ export async function saveVideoSkill(values: Record<string, unknown>) {
   })
   const payload = (await response.json()) as { data?: VideoSkillConfig; error?: string }
   if (!response.ok || !payload.data) throw new Error(payload.error ?? '保存失败')
-  return payload.data
+  return normalizeVideoSkill(payload.data)
+}
+
+export async function saveImageSkill(values: Record<string, unknown>) {
+  const response = await adminFetch('/image-skill', {
+    body: JSON.stringify({
+      apiKey: values.apiKey,
+      baseUrl: values.baseUrl,
+      defaultModel: values.defaultModel,
+      defaultSize: values.defaultSize,
+      enabled: Boolean(values.enabled),
+      monthlyLimit: values.monthlyLimit,
+    }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'PUT',
+  })
+  const payload = (await response.json()) as { data?: ImageSkillConfig; error?: string }
+  if (!response.ok || !payload.data) throw new Error(payload.error ?? '保存失败')
+  return normalizeImageSkill(payload.data)
 }
 
 export async function loadMailSettings() {

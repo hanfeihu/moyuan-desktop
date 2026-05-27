@@ -136,8 +136,15 @@ function compactTranscript(items: TranscriptItem[]) {
   return items.reduce<TranscriptItem[]>((merged, item) => {
     const previous = merged.at(-1)
     if (previous?.role === 'assistant' && item.role === 'assistant') {
+      if (previous.itemId && item.itemId && previous.itemId === item.itemId) {
+        merged[merged.length - 1] = {
+          ...item,
+          content: mergeAssistantContent(previous.content, item.content),
+        }
+        return merged
+      }
       if (item.content.startsWith(previous.content)) {
-        merged[merged.length - 1] = item
+        merged[merged.length - 1] = { ...item, content: mergeAssistantContent(previous.content, item.content) }
         return merged
       }
       if (previous.content.startsWith(item.content)) return merged
@@ -148,10 +155,30 @@ function compactTranscript(items: TranscriptItem[]) {
   }, [])
 }
 
+function sharedPrefixSuffixLength(left: string, right: string) {
+  const maxLength = Math.min(left.length, right.length)
+  for (let length = maxLength; length > 0; length -= 1) {
+    if (left.endsWith(right.slice(0, length))) return length
+  }
+  return 0
+}
+
+function mergeAssistantContent(current: string, incoming: string) {
+  if (!current) return incoming
+  if (!incoming) return current
+  if (current === incoming) return current
+  if (incoming.startsWith(current)) return incoming
+  if (current.startsWith(incoming)) return current
+
+  const overlap = sharedPrefixSuffixLength(current, incoming)
+  return `${current}${incoming.slice(overlap)}`
+}
+
 function eventToTranscript(event: CodexTaskEvent) {
   return {
     role: event.role,
     content: event.content,
+    itemId: event.itemId,
     timestamp: event.timestamp,
   }
 }
@@ -159,12 +186,58 @@ function eventToTranscript(event: CodexTaskEvent) {
 function mergeTask(tasks: CodexTask[], next: CodexTask) {
   const normalized = normalizeTask(next)
   const withoutWelcome = tasks.filter((task) => task.id !== 'welcome')
-  const exists = withoutWelcome.some((task) => task.id === normalized.id)
+  const existing = withoutWelcome.find((task) => task.id === normalized.id)
+  const reconciled = existing ? reconcileTaskSnapshot(existing, normalized) : normalized
+  const exists = Boolean(existing)
   const merged = exists
-    ? withoutWelcome.map((task) => (task.id === normalized.id ? normalized : task))
-    : [normalized, ...withoutWelcome]
+    ? withoutWelcome.map((task) => (task.id === reconciled.id ? reconciled : task))
+    : [reconciled, ...withoutWelcome]
 
   return merged.sort((a, b) => taskSortValue(b) - taskSortValue(a))
+}
+
+function reconcileTaskSnapshot(local: CodexTask, incoming: CodexTask): CodexTask {
+  const isLive = local.status === 'queued' || local.status === 'running' || incoming.status === 'queued' || incoming.status === 'running'
+  if (!isLive) return incoming
+
+  const transcript = compactTranscript(mergeTranscriptSnapshots(local.transcript, incoming.transcript))
+  return { ...incoming, transcript }
+}
+
+function mergeTranscriptSnapshots(local: TranscriptItem[], incoming: TranscriptItem[]) {
+  const merged = incoming.map((item) => ({ ...item }))
+
+  local.forEach((localItem, index) => {
+    if (localItem.role !== 'assistant') return
+
+    const sameIdIndex = localItem.itemId ? merged.findIndex((item) => item.itemId === localItem.itemId && item.role === 'assistant') : -1
+    if (sameIdIndex >= 0) {
+      const remoteItem = merged[sameIdIndex]
+      merged[sameIdIndex] = {
+        ...remoteItem,
+        content: mergeAssistantContent(localItem.content, remoteItem.content),
+      }
+      return
+    }
+
+    const sameIndex = merged[index]
+    if (sameIndex?.role === 'assistant' && (!sameIndex.itemId || !localItem.itemId)) {
+      const related = sameIndex.content.startsWith(localItem.content) || localItem.content.startsWith(sameIndex.content)
+      if (related) {
+        merged[index] = {
+          ...sameIndex,
+          content: mergeAssistantContent(localItem.content, sameIndex.content),
+        }
+        return
+      }
+    }
+
+    if (!merged.some((item) => item.role === localItem.role && item.content === localItem.content && item.timestamp === localItem.timestamp)) {
+      merged.push(localItem)
+    }
+  })
+
+  return merged
 }
 
 function replaceTask(tasks: CodexTask[], oldTaskId: string, next: CodexTask) {
@@ -178,6 +251,7 @@ function shouldShowMessage(item: TranscriptItem) {
   const content = item.content.trim()
   if (!content) return false
   if (/^正在生成图片[.。…]*$/.test(content)) return false
+  if (isTransientSkillStatus(content)) return false
   if (/^Codex\s*任务退出，代码/.test(content)) return false
   if (/Missing environment variable:|invalid api key|403 Forbidden/i.test(content)) return false
   if (isInternalCodexJson(content)) return false
@@ -199,11 +273,21 @@ function shouldShowMessage(item: TranscriptItem) {
   )
 }
 
+function isTransientSkillStatus(content: string) {
+  return (
+    content === '正在调用视频生成技能...' ||
+    content === '视频任务已创建，正在生成...' ||
+    content === '视频仍在生成中' ||
+    content.startsWith('当前状态：')
+  )
+}
+
 function isInternalCodexJson(content: string) {
   if (!content.startsWith('{') || !content.endsWith('}')) return false
 
   try {
-    const payload = JSON.parse(content) as { type?: unknown; item?: { type?: unknown } }
+    const payload = JSON.parse(content) as { moyuan_tool?: unknown; type?: unknown; item?: { type?: unknown } }
+    if (payload.moyuan_tool === 'image_generation' || payload.moyuan_tool === 'video_generation') return true
     const type = typeof payload.type === 'string' ? payload.type : ''
     const itemType = payload.item && typeof payload.item.type === 'string' ? payload.item.type : ''
 
@@ -233,6 +317,7 @@ function taskMeta(task: CodexTask) {
   const assistantTurns = task.transcript.filter((item) => item.role === 'assistant').length
   const commandTurns = task.transcript.filter((item) => item.role === 'tool' && item.content.trim().startsWith('$')).length
   if (task.generatedImages?.length) return `${task.generatedImages.length} 张图片`
+  if (task.generatedVideos?.length) return `${task.generatedVideos.length} 个视频`
   if (task.sessionId) return `${assistantTurns} 轮 · 可续聊`
   if (commandTurns) return `${commandTurns} 次命令`
   return statusText(task.status)
@@ -270,17 +355,35 @@ function mergeEventIntoTask(task: CodexTask, event: CodexTaskEvent): CodexTask {
 
   if (event.type === 'message_delta' && event.role === 'assistant') {
     const transcript = [...task.transcript]
-    const lastIndex = transcript.length - 1
+    const itemIndex = event.itemId ? transcript.findIndex((item) => item.role === 'assistant' && item.itemId === event.itemId) : -1
+    const lastIndex = itemIndex >= 0 ? itemIndex : transcript.length - 1
     const lastItem = transcript[lastIndex]
 
-    if (lastItem?.role !== 'assistant') {
+    const isDifferentAssistantItem = itemIndex < 0 && Boolean(event.itemId && lastItem?.itemId && lastItem.itemId !== event.itemId)
+    if (itemIndex < 0 && (lastItem?.role !== 'assistant' || isDifferentAssistantItem)) {
       transcript.push(transcriptItem)
     } else {
       const current = lastItem
-      const content = event.content.startsWith(current.content) ? event.content : `${current.content}${event.content}`
-      transcript[lastIndex] = { ...current, content, timestamp: event.timestamp }
+      const content = mergeAssistantContent(current.content, event.content)
+      transcript[lastIndex] = { ...current, content, itemId: event.itemId ?? current.itemId, timestamp: event.timestamp }
     }
     return { ...task, status: eventStatus(event, task.status), transcript }
+  }
+
+  if (event.type === 'message' && event.role === 'assistant' && event.itemId) {
+    const existingIndex = task.transcript.findIndex((item) => item.role === 'assistant' && item.itemId === event.itemId)
+    if (existingIndex >= 0) {
+      const current = task.transcript[existingIndex]
+      return {
+        ...task,
+        status: eventStatus(event, task.status),
+        transcript: [
+          ...task.transcript.slice(0, existingIndex),
+          { ...current, content: mergeAssistantContent(current.content, event.content), timestamp: event.timestamp },
+          ...task.transcript.slice(existingIndex + 1),
+        ],
+      }
+    }
   }
 
   if (event.type === 'message' && event.role === 'assistant' && task.transcript.at(-1)?.role === 'assistant') {
@@ -289,7 +392,7 @@ function mergeEventIntoTask(task: CodexTask, event: CodexTaskEvent): CodexTask {
       return {
         ...task,
         status: eventStatus(event, task.status),
-        transcript: [...task.transcript.slice(0, -1), transcriptItem],
+        transcript: [...task.transcript.slice(0, -1), { ...transcriptItem, content: mergeAssistantContent(last?.content ?? '', event.content), itemId: event.itemId ?? last?.itemId }],
       }
     }
   }
@@ -458,16 +561,18 @@ function TokenMeter({ user }: { user: AccountUser }) {
   const percent = user.tokenBudget > 0 ? Math.min(100, Math.round((user.tokenUsed / user.tokenBudget) * 100)) : 0
   const remaining = Math.max(0, user.tokenBudget - user.tokenUsed)
   const state = user.tokenBudget <= 0 ? 'unissued' : remaining <= 0 ? 'depleted' : 'normal'
+  const label = state === 'unissued' ? 'Token 额度' : state === 'depleted' ? '本期额度已用完' : 'Token 额度'
+  const value = state === 'unissued' ? '尚未派发' : formatTokenNumber(remaining)
   return (
     <div className={`token-meter ${state}`} title={`已用 ${user.tokenUsed} / ${user.tokenBudget} Token`}>
       <div className="token-meter-icon">
         <Zap size={14} />
       </div>
       <div className="token-meter-copy">
-        <span>{state === 'unissued' ? '待派发' : state === 'depleted' ? '已耗尽' : 'Token 额度'}</span>
+        <span>{label}</span>
         <strong>
-          {formatTokenNumber(remaining)}
-          <em> 可用</em>
+          {value}
+          {state === 'unissued' ? null : <em> 可用</em>}
         </strong>
       </div>
       <div className="token-meter-bar">
@@ -481,38 +586,9 @@ function isCommandToolContent(content: string) {
   return content.trimStart().startsWith('$')
 }
 
-function TranscriptMessage({ animate, item, label }: { animate: boolean; item: TranscriptItem; label: string }) {
-  const [visibleText, setVisibleText] = useState(animate && item.role === 'assistant' ? '' : item.content)
-  const visibleTextRef = useRef(visibleText)
+function TranscriptMessage({ item, label, streaming }: { item: TranscriptItem; label: string; streaming: boolean }) {
   const isToolStatus = item.role === 'tool' && !isCommandToolContent(item.content)
   const effectiveLabel = isToolStatus ? '状态' : label
-
-  useEffect(() => {
-    visibleTextRef.current = visibleText
-  }, [visibleText])
-
-  useEffect(() => {
-    if (!animate || item.role !== 'assistant') {
-      setVisibleText(item.content)
-      return
-    }
-
-    let index = item.content.startsWith(visibleTextRef.current) ? visibleTextRef.current.length : 0
-    if (index === 0) setVisibleText('')
-
-    const step = () => {
-      index = Math.min(item.content.length, index + Math.max(1, Math.ceil(item.content.length / 80)))
-      const next = item.content.slice(0, index)
-      visibleTextRef.current = next
-      setVisibleText(next)
-      window.dispatchEvent(new Event('moyuan:content-resized'))
-      if (index >= item.content.length) window.clearInterval(timer)
-    }
-    const timer = window.setInterval(step, 18)
-    step()
-
-    return () => window.clearInterval(timer)
-  }, [animate, item.content, item.role])
 
   return (
     <article className={`message ${item.role} ${isToolStatus ? 'tool-status' : ''}`}>
@@ -532,8 +608,8 @@ function TranscriptMessage({ animate, item, label }: { animate: boolean; item: T
         )}
       </div>
       <div className="message-body">
-        {item.role === 'assistant' ? <MarkdownText content={visibleText} /> : item.role === 'tool' ? <ToolOutput content={visibleText} /> : visibleText}
-        {animate && item.role === 'assistant' && visibleText.length < item.content.length ? <span className="stream-caret" /> : null}
+        {item.role === 'assistant' ? <MarkdownText content={item.content} /> : item.role === 'tool' ? <ToolOutput content={item.content} /> : item.content}
+        {streaming && item.role === 'assistant' ? <span className="stream-caret" /> : null}
       </div>
     </article>
   )
@@ -804,8 +880,8 @@ function DesktopApp() {
   const mainPaneRef = useRef<HTMLElement | null>(null)
   const transcriptRef = useRef<HTMLDivElement | null>(null)
   const transcriptBottomRef = useRef<HTMLDivElement | null>(null)
-  const composerRef = useRef<HTMLElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const composerRef = useRef<HTMLElement | null>(null)
   const seenEventsRef = useRef<Set<string>>(new Set())
   const previousTaskIdRef = useRef(activeTaskId)
   const pinTranscriptToBottomRef = useRef(true)
@@ -1045,7 +1121,7 @@ function DesktopApp() {
     }
 
     if (pinTranscriptToBottomRef.current) {
-      scheduleTranscriptBottom('smooth')
+      scheduleTranscriptBottom('auto')
     }
   }, [visibleTranscript.length, activeTask?.id, activeTask?.status])
 
@@ -1071,37 +1147,34 @@ function DesktopApp() {
   }, [activeTask?.id, visibleTranscript.length])
 
   useEffect(() => {
+    const mainPane = mainPaneRef.current
+    const composer = composerRef.current
+    if (!mainPane || !composer) return
+
+    const updateComposerSafeArea = () => {
+      const composerHeight = Math.ceil(composer.getBoundingClientRect().height)
+      mainPane.style.setProperty('--composer-safe-area', `${composerHeight + 72}px`)
+      if (pinTranscriptToBottomRef.current) scheduleTranscriptBottom('auto')
+    }
+    updateComposerSafeArea()
+
+    const resizeObserver = new ResizeObserver(updateComposerSafeArea)
+    resizeObserver.observe(composer)
+    window.addEventListener('resize', updateComposerSafeArea)
+
+    return () => {
+      resizeObserver.disconnect()
+      window.removeEventListener('resize', updateComposerSafeArea)
+    }
+  }, [authState, activeTask?.id])
+
+  useEffect(() => {
     const textarea = textareaRef.current
     if (!textarea) return
     textarea.style.height = 'auto'
     const compactHeight = prompt.trim() ? Math.max(44, textarea.scrollHeight) : 44
     textarea.style.height = `${Math.min(118, compactHeight)}px`
-    window.dispatchEvent(new Event('moyuan:composer-resized'))
   }, [prompt, activeTask?.id])
-
-  useLayoutEffect(() => {
-    const pane = mainPaneRef.current
-    const composer = composerRef.current
-    if (!pane || !composer) return
-
-    const updateComposerSpace = () => {
-      pane.style.setProperty('--composer-space', `${Math.ceil(composer.offsetHeight + 72)}px`)
-      if (pinTranscriptToBottomRef.current) scheduleTranscriptBottom('auto')
-    }
-
-    updateComposerSpace()
-    const observer = new ResizeObserver(updateComposerSpace)
-    observer.observe(composer)
-    window.addEventListener('resize', updateComposerSpace)
-    window.addEventListener('moyuan:composer-resized', updateComposerSpace)
-    void document.fonts?.ready.then(updateComposerSpace)
-
-    return () => {
-      observer.disconnect()
-      window.removeEventListener('resize', updateComposerSpace)
-      window.removeEventListener('moyuan:composer-resized', updateComposerSpace)
-    }
-  }, [])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1334,7 +1407,7 @@ function DesktopApp() {
         <div className={`transcript ${isWelcome ? 'welcome' : ''}`} ref={transcriptRef}>
           {visibleTranscript.map((item, index) => {
             const isLatestAssistant = item.role === 'assistant' && index === visibleTranscript.length - 1 && activeTask.status === 'running'
-            return <TranscriptMessage animate={isLatestAssistant} item={item} key={`${activeTask.id}-${index}-${item.role}`} label={messageLabel(item.role)} />
+            return <TranscriptMessage item={item} key={`${activeTask.id}-${item.itemId ?? `${index}-${item.role}`}`} label={messageLabel(item.role)} streaming={isLatestAssistant} />
           })}
           {shouldShowThinking && (
             <article className="message assistant pending">

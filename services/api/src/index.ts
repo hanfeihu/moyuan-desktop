@@ -6,7 +6,7 @@ import { createHash, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { z } from 'zod'
-import type { AccountUser, Employee, EnterprisePolicy, MailServiceConfig, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
+import type { AccountUser, Employee, EnterprisePolicy, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
 
 const app = Fastify({ logger: true })
 
@@ -30,6 +30,22 @@ const videoSkillConfigSchema = z.object({
   allowImageInput: z.boolean(),
   enabled: z.boolean(),
   monthlyLimit: z.coerce.number().int().min(0),
+})
+
+const imageSkillConfigSchema = z.object({
+  baseUrl: z.string().url(),
+  apiKey: z.string().optional(),
+  defaultModel: z.string().min(1),
+  defaultSize: z.enum(['1024x1024', '1024x1536', '1536x1024']),
+  enabled: z.boolean(),
+  monthlyLimit: z.coerce.number().int().min(0),
+})
+
+const imageGenerationSchema = z.object({
+  model: z.string().optional(),
+  n: z.coerce.number().int().min(1).max(4).default(1),
+  prompt: z.string().min(1),
+  size: z.enum(['1024x1024', '1024x1536', '1536x1024']).optional(),
 })
 
 const videoGenerationSchema = z
@@ -72,6 +88,7 @@ const adminAuthSchema = z.object({
 const usageSchema = z.object({
   promptTokens: z.coerce.number().int().min(0).default(0),
   completionTokens: z.coerce.number().int().min(0).default(0),
+  skillTokens: z.coerce.number().int().min(0).default(0),
   totalTokens: z.coerce.number().int().min(0).optional(),
   taskId: z.string().optional(),
 })
@@ -88,8 +105,10 @@ const userIdParamSchema = z.object({
 type StoredAdminConfig = {
   adminAuth?: AdminAuthConfig
   adminSessions?: AdminSession[]
+  imageSkillApiKey?: string
+  imageSkill?: Partial<Omit<ImageSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>> & Partial<Pick<ImageSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>>
   videoSkillApiKey?: string
-  videoSkill?: Omit<VideoSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>
+  videoSkill?: Partial<Omit<VideoSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>> & Partial<Pick<VideoSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>>
   mailAuthCode?: string
   mailSettings?: Omit<MailServiceConfig, 'maskedAuthCode' | 'authCodeConfigured'>
   users?: AccountUser[]
@@ -126,6 +145,8 @@ let modelProvider: ModelProviderConfig = {
 
 const configFile = process.env.ADMIN_CONFIG_FILE ?? './data/admin-config.json'
 let storedConfig = await loadStoredConfig()
+let imageSkillApiKey = storedConfig.imageSkillApiKey ?? process.env.IMAGE_API_KEY ?? ''
+let imageSkill: ImageSkillConfig = buildImageSkillConfig(storedConfig.imageSkill)
 let videoSkillApiKey = storedConfig.videoSkillApiKey ?? process.env.VOLCENGINE_ARK_API_KEY ?? ''
 let videoSkill: VideoSkillConfig = buildVideoSkillConfig(storedConfig.videoSkill)
 let mailAuthCode = storedConfig.mailAuthCode ?? process.env.QQ_MAIL_AUTH_CODE ?? ''
@@ -135,6 +156,10 @@ let sessions = storedConfig.sessions ?? []
 let adminAuth: AdminAuthConfig | undefined = storedConfig.adminAuth ?? buildAdminAuthFromEnv()
 let adminSessions: AdminSession[] = storedConfig.adminSessions ?? []
 const verificationCodes = new Map<string, { code: string; expiresAt: number; createdAt: number }>()
+
+if (needsStoredConfigMigration(storedConfig)) {
+  await persistStoredConfig()
+}
 
 const policy: EnterprisePolicy = {
   dataBoundary: 'local',
@@ -163,7 +188,9 @@ async function persistStoredConfig() {
     configFile,
     JSON.stringify(
       {
-        videoSkill,
+        imageSkill: toStoredImageSkillConfig(imageSkill),
+        imageSkillApiKey,
+        videoSkill: toStoredVideoSkillConfig(videoSkill),
         videoSkillApiKey,
         adminAuth,
         adminSessions,
@@ -178,7 +205,63 @@ async function persistStoredConfig() {
   )
 }
 
-function buildVideoSkillConfig(stored?: Omit<VideoSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>): VideoSkillConfig {
+function needsStoredConfigMigration(config: StoredAdminConfig) {
+  return (
+    !config.imageSkill ||
+    !config.videoSkill ||
+    'maskedApiKey' in config.imageSkill ||
+    'apiKeyConfigured' in config.imageSkill ||
+    'maskedApiKey' in config.videoSkill ||
+    'apiKeyConfigured' in config.videoSkill
+  )
+}
+
+function toStoredImageSkillConfig(skill: ImageSkillConfig): Omit<ImageSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'> {
+  return {
+    id: skill.id,
+    name: skill.name,
+    provider: skill.provider,
+    baseUrl: skill.baseUrl,
+    defaultModel: skill.defaultModel,
+    enabled: skill.enabled,
+    defaultSize: skill.defaultSize,
+    monthlyLimit: skill.monthlyLimit,
+  }
+}
+
+function toStoredVideoSkillConfig(skill: VideoSkillConfig): Omit<VideoSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'> {
+  return {
+    id: skill.id,
+    name: skill.name,
+    provider: skill.provider,
+    baseUrl: skill.baseUrl,
+    defaultModel: skill.defaultModel,
+    enabled: skill.enabled,
+    allowImageInput: skill.allowImageInput,
+    defaultDuration: skill.defaultDuration,
+    defaultRatio: skill.defaultRatio,
+    defaultResolution: skill.defaultResolution,
+    monthlyLimit: skill.monthlyLimit,
+  }
+}
+
+function buildImageSkillConfig(stored?: StoredAdminConfig['imageSkill']): ImageSkillConfig {
+  const apiKeyConfigured = Boolean(imageSkillApiKey)
+  return {
+    id: stored?.id ?? 'gpt-image-2',
+    name: stored?.name ?? 'gpt-image-2 图片生成',
+    provider: 'openai-compatible-image',
+    baseUrl: stored?.baseUrl ?? process.env.IMAGE_BASE_URL ?? 'https://codex-manager.tminos.com/v1',
+    maskedApiKey: maskKey(imageSkillApiKey),
+    apiKeyConfigured,
+    defaultModel: stored?.defaultModel ?? process.env.IMAGE_MODEL ?? 'gpt-image-2',
+    enabled: stored?.enabled ?? apiKeyConfigured,
+    defaultSize: stored?.defaultSize ?? '1024x1024',
+    monthlyLimit: stored?.monthlyLimit ?? 1000,
+  }
+}
+
+function buildVideoSkillConfig(stored?: StoredAdminConfig['videoSkill']): VideoSkillConfig {
   const apiKeyConfigured = Boolean(videoSkillApiKey)
   return {
     id: stored?.id ?? 'volcengine-seedance',
@@ -242,8 +325,16 @@ function verifyPassword(password: string, auth: AdminAuthConfig) {
   return expected.length === actual.length && timingSafeEqual(expected, actual)
 }
 
+function normalizeUser(user: AccountUser): AccountUser {
+  if (typeof user.skillTokens !== 'number') user.skillTokens = 0
+  if (typeof user.promptTokens !== 'number') user.promptTokens = 0
+  if (typeof user.completionTokens !== 'number') user.completionTokens = 0
+  if (typeof user.tokenUsed !== 'number') user.tokenUsed = user.promptTokens + user.completionTokens + user.skillTokens
+  return user
+}
+
 function sanitizeUser(user: AccountUser): AccountUser {
-  return { ...user }
+  return { ...normalizeUser(user) }
 }
 
 function createSession(userId: string) {
@@ -388,6 +479,15 @@ function buildDesktopBootstrap() {
         enabled: modelProvider.enabled,
       },
       skills: {
+        imageGeneration: {
+          apiKeyConfigured: imageSkill.apiKeyConfigured,
+          baseUrl: imageSkill.baseUrl,
+          defaultModel: imageSkill.defaultModel,
+          defaultSize: imageSkill.defaultSize,
+          enabled: imageSkill.enabled,
+          name: imageSkill.name,
+          provider: imageSkill.provider,
+        },
         videoGeneration: {
           allowImageInput: videoSkill.allowImageInput,
           baseUrl: videoSkill.baseUrl,
@@ -403,6 +503,10 @@ function buildDesktopBootstrap() {
       },
     },
   }
+}
+
+function imageSkillGenerationUrl() {
+  return `${imageSkill.baseUrl.replace(/\/$/, '')}/images/generations`
 }
 
 function videoSkillTaskUrl(taskId?: string) {
@@ -464,6 +568,42 @@ async function readUpstreamJson(response: Response) {
   } catch {
     return { message: text }
   }
+}
+
+function usageTotalTokens(payload: unknown): number | undefined {
+  if (!payload || typeof payload !== 'object') return undefined
+  const usage = (payload as { usage?: unknown }).usage
+  if (!usage || typeof usage !== 'object') return undefined
+  const total = (usage as { total_tokens?: unknown; totalTokens?: unknown }).total_tokens ?? (usage as { total_tokens?: unknown; totalTokens?: unknown }).totalTokens
+  return typeof total === 'number' && Number.isFinite(total) && total >= 0 ? Math.ceil(total) : undefined
+}
+
+function chargeSkillTokens(user: AccountUser, totalTokens: number) {
+  normalizeUser(user)
+  if (totalTokens <= 0) throw new Error('技能接口没有返回有效 usage.total_tokens，无法计费')
+  const remainingTokens = user.tokenBudget - user.tokenUsed
+  if (totalTokens > remainingTokens) {
+    throw new Error('Token 额度不足，请联系管理员派发额度')
+  }
+  user.skillTokens += totalTokens
+  user.tokenUsed += totalTokens
+}
+
+async function callImageSkillApi(init: RequestInit) {
+  if (!imageSkill.enabled || !imageSkillApiKey) {
+    return { ok: false as const, status: 400, payload: { error: '图片生成技能未启用，请管理员在后台配置并启用 gpt-image-2 KEY' } }
+  }
+
+  const response = await fetch(imageSkillGenerationUrl(), {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${imageSkillApiKey}`,
+      'Content-Type': 'application/json',
+      ...(init.headers ?? {}),
+    },
+  })
+  const payload = await readUpstreamJson(response)
+  return { ok: response.ok, status: response.status, payload }
 }
 
 async function callVideoSkillApi(url: string, init: RequestInit) {
@@ -528,6 +668,8 @@ app.get('/api/admin/admin-auth/me', async (request, reply) => {
 })
 
 app.get('/api/admin/model-provider', async () => ({ data: modelProvider }))
+
+app.get('/api/admin/image-skill', async () => ({ data: imageSkill }))
 
 app.get('/api/admin/video-skill', async () => ({ data: videoSkill }))
 
@@ -641,6 +783,7 @@ app.post('/api/admin/auth/register', async (request, reply) => {
       tokenUsed: 0,
       promptTokens: 0,
       completionTokens: 0,
+      skillTokens: 0,
       createdAt: now,
       lastLoginAt: now,
     }
@@ -681,21 +824,74 @@ app.get('/api/admin/me', async (request, reply) => {
 app.post('/api/admin/me/usage', async (request, reply) => {
   const user = getRequestUser(request)
   if (!user) return unauthorized(reply)
+  normalizeUser(user)
   const parsed = usageSchema.safeParse(request.body)
   if (!parsed.success) return reply.status(400).send({ error: '用量数据不完整' })
 
   const promptTokens = parsed.data.promptTokens
   const completionTokens = parsed.data.completionTokens
-  const totalTokens = parsed.data.totalTokens ?? promptTokens + completionTokens
+  const skillTokens = parsed.data.skillTokens
+  const totalTokens = parsed.data.totalTokens ?? promptTokens + completionTokens + skillTokens
   const remainingTokens = user.tokenBudget - user.tokenUsed
   if (totalTokens > remainingTokens) {
     return reply.status(402).send({ error: 'Token 额度不足，请联系管理员派发额度', data: { user: sanitizeUser(user) } })
   }
   user.promptTokens += promptTokens
   user.completionTokens += completionTokens
+  user.skillTokens += skillTokens
   user.tokenUsed += totalTokens
   await persistStoredConfig()
   return { data: { user: sanitizeUser(user) } }
+})
+
+app.post('/api/admin/skills/image/generations', async (request, reply) => {
+  const user = getRequestUser(request)
+  if (!user) return unauthorized(reply)
+  normalizeUser(user)
+  if (user.tokenBudget - user.tokenUsed <= 0) {
+    return reply.status(402).send({ error: 'Token 额度不足，请联系管理员派发额度', data: { user: sanitizeUser(user) } })
+  }
+
+  const parsed = imageGenerationSchema.safeParse(request.body)
+  if (!parsed.success) {
+    return reply.status(400).send({ error: '图片生成参数不完整', detail: parsed.error.flatten() })
+  }
+
+  const body = {
+    model: parsed.data.model ?? imageSkill.defaultModel,
+    n: parsed.data.n,
+    prompt: parsed.data.prompt,
+    size: parsed.data.size ?? imageSkill.defaultSize,
+  }
+  const upstream = await callImageSkillApi({
+    body: JSON.stringify(body),
+    method: 'POST',
+  })
+
+  if (!upstream.ok) {
+    const message = findFirstString(upstream.payload, ['message', 'error', 'msg']) ?? `图片生成接口返回 ${upstream.status}`
+    return reply.status(upstream.status).send({ error: message, upstream: upstream.payload })
+  }
+
+  const usageTokens = usageTotalTokens(upstream.payload)
+  if (!usageTokens) {
+    return reply.status(502).send({ error: '图片生成接口没有返回 usage.total_tokens，无法计费', upstream: upstream.payload })
+  }
+
+  try {
+    chargeSkillTokens(user, usageTokens)
+  } catch (error) {
+    return reply.status(402).send({ error: error instanceof Error ? error.message : 'Token 额度不足，请联系管理员派发额度', data: { user: sanitizeUser(user) } })
+  }
+
+  await persistStoredConfig()
+  return {
+    data: {
+      raw: upstream.payload,
+      usageTokens,
+      user: sanitizeUser(user),
+    },
+  }
 })
 
 app.post('/api/admin/skills/video/generations', async (request, reply) => {
@@ -769,6 +965,39 @@ app.get('/api/admin/skills/video/generations/:taskId', async (request, reply) =>
       raw: upstream.payload,
     },
   }
+})
+
+app.put('/api/admin/image-skill', async (request, reply) => {
+  const parsed = imageSkillConfigSchema.safeParse(request.body)
+
+  if (!parsed.success) {
+    return reply.status(400).send({ error: '图片生成技能配置不完整', detail: parsed.error.flatten() })
+  }
+
+  if (parsed.data.apiKey?.trim()) {
+    imageSkillApiKey = parsed.data.apiKey.trim()
+  }
+
+  if (parsed.data.enabled && !imageSkillApiKey) {
+    return reply.status(400).send({ error: '启用图片技能前，请先配置 API Key' })
+  }
+
+  imageSkill = {
+    id: 'gpt-image-2',
+    name: 'gpt-image-2 图片生成',
+    provider: 'openai-compatible-image',
+    baseUrl: parsed.data.baseUrl,
+    maskedApiKey: maskKey(imageSkillApiKey),
+    apiKeyConfigured: Boolean(imageSkillApiKey),
+    defaultModel: parsed.data.defaultModel,
+    enabled: parsed.data.enabled,
+    defaultSize: parsed.data.defaultSize,
+    monthlyLimit: parsed.data.monthlyLimit,
+  }
+
+  await persistStoredConfig()
+
+  return { data: imageSkill }
 })
 
 app.put('/api/admin/video-skill', async (request, reply) => {
