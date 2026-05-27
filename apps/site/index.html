@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="墨渊，面向企业员工的本地 AI 工作台，内置类 Codex 工作流能力，支持企业可控与本地化部署。" />
+    <title>墨渊 - 企业本地 AI 工作台</title>
+    <script type="module" src="/src/main.js"></script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="主导航">
+      <a class="brand" href="#top" aria-label="墨渊首页">
+        <span class="brand-mark">墨</span>
+        <span>墨渊</span>
+      </a>
+      <nav>
+        <a href="#capabilities">能力</a>
+        <a href="#deploy">部署</a>
+        <a href="#download">下载</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-title">
+        <img class="hero-image" src="/images/moyuan-hero.png" alt="墨渊企业 AI 工作台产品视觉" />
+        <div class="hero-scrim"></div>
+        <div class="hero-content">
+          <p class="eyebrow">企业员工桌面 AI 助手</p>
+          <h1 id="hero-title">墨渊</h1>
+          <p class="hero-copy">
+            开箱即用的本地客户端，内置类 Codex 工作流能力，帮助员工处理代码、文件、命令和日常办公任务，同时让企业保持可控、可审计、可私有化部署。
+          </p>
+          <div class="hero-actions">
+            <a class="primary-action" href="#download">下载客户端</a>
+            <a class="secondary-action" href="https://github.com/hanfeihu/moyuan-desktop" rel="noreferrer" target="_blank">查看 GitHub</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="overview-band" aria-label="产品概览">
+        <div class="overview-grid">
+          <div>
+            <span class="metric">本地运行</span>
+            <strong>客户端自带 Runtime</strong>
+          </div>
+          <div>
+            <span class="metric">Codex-like</span>
+            <strong>命令、文件、diff、会话续聊</strong>
+          </div>
+          <div>
+            <span class="metric">企业可控</span>
+            <strong>权限、审计、组织数据接入</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="capabilities">
+        <div class="section-heading">
+          <p class="eyebrow">核心能力</p>
+          <h2>给员工一个真正能干活的桌面助手</h2>
+        </div>
+        <div class="feature-grid">
+          <article>
+            <h3>内置 Codex 能力</h3>
+            <p>可读取工作区、执行本地命令、修改文件、查看 diff、运行测试，并把过程纳入后续上下文。</p>
+          </article>
+          <article>
+            <h3>多轮会话续聊</h3>
+            <p>保留会话、命令历史、文件变更和工作区记忆，支持类似 resume/fork 的任务恢复体验。</p>
+          </article>
+          <article>
+            <h3>无感图片工具</h3>
+            <p>员工自然提出成图需求时，系统自动调用图片生成能力，结果直接回到同一条对话里。</p>
+          </article>
+          <article>
+            <h3>企业组织接入</h3>
+            <p>面向企业微信、飞书、钉钉组织架构与员工数据源，后续可接后台统一配置与授权。</p>
+          </article>
+          <article>
+            <h3>本地化部署</h3>
+            <p>模型中转、密钥、日志、审计策略由企业侧配置，适合内网和私有化交付。</p>
+          </article>
+          <article>
+            <h3>产品级交互</h3>
+            <p>固定底部输入框、真实流式响应、历史自动贴底、命令输出折叠，减少工具感和割裂感。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section split" id="deploy">
+        <div>
+          <p class="eyebrow">企业部署</p>
+          <h2>员工好用，企业能管</h2>
+        </div>
+        <div class="deploy-list">
+          <p>后台统一配置模型地址、API 密钥、图片生成接口和员工权限。</p>
+          <p>组织架构可从企业微信、飞书、钉钉同步，作为权限、日报、绩效和审计的数据基础。</p>
+          <p>客户端运行在员工电脑，本地 Runtime 只监听本机，企业可按策略控制能力边界。</p>
+        </div>
+      </section>
+
+      <section class="download-section" id="download" aria-labelledby="download-title">
+        <div class="download-panel">
+          <div>
+            <p class="eyebrow">下载</p>
+            <h2 id="download-title">安装墨渊客户端</h2>
+            <p>当前提供 macOS Apple Silicon 安装包和 Windows x64 安装包。正式签名、公证和自动更新会在后续版本完善。</p>
+          </div>
+          <div class="download-actions">
+            <a class="download-button mac" href="/downloads/Moyuan-Desktop-0.1.3-mac-arm64.dmg">
+              <span>macOS Apple Silicon</span>
+              <strong>下载 DMG</strong>
+            </a>
+            <a class="download-button win" href="https://github.com/hanfeihu/moyuan-desktop/releases/download/v0.1.2/Moyuan-Desktop-0.1.2-win-x64.exe" rel="noreferrer" target="_blank">
+              <span>Windows x64</span>
+              <strong>下载 EXE</strong>
+            </a>
+          </div>
+          <p class="download-note">
+            Mac 最新本地包：v0.1.3。Windows 当前公开包：v0.1.2。需要源码或历史版本可访问
+            <a href="https://github.com/hanfeihu/moyuan-desktop/releases" rel="noreferrer" target="_blank">GitHub Releases</a>。
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>墨渊</span>
+      <a href="https://github.com/hanfeihu/moyuan-desktop" rel="noreferrer" target="_blank">GitHub</a>
+    </footer>
+  </body>
+</html>

@@ -3,6 +3,7 @@ import { execFile, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
+import { createServer } from 'node:net'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
@@ -11,7 +12,41 @@ import Fastify from 'fastify'
 import { z } from 'zod'
 import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
 
-const app = Fastify({ logger: true })
+function redactRequestUrl(rawUrl = '') {
+  try {
+    const url = new URL(rawUrl, 'http://moyuan.local')
+    if (url.searchParams.has('token')) url.searchParams.set('token', '***')
+    return `${url.pathname}${url.search}${url.hash}`
+  } catch {
+    return rawUrl.replace(/([?&]token=)[^&]+/g, '$1***')
+  }
+}
+
+function requestLogSerializer(request: {
+  method?: string
+  url?: string
+  host?: string
+  hostname?: string
+  remoteAddress?: string
+  remotePort?: number
+}) {
+  return {
+    method: request.method,
+    url: redactRequestUrl(request.url),
+    host: request.host ?? request.hostname,
+    remoteAddress: request.remoteAddress,
+    remotePort: request.remotePort,
+  }
+}
+
+const app = Fastify({
+  logger: {
+    serializers: {
+      req: requestLogSerializer,
+    },
+    redact: ['req.headers.authorization', 'req.headers.x-moyuan-runtime-token'],
+  },
+})
 const require = createRequire(import.meta.url)
 const execFileAsync = promisify(execFile)
 const runtimeToken = process.env.MOYUAN_RUNTIME_TOKEN ?? ''
@@ -122,13 +157,79 @@ function isMutedTranscriptStatus(content: string) {
 }
 
 function sanitizeTask(task: CodexTask): CodexTask {
+  const transcript = compactTranscript(
+    task.transcript
+      .filter((item) => {
+        const content = item.content.trim()
+        return content && !isInternalCodexJson(content) && !isMutedTranscriptStatus(content) && !isRawRuntimeFailure(content)
+      })
+      .map((item) => ({ ...item, content: friendlyRuntimeMessage(item.content) })),
+  )
+
+  if (task.status === 'failed' && transcript.length === 1 && transcript[0]?.role === 'user') {
+    transcript.push({
+      role: 'system',
+      content: '模型服务暂时不可用，请检查模型密钥或稍后重试。',
+      timestamp: task.updatedAt ?? transcript[0].timestamp,
+    })
+  }
+
   return {
     ...task,
-    transcript: task.transcript.filter((item) => {
-      const content = item.content.trim()
-      return content && !isInternalCodexJson(content) && !isMutedTranscriptStatus(content)
-    }),
+    transcript,
   }
+}
+
+function compactTranscript(items: CodexTask['transcript']) {
+  return items.reduce<CodexTask['transcript']>((merged, item) => {
+    const previous = merged.at(-1)
+    if (previous?.role === 'assistant' && item.role === 'assistant') {
+      if (item.content.startsWith(previous.content)) {
+        merged[merged.length - 1] = item
+        return merged
+      }
+      if (previous.content.startsWith(item.content)) return merged
+    }
+    merged.push(item)
+    return merged
+  }, [])
+}
+
+function isRawRuntimeFailure(content: string) {
+  const text = content.trim()
+  return (
+    /^Codex\s*任务退出，代码/.test(text) ||
+    text.startsWith('Missing environment variable:') ||
+    text.includes('unexpected status 403 Forbidden: invalid api key') ||
+    text.includes('invalid api key') ||
+    text.startsWith('Codex app-server')
+  )
+}
+
+function friendlyRuntimeMessage(content: string) {
+  if (/OPENAI_API_KEY|invalid api key|403 Forbidden/i.test(content)) {
+    return '模型服务暂时不可用，请检查模型密钥或稍后重试。'
+  }
+  if (/Codex app-server|Codex Runtime|ECONNREFUSED|connection/i.test(content)) {
+    return '本地 Codex 内核暂时没有启动成功，我会继续尝试恢复。'
+  }
+  return content
+}
+
+function isSmallTalkPrompt(prompt: string) {
+  const text = prompt.trim().replace(/[。！？!?~～\s]+$/g, '')
+  return /^(你好|您好|hello|hi|嗨|你叫什么|你叫啥|你是谁|你是谁呀|介绍一下你自己)$/i.test(text)
+}
+
+function smallTalkReply(prompt: string) {
+  const text = prompt.trim()
+  if (/你叫什么|你叫啥|你是谁/.test(text)) {
+    return '我叫墨渊，是你的企业桌面 AI 工作助手。'
+  }
+  if (/介绍/.test(text)) {
+    return '我是墨渊，可以帮你处理代码、文件、命令、图片生成和企业工作流。'
+  }
+  return '你好，我是墨渊。'
 }
 
 function getModelConfig() {
@@ -475,6 +576,45 @@ function rawItemId(raw: unknown) {
   return typeof id === 'string' ? id : undefined
 }
 
+function rawWithItemId(raw: unknown, fallbackId: string) {
+  if (rawItemId(raw)) return raw
+  return { item: { id: fallbackId, type: 'agent_message' }, payload: raw }
+}
+
+function assistantStreamChunks(content: string) {
+  const chars = Array.from(content)
+  const chunkSize = Math.max(1, Math.min(10, Math.ceil(chars.length / 90)))
+  const chunks: string[] = []
+  for (let index = 0; index < chars.length; index += chunkSize) {
+    chunks.push(chars.slice(index, index + chunkSize).join(''))
+  }
+  return chunks
+}
+
+async function streamAssistantMessage(record: TaskRecord, event: Omit<CodexTaskEvent, 'id' | 'timestamp'>) {
+  const itemId = rawItemId(event.raw) ?? `assistant-final-${record.events.length + 1}`
+  const raw = rawWithItemId(event.raw, itemId)
+
+  if (record.streamItemIndexes.has(itemId)) {
+    pushEvent(record, { ...event, raw })
+    return
+  }
+
+  let visible = ''
+  for (const chunk of assistantStreamChunks(event.content)) {
+    visible += chunk
+    pushEvent(record, {
+      ...event,
+      type: 'message_delta',
+      content: visible,
+      raw,
+    })
+    await sleep(18)
+  }
+
+  pushEvent(record, { ...event, raw })
+}
+
 function firstString(...values: unknown[]) {
   for (const value of values) {
     if (typeof value === 'string' && value) return value
@@ -601,7 +741,423 @@ function eventFromJson(taskId: string, payload: unknown): Omit<CodexTaskEvent, '
   }
 }
 
+function findOpenPort(start = 49200) {
+  return new Promise<number>((resolve, reject) => {
+    let port = start + Math.floor(Math.random() * 200)
+
+    const tryPort = () => {
+      if (port > start + 500) {
+        reject(new Error('没有可用的本地 app-server 端口'))
+        return
+      }
+
+      const server = createServer()
+      server.once('error', () => {
+        port += 1
+        tryPort()
+      })
+      server.once('listening', () => {
+        server.close(() => resolve(port))
+      })
+      server.listen(port, '127.0.0.1')
+    }
+
+    tryPort()
+  })
+}
+
+function appServerRaw(itemId: string) {
+  return { item: { id: itemId, type: 'agent_message' } }
+}
+
+async function connectAppServer(url: string, onNotification: (message: Record<string, unknown>) => void) {
+  type PendingRequest = {
+    reject: (error: Error) => void
+    resolve: (value: unknown) => void
+  }
+
+  const WebSocketCtor = (globalThis as unknown as { WebSocket?: new (url: string) => {
+    close: () => void
+    onclose: ((event: unknown) => void) | null
+    onerror: ((event: unknown) => void) | null
+    onmessage: ((event: { data: unknown }) => void) | null
+    onopen: (() => void) | null
+    send: (data: string) => void
+  } }).WebSocket
+
+  if (!WebSocketCtor) throw new Error('当前 Node 运行时不支持 WebSocket')
+
+  let requestId = 1
+  const pending = new Map<number, PendingRequest>()
+  const openSocket = () =>
+    new Promise<InstanceType<typeof WebSocketCtor>>((resolve, reject) => {
+      const ws = new WebSocketCtor(url)
+      let settled = false
+      const settle = (callback: () => void) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        callback()
+      }
+      const timer = setTimeout(() => {
+        try {
+          ws.close()
+        } catch {
+          // Ignore close errors while retrying startup.
+        }
+        settle(() => reject(new Error('Codex app-server 连接超时')))
+      }, 1200)
+
+      ws.onopen = () => settle(() => resolve(ws as InstanceType<typeof WebSocketCtor>))
+      ws.onerror = () => settle(() => reject(new Error('Codex app-server 连接失败')))
+      ws.onclose = () => settle(() => reject(new Error('Codex app-server 已断开')))
+    })
+
+  let socket: InstanceType<typeof WebSocketCtor> | undefined
+  let lastConnectError: unknown
+  const connectDeadline = Date.now() + 10000
+  while (!socket && Date.now() < connectDeadline) {
+    try {
+      socket = await openSocket()
+    } catch (error) {
+      lastConnectError = error
+      await sleep(160)
+    }
+  }
+
+  if (!socket) {
+    throw lastConnectError instanceof Error ? lastConnectError : new Error('Codex app-server 连接失败')
+  }
+
+  socket.onmessage = (event) => {
+    const raw = typeof event.data === 'string' ? event.data : String(event.data)
+    const message = JSON.parse(raw) as Record<string, unknown>
+    const id = typeof message.id === 'number' ? message.id : undefined
+
+    if (id !== undefined) {
+      const waiter = pending.get(id)
+      if (!waiter) return
+      pending.delete(id)
+      const error = message.error as { message?: string } | undefined
+      if (error) {
+        waiter.reject(new Error(error.message ?? 'Codex app-server 请求失败'))
+      } else {
+        waiter.resolve(message.result)
+      }
+      return
+    }
+
+    onNotification(message)
+  }
+
+  socket.onclose = () => {
+    for (const waiter of pending.values()) {
+      waiter.reject(new Error('Codex app-server 已断开'))
+    }
+    pending.clear()
+  }
+
+  return {
+    close() {
+      socket.close()
+    },
+    request(method: string, params: unknown) {
+      const id = requestId
+      requestId += 1
+      return new Promise<unknown>((resolve, reject) => {
+        pending.set(id, { resolve, reject })
+        socket.send(JSON.stringify({ id, method, params }))
+      })
+    },
+  }
+}
+
+function appServerThreadId(result: unknown) {
+  const thread = result && typeof result === 'object' ? (result as { thread?: unknown }).thread : undefined
+  if (!thread || typeof thread !== 'object') return undefined
+  const id = (thread as { id?: unknown; threadId?: unknown }).id ?? (thread as { id?: unknown; threadId?: unknown }).threadId
+  return typeof id === 'string' ? id : undefined
+}
+
+function appServerTurnId(result: unknown) {
+  const turn = result && typeof result === 'object' ? (result as { turn?: unknown }).turn : undefined
+  if (!turn || typeof turn !== 'object') return undefined
+  const id = (turn as { id?: unknown }).id
+  return typeof id === 'string' ? id : undefined
+}
+
+function appServerSandboxPolicy(workspace: string) {
+  return {
+    type: 'workspaceWrite',
+    writableRoots: [workspace],
+    networkAccess: false,
+    excludeTmpdirEnvVar: false,
+    excludeSlashTmp: false,
+  }
+}
+
+function terminateProcessTree(child: ReturnType<typeof spawn>) {
+  const pid = child.pid
+  if (!pid) return
+
+  try {
+    process.kill(-pid, 'SIGTERM')
+  } catch {
+    try {
+      child.kill('SIGTERM')
+    } catch {
+      // Ignore termination races.
+    }
+  }
+
+  setTimeout(() => {
+    try {
+      process.kill(-pid, 'SIGKILL')
+    } catch {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        // The process already exited.
+      }
+    }
+  }, 800).unref()
+}
+
+async function finishCodexTask(record: TaskRecord, taskId: string, code: number | null) {
+  record.task.exitCode = code
+  record.task.status = code === 0 ? 'completed' : 'failed'
+  record.task.updatedAt = new Date().toISOString()
+  const diff = await getGitDiff(record.task.workspace)
+  record.task.diffSummary = diff
+  if (diff) {
+    workspaceMemory.set(
+      record.task.workspace,
+      [`最近会话: ${record.task.title}`, `Codex session: ${record.task.sessionId ?? 'unknown'}`, `最近 diff:\n${diff}`].join('\n'),
+    )
+    await saveMemory()
+  }
+  await saveStore()
+  pushEvent(record, {
+    taskId,
+    type: 'process.exit',
+    role: 'system',
+    content: code === 0 ? 'Codex 任务已完成' : `Codex 任务退出，代码 ${code ?? 'unknown'}`,
+  })
+}
+
+async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: string, sessionId?: string) {
+  const taskId = record.task.id
+  const codexHome = await createCodexHome()
+  const codexBin = resolveCodexBin()
+  const config = getModelConfig()
+  const port = await findOpenPort()
+  const appServerUrl = `ws://127.0.0.1:${port}`
+  const memory = workspaceMemory.get(workspace)
+  const commandContext = record.task.commandHistory?.slice(-8).join('\n\n')
+  const diffSummary = await getGitDiff(workspace)
+  const contextBlock = [
+    buildMoyuanBrainContext(),
+    memory ? `工作区记忆:\n${memory}` : '',
+    commandContext ? `最近命令历史:\n${commandContext}` : '',
+    diffSummary ? `当前文件变更摘要:\n${diffSummary}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+  const promptWithContext = contextBlock ? `${contextBlock}\n\n用户本轮请求:\n${prompt}` : prompt
+
+  record.task.status = 'running'
+  await saveStore()
+
+  let activeTurnId = ''
+  let completed = false
+  let failed = false
+  let resolveTurn: (() => void) | undefined
+  let rejectTurn: ((error: Error) => void) | undefined
+  const turnFinished = new Promise<void>((resolve, reject) => {
+    resolveTurn = resolve
+    rejectTurn = reject
+  })
+
+  const child = spawn(process.execPath, [codexBin, 'app-server', '--listen', appServerUrl, '--disable', 'remote_plugin', '--disable', 'plugin_sharing'], {
+    cwd: workspace,
+    detached: true,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    env: {
+      ...process.env,
+      CODEX_HOME: codexHome,
+      OPENAI_API_KEY: process.env.AI_API_KEY ?? '',
+      RUST_LOG: process.env.CODEX_RUST_LOG ?? 'warn',
+    },
+  })
+
+  child.stderr.on('data', (chunk: Buffer) => {
+    const text = chunk.toString('utf8').trim()
+    if (!text) return
+    if (mutedStderrPatterns.some((pattern) => text.includes(pattern))) return
+    app.log.debug({ text }, 'codex app-server stderr')
+  })
+
+  child.once('exit', (code) => {
+    if (!completed && !failed) {
+      rejectTurn?.(new Error(`Codex app-server 退出，代码 ${code ?? 'unknown'}`))
+    }
+  })
+
+  const connection = await connectAppServer(appServerUrl, (message) => {
+    const method = typeof message.method === 'string' ? message.method : ''
+    const params = message.params && typeof message.params === 'object' ? (message.params as Record<string, unknown>) : {}
+
+    if (method === 'item/agentMessage/delta') {
+      const itemId = typeof params.itemId === 'string' ? params.itemId : `app-delta-${record.events.length}`
+      const delta = typeof params.delta === 'string' ? params.delta : ''
+      if (!delta) return
+      pushEvent(record, {
+        taskId,
+        type: 'message_delta',
+        role: 'assistant',
+        content: delta,
+        raw: appServerRaw(itemId),
+      })
+      return
+    }
+
+    if (method === 'item/completed') {
+      const item = params.item && typeof params.item === 'object' ? (params.item as Record<string, unknown>) : null
+      const itemId = typeof item?.id === 'string' ? item.id : `app-item-${record.events.length}`
+      if (item?.type === 'agentMessage' && typeof item.text === 'string') {
+        const toolCall = parseMoyuanToolCall(item.text)
+        if (toolCall) {
+          void runImageGeneration(record, toolCall.prompt ?? prompt, toolCall.size ?? inferImageSize(toolCall.prompt ?? prompt), toolCall.model)
+          return
+        }
+        pushEvent(record, {
+          taskId,
+          type: 'message',
+          role: 'assistant',
+          content: item.text,
+          raw: appServerRaw(itemId),
+        })
+        return
+      }
+
+      if (item?.type === 'commandExecution' && typeof item.command === 'string') {
+        const output = typeof item.aggregatedOutput === 'string' ? item.aggregatedOutput.trim() : ''
+        const status = typeof item.status === 'string' ? item.status : 'completed'
+        const exitCode = typeof item.exitCode === 'number' ? `\nexit ${item.exitCode}` : ''
+        const body = output ? `$ ${item.command}\n${output}${exitCode}` : `$ ${item.command}\n${status}`
+        pushEvent(record, {
+          taskId,
+          type: 'tool',
+          role: 'tool',
+          content: body,
+          raw: { item: { id: itemId, type: 'command_execution' } },
+        })
+      }
+      return
+    }
+
+    if (method === 'turn/completed') {
+      completed = true
+      record.task.status = 'completed'
+      pushEvent(record, {
+        taskId,
+        type: 'turn.completed',
+        role: 'system',
+        content: '任务完成',
+      })
+      resolveTurn?.()
+      return
+    }
+
+    if (method === 'error') {
+      const willRetry = params.willRetry === true
+      if (willRetry) return
+      failed = true
+      const error = params.error && typeof params.error === 'object' ? (params.error as { message?: unknown }) : {}
+      pushEvent(record, {
+        taskId,
+        type: 'turn.failed',
+        role: 'system',
+        content: typeof error.message === 'string' ? friendlyRuntimeMessage(error.message) : '模型服务暂时不可用，请稍后重试。',
+      })
+      rejectTurn?.(new Error(typeof error.message === 'string' ? error.message : 'Codex app-server turn failed'))
+    }
+  })
+
+  try {
+    await connection.request('initialize', {
+      clientInfo: { name: 'moyuan-desktop', title: 'Moyuan Desktop', version: '0.1.3' },
+      capabilities: {
+        experimentalApi: true,
+        requestAttestation: false,
+        optOutNotificationMethods: [],
+      },
+    })
+
+    const threadResult = sessionId
+      ? await connection.request('thread/resume', {
+          threadId: sessionId,
+          cwd: workspace,
+          model: config.defaultModel,
+          runtimeWorkspaceRoots: [workspace],
+          approvalPolicy: 'never',
+          sandbox: 'workspace-write',
+          baseInstructions: buildMoyuanBrainContext(),
+          persistExtendedHistory: false,
+        })
+      : await connection.request('thread/start', {
+          cwd: workspace,
+          model: config.defaultModel,
+          runtimeWorkspaceRoots: [workspace],
+          approvalPolicy: 'never',
+          sandbox: 'workspace-write',
+          baseInstructions: buildMoyuanBrainContext(),
+          threadSource: 'user',
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+        })
+    const threadId = appServerThreadId(threadResult)
+    if (!threadId) throw new Error('Codex app-server 没有返回会话 id')
+    record.task.sessionId = threadId
+    pushEvent(record, {
+      taskId,
+      type: 'thread.started',
+      role: 'system',
+      content: '',
+      raw: { thread_id: threadId },
+    })
+
+    const turnResult = await connection.request('turn/start', {
+      threadId,
+      input: [{ type: 'text', text: promptWithContext, text_elements: [] }],
+      cwd: workspace,
+      approvalPolicy: 'never',
+      sandboxPolicy: appServerSandboxPolicy(workspace),
+      model: config.defaultModel,
+    })
+    activeTurnId = appServerTurnId(turnResult) ?? ''
+    await turnFinished
+    await finishCodexTask(record, taskId, 0)
+  } catch (error) {
+    record.task.status = 'failed'
+    await saveStore()
+    throw error
+  } finally {
+    connection.close()
+    terminateProcessTree(child)
+  }
+}
+
 async function runCodex(record: TaskRecord, prompt: string, workspace: string, sessionId?: string) {
+  if (process.env.MOYUAN_CODEX_TRANSPORT === 'exec') {
+    await runCodexExec(record, prompt, workspace, sessionId)
+    return
+  }
+
+  await runCodexAppServer(record, prompt, workspace, sessionId)
+}
+
+async function runCodexExec(record: TaskRecord, prompt: string, workspace: string, sessionId?: string) {
   const taskId = record.task.id
   const codexHome = await createCodexHome()
   const codexBin = resolveCodexBin()
@@ -650,6 +1206,7 @@ async function runCodex(record: TaskRecord, prompt: string, workspace: string, s
   })
 
   let buffer = ''
+  const pendingAssistantStreams: Promise<void>[] = []
 
   child.stdout.on('data', (chunk: Buffer) => {
     buffer += chunk.toString('utf8')
@@ -670,16 +1227,18 @@ async function runCodex(record: TaskRecord, prompt: string, workspace: string, s
             void runImageGeneration(record, toolCall.prompt ?? prompt, toolCall.size ?? inferImageSize(toolCall.prompt ?? prompt), toolCall.model)
             continue
           }
+          pendingAssistantStreams.push(streamAssistantMessage(record, event))
+          continue
         }
         pushEvent(record, event)
       } catch {
         if (/^\s*\{".+"\}\s*$/.test(line)) continue
-        pushEvent(record, {
+        pendingAssistantStreams.push(streamAssistantMessage(record, {
           taskId,
           type: 'message',
           role: 'assistant',
           content: line,
-        })
+        }))
       }
     }
   })
@@ -698,9 +1257,11 @@ async function runCodex(record: TaskRecord, prompt: string, workspace: string, s
 
   child.on('exit', (code) => {
     record.task.exitCode = code
-    record.task.status = code === 0 ? 'completed' : 'failed'
-    record.task.updatedAt = new Date().toISOString()
-    void getGitDiff(record.task.workspace).then((diff) => {
+    void (async () => {
+      await Promise.allSettled(pendingAssistantStreams)
+      record.task.status = code === 0 ? 'completed' : 'failed'
+      record.task.updatedAt = new Date().toISOString()
+      const diff = await getGitDiff(record.task.workspace)
       record.task.diffSummary = diff
       if (diff) {
         workspaceMemory.set(
@@ -710,13 +1271,13 @@ async function runCodex(record: TaskRecord, prompt: string, workspace: string, s
         void saveMemory()
       }
       void saveStore()
-    })
-    pushEvent(record, {
-      taskId,
-      type: 'process.exit',
-      role: 'system',
-      content: code === 0 ? 'Codex 任务已完成' : `Codex 任务退出，代码 ${code ?? 'unknown'}`,
-    })
+      pushEvent(record, {
+        taskId,
+        type: 'process.exit',
+        role: 'system',
+        content: code === 0 ? 'Codex 任务已完成' : `Codex 任务退出，代码 ${code ?? 'unknown'}`,
+      })
+    })()
   })
 }
 
@@ -762,6 +1323,51 @@ async function runUnsupportedVideoResponse(record: TaskRecord) {
     role: 'assistant',
     content: '当前已接入静态图片生成，还没有接入视频或动图生成。可以先让我生成首帧、分镜图或视频海报，等视频工具接入后再无感调用。',
   })
+  pushEvent(record, {
+    taskId: record.task.id,
+    type: 'turn.completed',
+    role: 'system',
+    content: '任务完成',
+  })
+  await saveStore()
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function runDirectAssistantResponse(record: TaskRecord, content: string) {
+  const raw = { item: { id: `direct-${record.task.id}`, type: 'agent_message' } }
+
+  record.task.status = 'running'
+  pushEvent(record, {
+    taskId: record.task.id,
+    type: 'turn.started',
+    role: 'system',
+    content: '正在处理',
+  })
+
+  let visible = ''
+  for (const char of content) {
+    visible += char
+    pushEvent(record, {
+      taskId: record.task.id,
+      type: 'message_delta',
+      role: 'assistant',
+      content: visible,
+      raw,
+    })
+    await sleep(16)
+  }
+
+  pushEvent(record, {
+    taskId: record.task.id,
+    type: 'message',
+    role: 'assistant',
+    content,
+    raw,
+  })
+  record.task.status = 'completed'
   pushEvent(record, {
     taskId: record.task.id,
     type: 'turn.completed',
@@ -822,7 +1428,9 @@ app.post('/api/codex/tasks', async (request, reply) => {
   records.set(task.id, record)
   await saveStore()
 
-  if (isVideoPrompt(parsed.data.prompt) && !isImageCapabilityQuestion(parsed.data.prompt)) {
+  if (isSmallTalkPrompt(parsed.data.prompt)) {
+    void runDirectAssistantResponse(record, smallTalkReply(parsed.data.prompt))
+  } else if (isVideoPrompt(parsed.data.prompt) && !isImageCapabilityQuestion(parsed.data.prompt)) {
     void runUnsupportedVideoResponse(record)
   } else if (isImageGenerationPrompt(parsed.data.prompt)) {
     void runImageGeneration(record, parsed.data.prompt, inferImageSize(parsed.data.prompt))

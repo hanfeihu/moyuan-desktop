@@ -1,4 +1,4 @@
-import { Bot, Box, Check, ChevronDown, Circle, FolderOpen, Loader2, Plus, Search, Send, Settings, Terminal, UserRound } from 'lucide-react'
+import { Bot, Box, Check, ChevronDown, Circle, FolderOpen, Loader2, Plus, Search, Send, Settings, UserRound } from 'lucide-react'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
@@ -43,14 +43,39 @@ function taskSortValue(task: CodexTask) {
 }
 
 function normalizeTask(task: CodexTask): CodexTask {
-  const transcript = (task.transcript ?? []).filter(shouldShowMessage)
+  const transcript = compactTranscript((task.transcript ?? []).filter(shouldShowMessage))
   const title = task.title?.trim().replace(/^生成图片[:：]\s*/, '')
+  const hasVisibleReply = transcript.some((item) => item.role !== 'user')
+
+  if (task.status === 'failed' && !hasVisibleReply) {
+    transcript.push({
+      role: 'system',
+      content: '模型服务暂时不可用，请检查模型密钥或稍后重试。',
+      timestamp: task.updatedAt ?? nowIso(),
+    })
+  }
 
   return {
     ...task,
     title: title || transcript.find((item) => item.role === 'user')?.content.slice(0, 36) || '新任务',
     transcript,
   }
+}
+
+function compactTranscript(items: TranscriptItem[]) {
+  return items.reduce<TranscriptItem[]>((merged, item) => {
+    const previous = merged.at(-1)
+    if (previous?.role === 'assistant' && item.role === 'assistant') {
+      if (item.content.startsWith(previous.content)) {
+        merged[merged.length - 1] = item
+        return merged
+      }
+      if (previous.content.startsWith(item.content)) return merged
+    }
+    if (previous?.role === 'user' && item.role === 'user' && previous.content === item.content) return merged
+    merged.push(item)
+    return merged
+  }, [])
 }
 
 function eventToTranscript(event: CodexTaskEvent) {
@@ -83,6 +108,8 @@ function shouldShowMessage(item: TranscriptItem) {
   const content = item.content.trim()
   if (!content) return false
   if (/^正在生成图片[.。…]*$/.test(content)) return false
+  if (/^Codex\s*任务退出，代码/.test(content)) return false
+  if (/Missing environment variable:|invalid api key|403 Forbidden/i.test(content)) return false
   if (isInternalCodexJson(content)) return false
   if (item.role !== 'system') return true
   return (
@@ -152,24 +179,36 @@ function eventStatus(event: CodexTaskEvent, fallback: CodexTask['status']): Code
 function mergeEventIntoTask(task: CodexTask, event: CodexTaskEvent): CodexTask {
   const transcriptItem = eventToTranscript(event)
   if (!shouldShowMessage(transcriptItem)) {
-    return { ...task, status: eventStatus(event, task.status) }
+    const nextStatus = eventStatus(event, task.status)
+    const hasVisibleReply = task.transcript.some((item) => item.role !== 'user')
+    if (nextStatus === 'failed' && !hasVisibleReply) {
+      return {
+        ...task,
+        status: nextStatus,
+        transcript: [
+          ...task.transcript,
+          {
+            role: 'system',
+            content: '模型服务暂时不可用，请检查模型密钥或稍后重试。',
+            timestamp: event.timestamp,
+          },
+        ],
+      }
+    }
+    return { ...task, status: nextStatus }
   }
 
   if (event.type === 'message_delta' && event.role === 'assistant') {
     const transcript = [...task.transcript]
-    let lastAssistantIndex = -1
-    for (let index = transcript.length - 1; index >= 0; index -= 1) {
-      if (transcript[index].role === 'assistant') {
-        lastAssistantIndex = index
-        break
-      }
-    }
-    if (lastAssistantIndex === -1) {
+    const lastIndex = transcript.length - 1
+    const lastItem = transcript[lastIndex]
+
+    if (lastItem?.role !== 'assistant') {
       transcript.push(transcriptItem)
     } else {
-      const current = transcript[lastAssistantIndex]
+      const current = lastItem
       const content = event.content.startsWith(current.content) ? event.content : `${current.content}${event.content}`
-      transcript[lastAssistantIndex] = { ...current, content, timestamp: event.timestamp }
+      transcript[lastIndex] = { ...current, content, timestamp: event.timestamp }
     }
     return { ...task, status: eventStatus(event, task.status), transcript }
   }
@@ -241,11 +280,22 @@ function buildLocalErrorTask(error: unknown, workspacePath: string): CodexTask {
     transcript: [
       {
         role: 'system',
-        content: `发送失败：${error instanceof Error ? error.message : String(error)}`,
+        content: `发送失败：${toUserFacingError(error)}`,
         timestamp,
       },
     ],
   }
+}
+
+function toUserFacingError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/OPENAI_API_KEY|AI_API_KEY|IMAGE_API_KEY|invalid api key|403 Forbidden|Missing environment variable/i.test(message)) {
+    return '模型服务暂时不可用，请检查模型密钥或稍后重试。'
+  }
+  if (/Failed to fetch|NetworkError|offline|ECONNREFUSED|fetch failed/i.test(message)) {
+    return '本地服务暂时没连上，我会继续尝试恢复。'
+  }
+  return '任务没有正常完成，请稍后再试。'
 }
 
 function isCommandToolContent(content: string) {
@@ -254,8 +304,13 @@ function isCommandToolContent(content: string) {
 
 function TranscriptMessage({ animate, item, label }: { animate: boolean; item: TranscriptItem; label: string }) {
   const [visibleText, setVisibleText] = useState(animate && item.role === 'assistant' ? '' : item.content)
+  const visibleTextRef = useRef(visibleText)
   const isToolStatus = item.role === 'tool' && !isCommandToolContent(item.content)
   const effectiveLabel = isToolStatus ? '状态' : label
+
+  useEffect(() => {
+    visibleTextRef.current = visibleText
+  }, [visibleText])
 
   useEffect(() => {
     if (!animate || item.role !== 'assistant') {
@@ -263,11 +318,14 @@ function TranscriptMessage({ animate, item, label }: { animate: boolean; item: T
       return
     }
 
-    setVisibleText('')
-    let index = 0
+    let index = item.content.startsWith(visibleTextRef.current) ? visibleTextRef.current.length : 0
+    if (index === 0) setVisibleText('')
+
     const step = () => {
       index = Math.min(item.content.length, index + Math.max(1, Math.ceil(item.content.length / 80)))
-      setVisibleText(item.content.slice(0, index))
+      const next = item.content.slice(0, index)
+      visibleTextRef.current = next
+      setVisibleText(next)
       window.dispatchEvent(new Event('moyuan:content-resized'))
       if (index >= item.content.length) window.clearInterval(timer)
     }
@@ -275,7 +333,7 @@ function TranscriptMessage({ animate, item, label }: { animate: boolean; item: T
     step()
 
     return () => window.clearInterval(timer)
-  }, [animate, item.content, item.role, item.timestamp])
+  }, [animate, item.content, item.role])
 
   return (
     <article className={`message ${item.role} ${isToolStatus ? 'tool-status' : ''}`}>
@@ -286,7 +344,7 @@ function TranscriptMessage({ animate, item, label }: { animate: boolean; item: T
           isToolStatus ? (
             <span className="tool-status-dot" />
           ) : (
-            <Terminal size={16} />
+            <span className="tool-command-dot" />
           )
         ) : item.role === 'system' ? (
           <Circle size={13} />
@@ -307,7 +365,7 @@ function ToolOutput({ content }: { content: string }) {
   const isCommand = isCommandToolContent(firstLine ?? '')
   const command = isCommand ? firstLine?.replace(/^\$\s*/, '').trim() : ''
   const detail = rest.join('\n').trim()
-  const summary = command ? `已运行命令` : firstLine?.trim() || '工具调用'
+  const summary = command ? `命令` : firstLine?.trim() || '工具调用'
 
   if (!detail) {
     if (!isCommand) {
@@ -316,7 +374,7 @@ function ToolOutput({ content }: { content: string }) {
 
     return (
       <div className="tool-row">
-        <Terminal size={15} />
+        <span className="tool-summary-dot" />
         <span>{summary}</span>
         {command ? <code>{command}</code> : null}
       </div>
@@ -326,7 +384,7 @@ function ToolOutput({ content }: { content: string }) {
   return (
     <details className="tool-output">
       <summary>
-        <Terminal size={15} />
+        <span className="tool-summary-dot" />
         <span>{summary}</span>
         {command ? <code>{command}</code> : null}
       </summary>
@@ -342,20 +400,30 @@ function MarkdownText({ content }: { content: string }) {
     <div className="markdown">
       {blocks.map((block, index) => {
         if (block.type === 'list') {
-          return (
-            <ul key={index}>
-              {block.items.map((item, itemIndex) => (
-                <li key={itemIndex}>
-                  <div>{renderInline(item.body)}</div>
-                  {item.meta ? <div className="list-meta">{renderInline(item.meta)}</div> : null}
-                </li>
-              ))}
-            </ul>
-          )
+          const ListTag = block.ordered ? 'ol' : 'ul'
+          const listProps = block.ordered && block.start ? { start: block.start } : {}
+          return <ListTag {...listProps} key={index}>{block.items.map((item, itemIndex) => (
+            <li key={itemIndex}>
+              <div>{renderInline(item.body)}</div>
+              {item.meta ? <div className="list-meta">{renderInline(item.meta)}</div> : null}
+            </li>
+          ))}</ListTag>
         }
 
         if (block.type === 'heading') {
           return <h3 key={index}>{renderInline(block.text)}</h3>
+        }
+
+        if (block.type === 'code') {
+          return (
+            <pre className="code-block" key={index}>
+              <code>{block.code}</code>
+            </pre>
+          )
+        }
+
+        if (block.type === 'quote') {
+          return <blockquote key={index}>{renderInline(block.text)}</blockquote>
         }
 
         if (block.type === 'image') {
@@ -373,9 +441,10 @@ function MarkdownText({ content }: { content: string }) {
 }
 
 type MarkdownBlock =
-  | { type: 'paragraph' | 'heading'; text: string }
+  | { type: 'paragraph' | 'heading' | 'quote'; text: string }
+  | { type: 'code'; code: string; language?: string }
   | { type: 'image'; alt: string; src: string }
-  | { type: 'list'; items: Array<{ body: string; meta?: string }> }
+  | { type: 'list'; ordered: boolean; start?: number; items: Array<{ body: string; meta?: string }> }
 
 function resolveRuntimeAssetUrl(src: string) {
   if (src.startsWith('/api/')) return runtimeEndpoint(src)
@@ -398,7 +467,9 @@ function markdownBlocks(content: string): MarkdownBlock[] {
   const blocks: MarkdownBlock[] = []
   const lines = content.split(/\r?\n/)
   let paragraph: string[] = []
-  let list: Array<{ body: string; meta?: string }> = []
+  let list: { ordered: boolean; start?: number; items: Array<{ body: string; meta?: string }> } | null = null
+  let codeLines: string[] | null = null
+  let codeLanguage = ''
 
   const flushParagraph = () => {
     if (!paragraph.length) return
@@ -408,20 +479,44 @@ function markdownBlocks(content: string): MarkdownBlock[] {
   }
 
   const flushList = () => {
-    if (!list.length) return
-    blocks.push({ type: 'list', items: list })
-    list = []
+    if (!list?.items.length) return
+    blocks.push({ type: 'list', ordered: list.ordered, start: list.start, items: list.items })
+    list = null
+  }
+
+  const flushCode = () => {
+    if (!codeLines) return
+    blocks.push({ type: 'code', code: codeLines.join('\n'), language: codeLanguage })
+    codeLines = null
+    codeLanguage = ''
   }
 
   for (const rawLine of lines) {
-    const line = rawLine.trim()
-    if (!line) {
+    const fenceMatch = rawLine.match(/^```([A-Za-z0-9_-]*)\s*$/)
+    if (codeLines) {
+      if (fenceMatch) {
+        flushCode()
+      } else {
+        codeLines.push(rawLine)
+      }
+      continue
+    }
+    if (fenceMatch) {
       flushParagraph()
       flushList()
+      codeLines = []
+      codeLanguage = fenceMatch[1] ?? ''
       continue
     }
 
-    const listMatch = line.match(/^[-*]\s+(.+)$/)
+    const line = rawLine.trim()
+    if (!line) {
+      flushParagraph()
+      continue
+    }
+
+    const unorderedListMatch = line.match(/^[-*]\s+(.+)$/)
+    const orderedListMatch = line.match(/^(\d+)[.)]\s+(.+)$/)
     const imageMatch = line.match(/^!\[([^\]]*)\]\(([^)]+)\)$/)
     if (imageMatch) {
       flushParagraph()
@@ -430,14 +525,26 @@ function markdownBlocks(content: string): MarkdownBlock[] {
       continue
     }
 
-    if (listMatch) {
+    if (unorderedListMatch || orderedListMatch) {
       flushParagraph()
-      list.push({ body: listMatch[1] })
+      const ordered = Boolean(orderedListMatch)
+      const start = orderedListMatch ? Number(orderedListMatch[1]) : undefined
+      if (list && list.ordered !== ordered) flushList()
+      if (!list) list = { ordered, start, items: [] }
+      list.items.push({ body: unorderedListMatch ? unorderedListMatch[1] : orderedListMatch![2] })
       continue
     }
 
-    if (list.length && /^https?:\/\//.test(line)) {
-      list[list.length - 1] = { ...list[list.length - 1], meta: line }
+    if (list?.items.length && /^https?:\/\//.test(line)) {
+      list.items[list.items.length - 1] = { ...list.items[list.items.length - 1], meta: line }
+      continue
+    }
+
+    const quoteMatch = line.match(/^>\s+(.+)$/)
+    if (quoteMatch) {
+      flushParagraph()
+      flushList()
+      blocks.push({ type: 'quote', text: quoteMatch[1] })
       continue
     }
 
@@ -455,6 +562,7 @@ function markdownBlocks(content: string): MarkdownBlock[] {
 
   flushParagraph()
   flushList()
+  flushCode()
 
   return blocks.length ? blocks : [{ type: 'paragraph', text: content }]
 }
@@ -505,6 +613,8 @@ function DesktopApp() {
   const visibleTranscript = useMemo(() => activeTask.transcript.filter(shouldShowMessage), [activeTask.transcript])
   const isWelcome = activeTask.id === 'welcome'
   const isBusy = activeTask.status === 'queued' || activeTask.status === 'running'
+  const latestVisibleItem = visibleTranscript.at(-1)
+  const shouldShowThinking = isBusy && latestVisibleItem?.role !== 'assistant'
   const prompt = draftByTaskId[activeTask.id] ?? ''
   const placeholder = isBusy ? '当前任务运行中，完成后继续发送' : '让墨渊做点什么...'
   const canSubmit = !isSubmitting && !isBusy && Boolean(prompt.trim())
@@ -618,21 +728,25 @@ function DesktopApp() {
       if (pinTranscriptToBottomRef.current) scheduleTranscriptBottom('auto')
     }
     const observer = new MutationObserver(keepBottom)
+    const resizeObserver = new ResizeObserver(keepBottom)
     observer.observe(transcript, { childList: true, characterData: true, subtree: true })
+    resizeObserver.observe(transcript)
+    for (const child of Array.from(transcript.children)) resizeObserver.observe(child)
     window.addEventListener('moyuan:content-resized', keepBottom)
 
     return () => {
       observer.disconnect()
+      resizeObserver.disconnect()
       window.removeEventListener('moyuan:content-resized', keepBottom)
     }
-  }, [activeTask?.id])
+  }, [activeTask?.id, visibleTranscript.length])
 
   useEffect(() => {
     const textarea = textareaRef.current
     if (!textarea) return
     textarea.style.height = 'auto'
-    const compactHeight = prompt.trim() ? Math.max(28, textarea.scrollHeight) : 24
-    textarea.style.height = `${Math.min(116, compactHeight)}px`
+    const compactHeight = prompt.trim() ? Math.max(34, textarea.scrollHeight) : 34
+    textarea.style.height = `${Math.min(118, compactHeight)}px`
     window.dispatchEvent(new Event('moyuan:composer-resized'))
   }, [prompt, activeTask?.id])
 
@@ -642,7 +756,7 @@ function DesktopApp() {
     if (!pane || !composer) return
 
     const updateComposerSpace = () => {
-      pane.style.setProperty('--composer-space', `${Math.ceil(composer.offsetHeight + 32)}px`)
+      pane.style.setProperty('--composer-space', `${Math.ceil(composer.offsetHeight + 72)}px`)
       if (pinTranscriptToBottomRef.current) scheduleTranscriptBottom('auto')
     }
 
@@ -688,7 +802,12 @@ function DesktopApp() {
     const source = new EventSource(runtimeEndpoint(`/api/codex/tasks/${activeTask.id}/events`))
 
     source.onmessage = (message) => {
-      const event = JSON.parse(message.data) as CodexTaskEvent
+      let event: CodexTaskEvent
+      try {
+        event = JSON.parse(message.data) as CodexTaskEvent
+      } catch {
+        return
+      }
       if (seenEventsRef.current.has(event.id)) return
       seenEventsRef.current.add(event.id)
       setRuntimeState('online')
@@ -845,23 +964,23 @@ function DesktopApp() {
         <div className={`transcript ${isWelcome ? 'welcome' : ''}`} ref={transcriptRef}>
           {visibleTranscript.map((item, index) => {
             const isLatestAssistant = item.role === 'assistant' && index === visibleTranscript.length - 1 && activeTask.status === 'running'
-            return <TranscriptMessage animate={isLatestAssistant} item={item} key={`${item.timestamp}-${index}`} label={messageLabel(item.role)} />
+            return <TranscriptMessage animate={isLatestAssistant} item={item} key={`${activeTask.id}-${index}-${item.role}`} label={messageLabel(item.role)} />
           })}
-          {isBusy && !hasCodexActivity(activeTask) && (
+          {shouldShowThinking && (
             <article className="message assistant pending">
               <div className="message-label">
                 <Bot size={17} />
               </div>
               <div className="message-body">
                 <span className="typing-dot" />
-                正在处理...
+                思考中...
               </div>
             </article>
           )}
           <div className="transcript-bottom" ref={transcriptBottomRef} />
         </div>
 
-        <footer className="composer" ref={composerRef}>
+        <footer className={`composer ${prompt.trim() ? 'has-text' : 'is-empty'}`} ref={composerRef}>
           <textarea
             ref={textareaRef}
             rows={1}

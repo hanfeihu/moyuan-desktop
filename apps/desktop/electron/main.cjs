@@ -30,6 +30,37 @@ function getAppRoot() {
   return isPackagedApp() ? app.getAppPath() : path.join(__dirname, '../../..')
 }
 
+function parseEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) return {}
+  const env = {}
+  const content = fs.readFileSync(filePath, 'utf8')
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/)
+    if (!match) continue
+
+    let value = match[2].trim()
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1)
+    }
+    env[match[1]] = value
+  }
+
+  return env
+}
+
+function loadRuntimeEnv(appRoot, userData) {
+  const candidates = [
+    path.join(appRoot, '.env'),
+    path.join(userData, 'runtime.env'),
+    process.env.MOYUAN_RUNTIME_ENV,
+  ].filter(Boolean)
+
+  return candidates.reduce((merged, filePath) => ({ ...merged, ...parseEnvFile(filePath) }), {})
+}
+
 function canUsePort(port) {
   return new Promise((resolve) => {
     const server = net.createServer()
@@ -95,15 +126,18 @@ async function startRuntime() {
   const runtimeUrl = `http://${runtimeHost}:${port}`
   const userData = app.getPath('userData')
   const logDir = path.join(userData, 'logs')
+  const runtimeEnv = loadRuntimeEnv(appRoot, userData)
 
   fs.mkdirSync(logDir, { recursive: true })
   runtimeLog = fs.createWriteStream(path.join(logDir, 'codex-runtime.log'), { flags: 'a' })
   runtimeLog.write(`\n[${new Date().toISOString()}] starting runtime ${runtimeEntry}\n`)
+  runtimeLog.write(`[${new Date().toISOString()}] runtime config keys ${Object.keys(runtimeEnv).join(',') || 'none'}\n`)
 
   runtimeProcess = spawn(process.execPath, [runtimeEntry], {
     cwd: appRoot,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
+      ...runtimeEnv,
       ...process.env,
       ELECTRON_RUN_AS_NODE: '1',
       CODEX_RUNTIME_HOST: runtimeHost,

@@ -38,6 +38,11 @@ IMAGE_API_KEY=your-image-key
 IMAGE_MODEL=gpt-image-2
 ```
 
+打包后的桌面端也会读取本机配置文件：
+
+- macOS：`~/Library/Application Support/Moyuan Desktop/runtime.env`
+- Windows：`%APPDATA%\\Moyuan Desktop\\runtime.env`
+
 这些密钥不要提交到 Git。企业部署时建议由后台下发或写入本机安全配置。
 
 ## 本地开发
