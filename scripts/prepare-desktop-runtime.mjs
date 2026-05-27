@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,9 +10,7 @@ const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 
 function run(command, args, cwd) {
   return new Promise((resolve, reject) => {
-    const child = execFile(command, args, { cwd, stdio: 'inherit' })
-    child.stdout?.pipe(process.stdout)
-    child.stderr?.pipe(process.stderr)
+    const child = spawn(command, args, { cwd, shell: process.platform === 'win32', stdio: 'inherit' })
     child.once('exit', (code) => {
       if (code === 0) resolve()
       else reject(new Error(`${command} ${args.join(' ')} exited with ${code}`))
