@@ -21,6 +21,24 @@ type RuntimeState = 'checking' | 'online' | 'offline'
 type AuthMode = 'login' | 'register'
 type AuthState = 'checking' | 'anonymous' | 'signed-in'
 
+function renderFatalError(error: unknown) {
+  const root = document.getElementById('root')
+  if (!root) return
+  const message = error instanceof Error ? error.message : String(error)
+  root.innerHTML = `
+    <main style="min-height:100vh;display:grid;place-items:center;background:#fbfbf9;color:#202124;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC',sans-serif">
+      <section style="width:min(520px,calc(100vw - 48px));border:1px solid #e4e3df;border-radius:16px;background:#fff;padding:24px;box-shadow:0 18px 45px rgba(31,35,40,.08)">
+        <strong style="display:block;font-size:18px;margin-bottom:8px">客户端启动异常</strong>
+        <p style="margin:0;color:#626870;line-height:1.7">我已经把错误显示出来，避免白屏。请重启客户端；如果仍然出现，把下面这行发给开发人员。</p>
+        <pre style="margin:16px 0 0;white-space:pre-wrap;word-break:break-word;border-radius:10px;background:#f7f7f5;padding:12px;color:#6e747b">${message}</pre>
+      </section>
+    </main>
+  `
+}
+
+window.addEventListener('error', (event) => renderFatalError(event.error ?? event.message))
+window.addEventListener('unhandledrejection', (event) => renderFatalError(event.reason))
+
 const welcomeTask: CodexTask = {
   id: 'welcome',
   title: '新任务',
@@ -38,6 +56,19 @@ function formatTokenNumber(value: number) {
   if (value >= 1000000) return `${(value / 1000000).toFixed(value >= 10000000 ? 0 : 1)}M`
   if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}K`
   return String(value)
+}
+
+function readStringSetStorage(key: string) {
+  try {
+    const raw = window.localStorage.getItem(key)
+    if (!raw) return new Set<string>()
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return new Set<string>()
+    return new Set(parsed.filter((item): item is string => typeof item === 'string'))
+  } catch {
+    window.localStorage.removeItem(key)
+    return new Set<string>()
+  }
 }
 
 function enterpriseEndpoint(pathname: string) {
@@ -763,7 +794,7 @@ function DesktopApp() {
   const seenEventsRef = useRef<Set<string>>(new Set())
   const previousTaskIdRef = useRef(activeTaskId)
   const pinTranscriptToBottomRef = useRef(true)
-  const reportedUsageRef = useRef<Set<string>>(new Set(JSON.parse(window.localStorage.getItem(reportedUsageStorageKey) ?? '[]') as string[]))
+  const reportedUsageRef = useRef<Set<string>>(readStringSetStorage(reportedUsageStorageKey))
 
   const activeTask = useMemo(() => tasks.find((task) => task.id === activeTaskId) ?? tasks[0], [activeTaskId, tasks])
   const visibleTranscript = useMemo(() => activeTask.transcript.filter(shouldShowMessage), [activeTask.transcript])
@@ -1353,13 +1384,36 @@ function DesktopApp() {
   )
 }
 
+class AppErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: unknown }> {
+  state = { error: null as unknown }
+
+  static getDerivedStateFromError(error: unknown) {
+    return { error }
+  }
+
+  componentDidCatch(error: unknown) {
+    renderFatalError(error)
+  }
+
+  render() {
+    if (this.state.error) return null
+    return this.props.children
+  }
+}
+
 const rootElement = document.getElementById('root')!
 const windowWithRoot = window as typeof window & { __moyuanRoot?: ReactDOM.Root }
 const root = windowWithRoot.__moyuanRoot ?? ReactDOM.createRoot(rootElement)
 windowWithRoot.__moyuanRoot = root
 
-root.render(
-  <React.StrictMode>
-    <DesktopApp />
-  </React.StrictMode>,
-)
+try {
+  root.render(
+    <React.StrictMode>
+      <AppErrorBoundary>
+        <DesktopApp />
+      </AppErrorBoundary>
+    </React.StrictMode>,
+  )
+} catch (error) {
+  renderFatalError(error)
+}

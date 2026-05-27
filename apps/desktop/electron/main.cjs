@@ -191,6 +191,19 @@ async function createWindow() {
     },
   })
 
+  win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    logStartup(`renderer console level=${level} ${sourceId || ''}:${line || 0} ${message}`)
+  })
+  win.webContents.on('did-fail-load', (_event, code, description, url) => {
+    logStartup(`renderer failed-load code=${code} description=${description} url=${url}`)
+  })
+  win.webContents.on('render-process-gone', (_event, details) => {
+    logStartup(`renderer gone reason=${details.reason} exitCode=${details.exitCode}`)
+  })
+  win.webContents.on('did-finish-load', () => {
+    logStartup(`renderer loaded url=${win.webContents.getURL()}`)
+  })
+
   if (isPackagedApp()) {
     win.loadFile(path.join(__dirname, '../dist/index.html'), {
       query: {
