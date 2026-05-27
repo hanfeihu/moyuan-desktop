@@ -203,6 +203,7 @@ export default function SkillsPage() {
             label="默认清晰度"
             name="defaultResolution"
             options={[
+              { label: '480p', value: '480p' },
               { label: '720p', value: '720p' },
               { label: '1080p', value: '1080p' },
             ]}
