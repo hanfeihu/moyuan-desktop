@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import type { CodexTask } from '@eaw/shared'
 import { errorLogDetails, logClientEvent } from '../../logger'
 import type { RuntimeState } from './types'
-import { getRuntimeTask } from './client'
+import { checkRuntimeHealth, getRuntimeTask } from './client'
 
 function taskLogSummary(task?: CodexTask | null) {
   if (!task) return undefined
@@ -33,6 +33,7 @@ export function useLiveTaskPolling({
   watchedTaskIdsKey: string
 }) {
   const lastPolledSnapshotRef = useRef<Record<string, string>>({})
+  const healthFailureCountRef = useRef(0)
 
   useEffect(() => {
     if (authState !== 'signed-in' || !watchedTaskIdsKey) return
@@ -56,7 +57,22 @@ export function useLiveTaskPolling({
       } catch (error) {
         if (cancelled) return
         logClientEvent('task.poll.failed', errorLogDetails(error, { reason, taskId }), 'warn')
-        onRuntimeState('offline')
+        try {
+          await checkRuntimeHealth()
+          if (cancelled) return
+          healthFailureCountRef.current = 0
+          onRuntimeState('online')
+          logClientEvent('task.poll.health_recovered', { reason, taskId }, 'debug')
+        } catch (healthError) {
+          if (cancelled) return
+          healthFailureCountRef.current += 1
+          logClientEvent(
+            'task.poll.health_failed',
+            errorLogDetails(healthError, { failures: healthFailureCountRef.current, reason, taskId }),
+            'warn',
+          )
+          if (healthFailureCountRef.current >= 3) onRuntimeState('offline')
+        }
       }
     }
 
@@ -68,7 +84,7 @@ export function useLiveTaskPolling({
 
     logClientEvent('task.poll.live.start', { taskIds }, 'debug')
     pollAll('live-start')
-    const pollTimer = window.setInterval(() => pollAll('live-interval'), 1200)
+    const pollTimer = window.setInterval(() => pollAll('live-interval'), 2500)
 
     return () => {
       cancelled = true
