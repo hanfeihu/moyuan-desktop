@@ -158,7 +158,13 @@ function waitForRuntime(runtimeUrl, token, timeoutMs = 15000) {
 
 async function startRuntime() {
   logStartup(`startRuntime packaged=${isPackagedApp()} appPath=${app.getAppPath()}`)
-  if (!isPackagedApp()) return { url: process.env.VITE_CODEX_RUNTIME_URL || 'http://127.0.0.1:4101', token: '' }
+  if (!isPackagedApp()) {
+    return {
+      url: process.env.VITE_CODEX_RUNTIME_URL || 'http://127.0.0.1:4101',
+      token: '',
+      defaultWorkspace: process.env.VITE_DEFAULT_WORKSPACE || path.join(app.getPath('documents'), 'Moyuan Workspace'),
+    }
+  }
 
   const appRoot = getAppRoot()
   const runtimeEntry = path.join(appRoot, 'services/codex-runtime/dist/index.js')
@@ -166,10 +172,12 @@ async function startRuntime() {
   const port = await findRuntimePort()
   const runtimeUrl = `http://${runtimeHost}:${port}`
   const userData = app.getPath('userData')
+  const defaultWorkspace = path.join(app.getPath('documents'), 'Moyuan Workspace')
   const logDir = path.join(userData, 'logs')
   const runtimeEnv = loadRuntimeEnv(appRoot, userData)
 
   fs.mkdirSync(logDir, { recursive: true })
+  fs.mkdirSync(defaultWorkspace, { recursive: true })
   runtimeLog = fs.createWriteStream(path.join(logDir, 'codex-runtime.log'), { flags: 'a' })
   runtimeLog.write(`\n[${new Date().toISOString()}] starting runtime ${runtimeEntry}\n`)
   runtimeLog.write(`[${new Date().toISOString()}] runtime config keys ${Object.keys(runtimeEnv).join(',') || 'none'}\n`)
@@ -184,6 +192,7 @@ async function startRuntime() {
       CODEX_RUNTIME_HOST: runtimeHost,
       CODEX_RUNTIME_PORT: String(port),
       MOYUAN_NODE_HOST_PATH: process.execPath,
+      MOYUAN_DEFAULT_WORKSPACE: defaultWorkspace,
       MOYUAN_RUNTIME_TOKEN: runtimeToken,
       MOYUAN_RUNTIME_HOME: path.join(userData, 'runtime'),
       MOYUAN_CODEX_HOME: path.join(userData, 'codex-home'),
@@ -200,7 +209,7 @@ async function startRuntime() {
 
   await waitForRuntime(runtimeUrl, runtimeToken)
   logStartup(`runtime health probe finished ${runtimeUrl}`)
-  return { url: runtimeUrl, token: runtimeToken }
+  return { url: runtimeUrl, token: runtimeToken, defaultWorkspace }
 }
 
 function stopRuntime() {
@@ -259,6 +268,7 @@ async function createWindow() {
     win.loadFile(path.join(__dirname, '../dist/index.html'), {
       query: {
         enterpriseApiBase,
+        defaultWorkspace: runtime.defaultWorkspace,
         platform: process.platform,
         runtimeUrl: runtime.url,
         runtimeToken: runtime.token,
@@ -268,6 +278,7 @@ async function createWindow() {
   } else {
     const url = appendLaunchParams(devUrl, {
       enterpriseApiBase,
+      defaultWorkspace: runtime.defaultWorkspace,
       platform: process.platform,
       runtimeUrl: runtime.url,
       runtimeToken: runtime.token,

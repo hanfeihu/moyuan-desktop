@@ -411,6 +411,13 @@ async function getGitDiff(workspace: string) {
   }
 }
 
+async function ensureWorkspace(workspace: string) {
+  const fallbackWorkspace = process.env.MOYUAN_DEFAULT_WORKSPACE ?? path.join(runtimeRoot, 'workspace')
+  const target = workspace.trim() || fallbackWorkspace
+  await mkdir(target, { recursive: true })
+  return target
+}
+
 async function createCodexHome(config = getModelConfig()) {
   const codexHome = process.env.MOYUAN_CODEX_HOME ?? path.join(tmpdir(), 'moyuan-codex', 'default')
 
@@ -534,6 +541,8 @@ async function failCodexTask(record: TaskRecord, taskId: string, message: string
 
 async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: string, sessionId: string | undefined, options: RuntimeRunOptions) {
   const taskId = record.task.id
+  workspace = await ensureWorkspace(workspace)
+  record.task.workspace = workspace
   const requiredSkill = requestedSkillFromPrompt(prompt)
   const codexBin = resolveCodexBin()
   const { modelConfig: config, skills } = await loadEnterpriseRuntimeConfig(options.enterpriseAuthToken, options.enterpriseApiBase)
@@ -916,6 +925,8 @@ async function runCodex(record: TaskRecord, prompt: string, workspace: string, s
 
 async function runCodexExec(record: TaskRecord, prompt: string, workspace: string, sessionId: string | undefined, options: RuntimeRunOptions) {
   const taskId = record.task.id
+  workspace = await ensureWorkspace(workspace)
+  record.task.workspace = workspace
   const requiredSkill = requestedSkillFromPrompt(prompt)
   const codexBin = resolveCodexBin()
   const { modelConfig: config, skills } = await loadEnterpriseRuntimeConfig(options.enterpriseAuthToken, options.enterpriseApiBase)

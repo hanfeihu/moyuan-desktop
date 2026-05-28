@@ -13,7 +13,7 @@ export const clientLogSchema = z.object({
 
 export const taskSchema = z.object({
   prompt: z.string().min(1),
-  workspace: z.string().default(process.cwd()),
+  workspace: z.string().default(process.env.MOYUAN_DEFAULT_WORKSPACE ?? process.cwd()),
   employeeId: z.string().min(1),
   enterpriseApiBase: z.string().url().optional(),
   enterpriseAuthToken: z.string().optional(),
@@ -33,7 +33,7 @@ export const forkSchema = z.object({
 
 export const imageGenerationSchema = z.object({
   prompt: z.string().min(1),
-  workspace: z.string().default(process.cwd()),
+  workspace: z.string().default(process.env.MOYUAN_DEFAULT_WORKSPACE ?? process.cwd()),
   employeeId: z.string().min(1),
   enterpriseApiBase: z.string().url().optional(),
   enterpriseAuthToken: z.string().optional(),
