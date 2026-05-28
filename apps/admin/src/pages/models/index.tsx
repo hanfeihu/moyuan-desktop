@@ -9,7 +9,7 @@ import {
   ProFormText,
   ProTable,
 } from '@ant-design/pro-components'
-import { App, Button, Tag, Typography } from 'antd'
+import { App, Button, Tag } from 'antd'
 import { useState } from 'react'
 import type { ModelProviderConfig } from '@eaw/shared'
 import { useAdminSnapshot } from '@/hooks/useAdminSnapshot'
@@ -102,10 +102,6 @@ export default function ModelsPage() {
           scroll={{ x: 860 }}
         />
       </ProCard>
-
-      <Typography.Paragraph className="quiet-note">
-        密钥只在后台服务侧保存和下发，员工桌面端只拿到企业允许使用的模型通道。
-      </Typography.Paragraph>
     </PageContainer>
   )
 }
