@@ -138,7 +138,27 @@ export type VideoGenerationResult = {
   duration?: number
   ratio?: string
   resolution?: string
+  usageTokens?: number
   createdAt: string
+}
+
+export type GeneratedAssetRecord = {
+  id: string
+  userEmail: string
+  userId: string
+  userName: string
+  type: 'image' | 'video'
+  prompt: string
+  model: string
+  url: string
+  storageUrl?: string
+  taskId?: string
+  status: 'running' | 'succeeded' | 'failed'
+  tokenUsage: number
+  provider: string
+  metadata?: Record<string, unknown>
+  createdAt: string
+  updatedAt: string
 }
 
 export type CodexTaskEvent = {

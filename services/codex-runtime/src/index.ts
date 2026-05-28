@@ -1,5 +1,6 @@
 import cors from '@fastify/cors'
 import { execFile, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
@@ -11,7 +12,7 @@ import Fastify from 'fastify'
 import { z } from 'zod'
 import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
 import { defaultEnterpriseApiBase as enterpriseApiBase, getImageConfig, getModelConfig } from './config.js'
-import { loadEnterpriseSkillSet, validateEnterpriseQuota } from './enterprise/client.js'
+import { enterpriseJson, loadEnterpriseSkillSet, validateEnterpriseQuota } from './enterprise/client.js'
 import { buildSkillInstructionBlock, isLikelyToolCallFragment, isMoyuanToolCallContent, parseMoyuanToolCall } from './skills/contracts.js'
 import type { RuntimeRunOptions } from './skills/contracts.js'
 import { runImageGenerationTool, runMoyuanToolCall } from './skills/executor.js'
@@ -519,6 +520,66 @@ function textFromContent(value: unknown): string {
     .join('')
 }
 
+function findUsagePayload(payload: unknown): Record<string, unknown> | undefined {
+  if (!payload || typeof payload !== 'object') return undefined
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const found = findUsagePayload(item)
+      if (found) return found
+    }
+    return undefined
+  }
+
+  const record = payload as Record<string, unknown>
+  const direct = record.usage
+  if (direct && typeof direct === 'object' && !Array.isArray(direct)) return direct as Record<string, unknown>
+  if ('input_tokens' in record || 'output_tokens' in record || 'total_tokens' in record) return record
+  for (const value of Object.values(record)) {
+    const found = findUsagePayload(value)
+    if (found) return found
+  }
+  return undefined
+}
+
+function numericUsage(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.ceil(value) : 0
+}
+
+function codexUsageFromPayload(payload: unknown) {
+  const usage = findUsagePayload(payload)
+  if (!usage) return undefined
+  const promptTokens = numericUsage(usage.input_tokens ?? usage.prompt_tokens ?? usage.promptTokens)
+  const completionTokens = numericUsage(usage.output_tokens ?? usage.completion_tokens ?? usage.completionTokens)
+  const totalTokens = numericUsage(usage.total_tokens ?? usage.totalTokens) || promptTokens + completionTokens
+  if (!totalTokens) return undefined
+  return { completionTokens, promptTokens, totalTokens }
+}
+
+function usageReportId(taskId: string, payload: unknown) {
+  const digest = createHash('sha256').update(compactJson(payload)).digest('hex').slice(0, 16)
+  const fromPayload = firstString(
+    (payload as { id?: unknown })?.id,
+    (payload as { turn_id?: unknown })?.turn_id,
+    (payload as { turnId?: unknown })?.turnId,
+    (payload as { turn?: { id?: unknown } })?.turn?.id,
+  )
+  return `codex:${taskId}:${fromPayload || digest}`
+}
+
+async function reportCodexUsage(taskId: string, payload: unknown, options: RuntimeRunOptions) {
+  if (!options.enterpriseAuthToken) return
+  const usage = codexUsageFromPayload(payload)
+  if (!usage) return
+  await enterpriseJson('/me/usage', options.enterpriseAuthToken, options.enterpriseApiBase ?? enterpriseApiBase, {
+    body: JSON.stringify({
+      ...usage,
+      reportId: usageReportId(taskId, payload),
+      taskId,
+    }),
+    method: 'POST',
+  })
+}
+
 function assistantTextFromItem(item: Record<string, unknown> | null, params?: Record<string, unknown>) {
   if (!item) return ''
   return firstString(
@@ -905,6 +966,15 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
   })
   const assistantDeltaBuffers = new Map<string, string>()
   const pendingToolRuns: Promise<void>[] = []
+  const pendingUsageReports: Promise<void>[] = []
+  let usageReported = false
+
+  const queueUsageReport = (payload: unknown) => {
+    if (usageReported) return
+    if (!codexUsageFromPayload(payload)) return
+    usageReported = true
+    pendingUsageReports.push(reportCodexUsage(taskId, payload, options).catch((error) => app.log.warn({ error }, 'failed to report codex usage')))
+  }
 
   const startToolRun = (toolCall: ReturnType<typeof parseMoyuanToolCall>) => {
     if (!toolCall) return false
@@ -1049,6 +1119,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
 
     if (methodKey === 'turncompleted') {
       completed = true
+      queueUsageReport(params)
       flushBufferedAssistantItems()
       if (!pendingToolRuns.length) record.task.status = 'completed'
       pushEvent(record, {
@@ -1099,6 +1170,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
       }
       if (eventWithItemId.type === 'turn.completed') {
         completed = true
+        queueUsageReport(eventWithItemId.raw)
         flushBufferedAssistantItems()
         if (!pendingToolRuns.length) record.task.status = 'completed'
         pushEvent(record, eventWithItemId)
@@ -1162,6 +1234,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
     })
     activeTurnId = appServerTurnId(turnResult) ?? ''
     await turnFinished
+    await Promise.allSettled(pendingUsageReports)
     await Promise.allSettled(pendingToolRuns)
     await finishCodexTask(record, taskId, 0)
   } catch (error) {
@@ -1236,6 +1309,15 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
   let buffer = ''
   const pendingAssistantStreams: Promise<void>[] = []
   const pendingToolRuns: Promise<void>[] = []
+  const pendingUsageReports: Promise<void>[] = []
+  let usageReported = false
+
+  const queueUsageReport = (payload: unknown) => {
+    if (usageReported) return
+    if (!codexUsageFromPayload(payload)) return
+    usageReported = true
+    pendingUsageReports.push(reportCodexUsage(taskId, payload, options).catch((error) => app.log.warn({ error }, 'failed to report codex usage')))
+  }
 
   child.stdout.on('data', (chunk: Buffer) => {
     buffer += chunk.toString('utf8')
@@ -1260,6 +1342,9 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
           }
           pendingAssistantStreams.push(streamAssistantMessage(record, event))
           continue
+        }
+        if (event.type === 'turn.completed') {
+          queueUsageReport(event.raw)
         }
         pushEvent(record, event)
       } catch {
@@ -1291,6 +1376,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
     void (async () => {
       await Promise.allSettled(pendingAssistantStreams)
       await Promise.allSettled(pendingToolRuns)
+      await Promise.allSettled(pendingUsageReports)
       record.task.status = code === 0 && record.task.status !== 'failed' ? 'completed' : 'failed'
       record.task.updatedAt = new Date().toISOString()
       const diff = await getGitDiff(record.task.workspace)

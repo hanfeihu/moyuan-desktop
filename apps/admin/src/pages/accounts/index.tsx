@@ -215,7 +215,7 @@ export default function AccountsPage() {
           scroll={{ x: 980 }}
         />
         <Typography.Paragraph className="quiet-note">
-          新注册用户默认没有额度，需要管理员在后台派发；客户端每次任务完成后只上报本轮估算用量。
+          新注册用户默认没有额度，需要管理员在后台派发。
         </Typography.Paragraph>
       </ProCard>
 

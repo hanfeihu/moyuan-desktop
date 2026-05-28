@@ -1,4 +1,4 @@
-import type { AccountUser, Employee, EnterprisePolicy, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
+import type { AccountUser, Employee, EnterprisePolicy, GeneratedAssetRecord, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
 import { defaultEmployees, defaultImageSkill, defaultMailSettings, defaultPolicy, defaultProviders, defaultVideoSkill } from '@/data/defaults'
 
 const apiBase = '/admin-api'
@@ -205,6 +205,15 @@ export async function saveVideoSkill(values: Record<string, unknown>) {
   const payload = (await response.json()) as { data?: VideoSkillConfig; error?: string }
   if (!response.ok || !payload.data) throw new Error(payload.error ?? '保存失败')
   return normalizeVideoSkill(payload.data)
+}
+
+export async function loadAssets() {
+  try {
+    const payload = await getJson<GeneratedAssetRecord[]>('/generated-assets')
+    return payload.data
+  } catch {
+    return []
+  }
 }
 
 export async function saveImageSkill(values: Record<string, unknown>) {

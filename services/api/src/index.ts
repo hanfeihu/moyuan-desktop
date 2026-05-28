@@ -2,7 +2,7 @@ import cors from '@fastify/cors'
 import 'dotenv/config'
 import Fastify from 'fastify'
 import nodemailer from 'nodemailer'
-import { createHash, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { z } from 'zod'
@@ -10,6 +10,7 @@ import type {
   AccountUser,
   Employee,
   EnterprisePolicy,
+  GeneratedAssetRecord,
   ImageSkillConfig,
   MailServiceConfig,
   ModelProviderConfig,
@@ -109,6 +110,7 @@ const usageSchema = z.object({
   completionTokens: z.coerce.number().int().min(0).default(0),
   skillTokens: z.coerce.number().int().min(0).default(0),
   totalTokens: z.coerce.number().int().min(0).optional(),
+  reportId: z.string().optional(),
   taskId: z.string().optional(),
 })
 
@@ -132,6 +134,9 @@ type StoredAdminConfig = {
   mailSettings?: Omit<MailServiceConfig, 'maskedAuthCode' | 'authCodeConfigured'>
   users?: AccountUser[]
   sessions?: Array<{ tokenHash: string; userId: string; createdAt: string; lastSeenAt: string }>
+  videoTaskCharges?: VideoTaskCharge[]
+  generatedAssets?: GeneratedAssetRecord[]
+  usageReportIds?: string[]
 }
 
 type AdminAuthConfig = {
@@ -145,6 +150,15 @@ type AdminSession = {
   tokenHash: string
   createdAt: string
   lastSeenAt: string
+}
+
+type VideoTaskCharge = {
+  taskId: string
+  userId: string
+  tokens: number
+  status: 'completed'
+  createdAt: string
+  updatedAt: string
 }
 
 const employees: Employee[] = [
@@ -172,6 +186,9 @@ let mailAuthCode = storedConfig.mailAuthCode ?? process.env.QQ_MAIL_AUTH_CODE ??
 let mailSettings: MailServiceConfig = buildMailSettings(storedConfig.mailSettings)
 let users: AccountUser[] = storedConfig.users ?? []
 let sessions = storedConfig.sessions ?? []
+let videoTaskCharges: VideoTaskCharge[] = storedConfig.videoTaskCharges ?? []
+let generatedAssets: GeneratedAssetRecord[] = storedConfig.generatedAssets ?? []
+let usageReportIds = new Set(storedConfig.usageReportIds ?? [])
 let adminAuth: AdminAuthConfig | undefined = storedConfig.adminAuth ?? buildAdminAuthFromEnv()
 let adminSessions: AdminSession[] = storedConfig.adminSessions ?? []
 const verificationCodes = new Map<string, { code: string; expiresAt: number; createdAt: number }>()
@@ -217,6 +234,9 @@ async function persistStoredConfig() {
         mailAuthCode,
         users,
         sessions,
+        videoTaskCharges,
+        generatedAssets,
+        usageReportIds: Array.from(usageReportIds).slice(-5000),
       },
       null,
       2,
@@ -619,6 +639,159 @@ function chargeSkillTokens(user: AccountUser, totalTokens: number) {
   user.tokenUsed += totalTokens
 }
 
+function normalizedVideoStatus(status?: string) {
+  const value = (status ?? '').toLowerCase()
+  if (['succeeded', 'success', 'completed', 'done', 'finish', 'finished'].some((item) => value.includes(item))) return 'completed'
+  if (['failed', 'error', 'canceled', 'cancelled', 'rejected'].some((item) => value.includes(item))) return 'failed'
+  return 'running'
+}
+
+function findVideoCharge(taskId: string, userId: string) {
+  return videoTaskCharges.find((item) => item.taskId === taskId && item.userId === userId)
+}
+
+function chargeVideoTask(user: AccountUser, taskId: string, usageTokens: number) {
+  const existing = findVideoCharge(taskId, user.id)
+  if (existing) return existing
+
+  chargeSkillTokens(user, usageTokens)
+  const now = new Date().toISOString()
+  const charge: VideoTaskCharge = {
+    taskId,
+    userId: user.id,
+    tokens: usageTokens,
+    status: 'completed',
+    createdAt: now,
+    updatedAt: now,
+  }
+  videoTaskCharges = [charge, ...videoTaskCharges].slice(0, 1000)
+  return charge
+}
+
+function firstImageFromPayload(payload: unknown) {
+  if (!payload || typeof payload !== 'object') return undefined
+  const data = (payload as { data?: unknown }).data
+  return Array.isArray(data) && data[0] && typeof data[0] === 'object' ? (data[0] as { b64_json?: unknown; url?: unknown }) : undefined
+}
+
+function promptFromVideoContent(content: unknown) {
+  if (!Array.isArray(content)) return ''
+  for (const item of content) {
+    if (!item || typeof item !== 'object') continue
+    const text = (item as { text?: unknown }).text
+    if (typeof text === 'string' && text.trim()) return text.trim()
+  }
+  return ''
+}
+
+function upsertGeneratedAsset(input: {
+  id?: string
+  metadata?: Record<string, unknown>
+  model: string
+  prompt: string
+  provider: string
+  status: GeneratedAssetRecord['status']
+  storageUrl?: string
+  taskId?: string
+  tokenUsage?: number
+  type: GeneratedAssetRecord['type']
+  url?: string
+  user: AccountUser
+}) {
+  const now = new Date().toISOString()
+  const existingIndex = input.taskId ? generatedAssets.findIndex((asset) => asset.taskId === input.taskId && asset.userId === input.user.id) : -1
+  const existing = existingIndex >= 0 ? generatedAssets[existingIndex] : undefined
+  const next: GeneratedAssetRecord = {
+    id: existing?.id ?? input.id ?? randomUUID(),
+    userEmail: input.user.email,
+    userId: input.user.id,
+    userName: input.user.name,
+    type: input.type,
+    prompt: input.prompt,
+    model: input.model,
+    url: input.url ?? existing?.url ?? '',
+    storageUrl: input.storageUrl ?? existing?.storageUrl,
+    taskId: input.taskId ?? existing?.taskId,
+    status: input.status,
+    tokenUsage: input.tokenUsage ?? existing?.tokenUsage ?? 0,
+    provider: input.provider,
+    metadata: { ...(existing?.metadata ?? {}), ...(input.metadata ?? {}) },
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  }
+
+  if (existingIndex >= 0) {
+    generatedAssets[existingIndex] = next
+  } else {
+    generatedAssets = [next, ...generatedAssets].slice(0, 2000)
+  }
+  return next
+}
+
+function hmac(key: Buffer | string, data: string) {
+  return createHmac('sha256', key).update(data).digest()
+}
+
+function sha256Hex(data: Buffer | string) {
+  return createHash('sha256').update(data).digest('hex')
+}
+
+function minioConfig() {
+  const endpoint = process.env.MINIO_ENDPOINT?.replace(/\/$/, '')
+  const accessKey = process.env.MINIO_ACCESS_KEY ?? process.env.MINIO_ROOT_USER
+  const secretKey = process.env.MINIO_SECRET_KEY ?? process.env.MINIO_ROOT_PASSWORD
+  const bucket = process.env.MINIO_BUCKET ?? 'worldcup-materials'
+  if (!endpoint || !accessKey || !secretKey || !bucket) return undefined
+  return {
+    accessKey,
+    bucket,
+    endpoint,
+    publicBaseUrl: (process.env.MINIO_PUBLIC_BASE_URL ?? `${endpoint}/${bucket}`).replace(/\/$/, ''),
+    region: process.env.MINIO_REGION ?? 'us-east-1',
+    secretKey,
+  }
+}
+
+async function uploadToMinio(objectKey: string, bytes: Buffer, contentType: string) {
+  const config = minioConfig()
+  if (!config) return undefined
+
+  const target = new URL(`${config.endpoint}/${config.bucket}/${objectKey}`)
+  const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '')
+  const dateStamp = amzDate.slice(0, 8)
+  const payloadHash = sha256Hex(bytes)
+  const headers = {
+    'content-type': contentType,
+    host: target.host,
+    'x-amz-content-sha256': payloadHash,
+    'x-amz-date': amzDate,
+  }
+  const signedHeaders = Object.keys(headers).sort().join(';')
+  const canonicalHeaders = Object.keys(headers)
+    .sort()
+    .map((key) => `${key}:${headers[key as keyof typeof headers]}\n`)
+    .join('')
+  const canonicalRequest = ['PUT', target.pathname, '', canonicalHeaders, signedHeaders, payloadHash].join('\n')
+  const credentialScope = `${dateStamp}/${config.region}/s3/aws4_request`
+  const stringToSign = ['AWS4-HMAC-SHA256', amzDate, credentialScope, sha256Hex(canonicalRequest)].join('\n')
+  const signingKey = hmac(hmac(hmac(hmac(`AWS4${config.secretKey}`, dateStamp), config.region), 's3'), 'aws4_request')
+  const signature = createHmac('sha256', signingKey).update(stringToSign).digest('hex')
+  const authorization = `AWS4-HMAC-SHA256 Credential=${config.accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`
+
+  const response = await fetch(target, {
+    body: bytes as unknown as BodyInit,
+    headers: {
+      Authorization: authorization,
+      'Content-Type': contentType,
+      'x-amz-content-sha256': payloadHash,
+      'x-amz-date': amzDate,
+    },
+    method: 'PUT',
+  })
+  if (!response.ok) throw new Error(`MinIO 归档失败：${response.status}`)
+  return `${config.publicBaseUrl}/${objectKey}`
+}
+
 async function callImageSkillApi(init: RequestInit) {
   if (!imageSkill.enabled || !imageSkillApiKey) {
     return { ok: false as const, status: 400, payload: { error: '图片生成技能未启用，请管理员在后台配置并启用 gpt-image-2 KEY' } }
@@ -752,6 +925,10 @@ app.post('/api/admin/mail-settings/test', async (_request, reply) => {
 
 app.get('/api/admin/users', async () => ({ data: users.map(sanitizeUser) }))
 
+app.get('/api/admin/generated-assets', async () => ({
+  data: generatedAssets,
+}))
+
 app.put('/api/admin/users/:id/quota', async (request, reply) => {
   const params = userIdParamSchema.safeParse(request.params)
   if (!params.success) return reply.status(400).send({ error: '用户参数不正确' })
@@ -858,6 +1035,11 @@ app.post('/api/admin/me/usage', async (request, reply) => {
   const parsed = usageSchema.safeParse(request.body)
   if (!parsed.success) return reply.status(400).send({ error: '用量数据不完整' })
 
+  const reportId = parsed.data.reportId?.trim()
+  if (reportId && usageReportIds.has(reportId)) {
+    return { data: { user: sanitizeUser(user), duplicated: true } }
+  }
+
   const promptTokens = parsed.data.promptTokens
   const completionTokens = parsed.data.completionTokens
   const skillTokens = parsed.data.skillTokens
@@ -870,6 +1052,10 @@ app.post('/api/admin/me/usage', async (request, reply) => {
   user.completionTokens += completionTokens
   user.skillTokens += skillTokens
   user.tokenUsed += totalTokens
+  if (reportId) {
+    usageReportIds.add(reportId)
+    usageReportIds = new Set(Array.from(usageReportIds).slice(-5000))
+  }
   await persistStoredConfig()
   return { data: { user: sanitizeUser(user) } }
 })
@@ -914,10 +1100,40 @@ app.post('/api/admin/skills/image/generations', async (request, reply) => {
     return reply.status(402).send({ error: error instanceof Error ? error.message : 'Token 额度不足，请联系管理员派发额度', data: { user: sanitizeUser(user) } })
   }
 
+  const firstImage = firstImageFromPayload(upstream.payload)
+  const upstreamUrl = typeof firstImage?.url === 'string' ? firstImage.url : undefined
+  let storageUrl: string | undefined
+  let storageError: string | undefined
+  if (typeof firstImage?.b64_json === 'string' && firstImage.b64_json) {
+    try {
+      storageUrl = await uploadToMinio(`moyuan/images/${randomUUID()}.png`, Buffer.from(firstImage.b64_json, 'base64'), 'image/png')
+    } catch (error) {
+      storageError = error instanceof Error ? error.message : 'MinIO 归档失败'
+    }
+  }
+
+  upsertGeneratedAsset({
+    user,
+    type: 'image',
+    prompt: body.prompt,
+    model: body.model,
+    provider: imageSkill.provider,
+    status: 'succeeded',
+    tokenUsage: usageTokens,
+    url: storageUrl ?? upstreamUrl ?? '',
+    storageUrl,
+    metadata: {
+      size: body.size,
+      storageError,
+      upstreamId: findFirstString(upstream.payload, ['id']),
+    },
+  })
+
   await persistStoredConfig()
   return {
     data: {
       raw: upstream.payload,
+      storageUrl,
       usageTokens,
       user: sanitizeUser(user),
     },
@@ -927,6 +1143,7 @@ app.post('/api/admin/skills/image/generations', async (request, reply) => {
 app.post('/api/admin/skills/video/generations', async (request, reply) => {
   const user = getRequestUser(request)
   if (!user) return unauthorized(reply)
+  normalizeUser(user)
 
   const parsed = videoGenerationSchema.safeParse(request.body)
   if (!parsed.success) {
@@ -943,10 +1160,15 @@ app.post('/api/admin/skills/video/generations', async (request, reply) => {
     return reply.status(400).send({ error: '视频生成需要 prompt 或 content' })
   }
 
+  if (user.tokenBudget - user.tokenUsed <= 0) {
+    return reply.status(402).send({ error: 'Token 额度不足，请联系管理员派发额度', data: { user: sanitizeUser(user) } })
+  }
+
+  const duration = parsed.data.duration ?? videoSkill.defaultDuration
   const body = {
     ...parsed.data,
     content,
-    duration: parsed.data.duration ?? videoSkill.defaultDuration,
+    duration,
     generate_audio: parsed.data.generate_audio ?? true,
     model: parsed.data.model ?? videoSkill.defaultModel,
     ratio: parsed.data.ratio ?? videoSkill.defaultRatio,
@@ -966,12 +1188,50 @@ app.post('/api/admin/skills/video/generations', async (request, reply) => {
   }
 
   const taskId = findFirstString(upstream.payload, ['id', 'task_id', 'taskId'])
+  const status = findFirstString(upstream.payload, ['status'])
+  const videoStatus = normalizedVideoStatus(status)
+  const videoUrl = findFirstVideoUrl(upstream.payload)
+  let usageTokens = 0
+  if (taskId && videoStatus === 'completed') {
+    const actualTokens = usageTotalTokens(upstream.payload)
+    if (!actualTokens) {
+      return reply.status(502).send({ error: '视频生成接口没有返回 usage.total_tokens，无法计费', upstream: upstream.payload })
+    }
+    try {
+      usageTokens = chargeVideoTask(user, taskId, actualTokens).tokens
+    } catch (error) {
+      return reply.status(402).send({ error: error instanceof Error ? error.message : 'Token 额度不足，请联系管理员派发额度', data: { user: sanitizeUser(user) } })
+    }
+  }
+  if (taskId) {
+    upsertGeneratedAsset({
+      user,
+      type: 'video',
+      taskId,
+      prompt: parsed.data.prompt ?? promptFromVideoContent(content),
+      model: body.model,
+      provider: videoSkill.provider,
+      status: videoStatus === 'completed' ? 'succeeded' : videoStatus === 'failed' ? 'failed' : 'running',
+      tokenUsage: usageTokens,
+      url: videoUrl ?? '',
+      metadata: {
+        duration: body.duration,
+        ratio: body.ratio,
+        resolution: body.resolution,
+        status,
+      },
+    })
+  }
+
+  await persistStoredConfig()
   return {
     data: {
       taskId,
-      status: findFirstString(upstream.payload, ['status']),
-      videoUrl: findFirstVideoUrl(upstream.payload),
+      status,
+      videoUrl,
       raw: upstream.payload,
+      usageTokens,
+      user: sanitizeUser(user),
     },
   }
 })
@@ -979,6 +1239,7 @@ app.post('/api/admin/skills/video/generations', async (request, reply) => {
 app.get('/api/admin/skills/video/generations/:taskId', async (request, reply) => {
   const user = getRequestUser(request)
   if (!user) return unauthorized(reply)
+  normalizeUser(user)
 
   const params = z.object({ taskId: z.string().min(1) }).parse(request.params)
   const upstream = await callVideoSkillApi(videoSkillTaskUrl(params.taskId), { method: 'GET' })
@@ -988,12 +1249,52 @@ app.get('/api/admin/skills/video/generations/:taskId', async (request, reply) =>
     return reply.status(upstream.status).send({ error: message, upstream: upstream.payload })
   }
 
+  const status = findFirstString(upstream.payload, ['status'])
+  const videoStatus = normalizedVideoStatus(status)
+  const videoUrl = findFirstVideoUrl(upstream.payload)
+  let charge = findVideoCharge(params.taskId, user.id)
+  if (videoStatus === 'completed') {
+    const actualTokens = usageTotalTokens(upstream.payload) ?? charge?.tokens
+    if (!actualTokens) {
+      return reply.status(502).send({ error: '视频生成接口没有返回 usage.total_tokens，无法计费', upstream: upstream.payload })
+    }
+    try {
+      charge = chargeVideoTask(user, params.taskId, actualTokens)
+    } catch (error) {
+      return reply.status(402).send({ error: error instanceof Error ? error.message : 'Token 额度不足，请联系管理员派发额度', data: { user: sanitizeUser(user) } })
+    }
+  }
+  const existingAsset = generatedAssets.find((asset) => asset.taskId === params.taskId && asset.userId === user.id)
+  if (existingAsset || videoUrl || videoStatus !== 'running') {
+    upsertGeneratedAsset({
+      user,
+      type: 'video',
+      taskId: params.taskId,
+      prompt: existingAsset?.prompt ?? '',
+      model: existingAsset?.model ?? findFirstString(upstream.payload, ['model']) ?? videoSkill.defaultModel,
+      provider: videoSkill.provider,
+      status: videoStatus === 'completed' ? 'succeeded' : videoStatus === 'failed' ? 'failed' : 'running',
+      tokenUsage: charge?.tokens ?? existingAsset?.tokenUsage ?? 0,
+      url: videoUrl ?? existingAsset?.url ?? '',
+      metadata: {
+        duration: (upstream.payload as { duration?: unknown })?.duration,
+        ratio: (upstream.payload as { ratio?: unknown })?.ratio,
+        resolution: (upstream.payload as { resolution?: unknown })?.resolution,
+        status,
+      },
+    })
+  }
+  await persistStoredConfig()
+
   return {
     data: {
       taskId: params.taskId,
-      status: findFirstString(upstream.payload, ['status']),
-      videoUrl: findFirstVideoUrl(upstream.payload),
+      status,
+      videoUrl,
       raw: upstream.payload,
+      usageTokens: charge?.tokens ?? 0,
+      chargeStatus: charge?.status,
+      user: sanitizeUser(user),
     },
   }
 })

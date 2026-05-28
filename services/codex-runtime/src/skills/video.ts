@@ -106,7 +106,7 @@ export async function generateVideo(
   const created = (await enterpriseJson('/skills/video/generations', authToken, baseUrl, {
     body: JSON.stringify(buildVideoRequest(toolCall, prompt, skills)),
     method: 'POST',
-  })) as { raw?: unknown; status?: string; taskId?: string; videoUrl?: string }
+  })) as { raw?: unknown; status?: string; taskId?: string; usageTokens?: number; videoUrl?: string }
 
   const taskId = created.taskId ?? findFirstString(created.raw, ['id', 'task_id', 'taskId'])
   const createError = findVideoErrorMessage(created.raw)
@@ -117,17 +117,21 @@ export async function generateVideo(
 
   onStatus('视频任务已创建，正在生成...')
   let lastStatus = created.status ?? findFirstString(created.raw, ['status'])
+  let usageTokens = created.usageTokens
   let videoUrl = created.videoUrl ?? findFirstVideoUrl(created.raw)
   const deadline = Date.now() + Number(process.env.VIDEO_TIMEOUT_MS ?? 900000)
 
   while (!videoUrl && normalizedVideoStatus(lastStatus) === 'running' && Date.now() < deadline) {
     await sleep(Number(process.env.VIDEO_POLL_INTERVAL_MS ?? 6000))
     const queried = (await enterpriseJson(`/skills/video/generations/${encodeURIComponent(taskId)}`, authToken, baseUrl)) as {
+      chargeStatus?: string
       raw?: unknown
       status?: string
+      usageTokens?: number
       videoUrl?: string
     }
     lastStatus = queried.status ?? findFirstString(queried.raw, ['status'])
+    usageTokens = queried.usageTokens ?? usageTokens
     videoUrl = queried.videoUrl ?? findFirstVideoUrl(queried.raw)
     const statusLabel = lastStatus ? `当前状态：${lastStatus}` : '视频仍在生成中'
     onStatus(statusLabel)
@@ -149,6 +153,7 @@ export async function generateVideo(
     duration: toolCall.duration ?? video.defaultDuration,
     ratio: toolCall.ratio ?? video.defaultRatio,
     resolution: video.defaultResolution,
+    usageTokens,
     createdAt: new Date().toISOString(),
   }
 }

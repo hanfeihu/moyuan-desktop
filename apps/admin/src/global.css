@@ -137,6 +137,46 @@ body {
   padding-inline: 10px;
 }
 
+.asset-thumb {
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid #e6edf5;
+  background: #f8fafc;
+}
+
+.asset-thumb-placeholder {
+  display: grid;
+  width: 84px;
+  height: 64px;
+  place-items: center;
+  border: 1px solid #e6edf5;
+  border-radius: 8px;
+  color: #64748b;
+  background: #f8fafc;
+  font-size: 22px;
+}
+
+.asset-thumb-placeholder.video {
+  color: #7c3aed;
+  border-color: #eadcff;
+  background: #f7f2ff;
+}
+
+.asset-user {
+  display: grid;
+  gap: 2px;
+}
+
+.asset-user strong {
+  color: #1f2328;
+  font-weight: 650;
+}
+
+.asset-user span {
+  color: #64748b;
+  font-size: 12px;
+}
+
 .quota-modal {
   display: grid;
   gap: 16px;

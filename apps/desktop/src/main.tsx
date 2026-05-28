@@ -13,7 +13,6 @@ const enterpriseApiBase = launchParams.get('enterpriseApiBase') ?? import.meta.e
 const defaultWorkspace = import.meta.env.VITE_DEFAULT_WORKSPACE ?? '/Users/a1/Documents/Codex/2026-05-26/codex'
 const localEmployeeId = import.meta.env.VITE_EMPLOYEE_ID ?? 'u-1001'
 const authTokenStorageKey = 'moyuan.auth.token'
-const reportedUsageStorageKey = 'moyuan.usage.reported'
 const appStartedAt = Date.now()
 
 type TranscriptItem = CodexTask['transcript'][number]
@@ -58,19 +57,6 @@ function formatTokenNumber(value: number) {
   return String(value)
 }
 
-function readStringSetStorage(key: string) {
-  try {
-    const raw = window.localStorage.getItem(key)
-    if (!raw) return new Set<string>()
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return new Set<string>()
-    return new Set(parsed.filter((item): item is string => typeof item === 'string'))
-  } catch {
-    window.localStorage.removeItem(key)
-    return new Set<string>()
-  }
-}
-
 function enterpriseEndpoint(pathname: string) {
   return `${enterpriseApiBase.replace(/\/$/, '')}/${pathname.replace(/^\//, '')}`
 }
@@ -80,22 +66,6 @@ function enterpriseFetch(pathname: string, token = '', init: RequestInit = {}) {
   headers.set('Content-Type', headers.get('Content-Type') ?? 'application/json')
   if (token) headers.set('Authorization', `Bearer ${token}`)
   return fetch(enterpriseEndpoint(pathname), { ...init, headers })
-}
-
-function estimateTokens(text: string) {
-  const length = Array.from(text.trim()).length
-  if (!length) return 0
-  return Math.max(1, Math.ceil(length / 3.2))
-}
-
-function estimateTaskUsage(task: CodexTask) {
-  const promptTokens = estimateTokens(task.transcript.filter((item) => item.role === 'user').map((item) => item.content).join('\n'))
-  const completionTokens = estimateTokens(task.transcript.filter((item) => item.role === 'assistant').map((item) => item.content).join('\n'))
-  return {
-    completionTokens,
-    promptTokens,
-    totalTokens: promptTokens + completionTokens,
-  }
 }
 
 function statusText(status: CodexTask['status']) {
@@ -885,7 +855,6 @@ function DesktopApp() {
   const seenEventsRef = useRef<Set<string>>(new Set())
   const previousTaskIdRef = useRef(activeTaskId)
   const pinTranscriptToBottomRef = useRef(true)
-  const reportedUsageRef = useRef<Set<string>>(readStringSetStorage(reportedUsageStorageKey))
 
   const activeTask = useMemo(() => tasks.find((task) => task.id === activeTaskId) ?? tasks[0], [activeTaskId, tasks])
   const visibleTranscript = useMemo(() => activeTask.transcript.filter(shouldShowMessage), [activeTask.transcript])
@@ -1068,35 +1037,6 @@ function DesktopApp() {
         ])
       })
   }, [authState])
-
-  useEffect(() => {
-    if (!authToken || !authUser) return
-
-    const reportable = tasks.filter((task) => {
-      if (task.id === 'welcome' || task.status !== 'completed') return false
-      const updatedAt = new Date(task.updatedAt ?? task.createdAt ?? 0).getTime()
-      if (Number.isFinite(updatedAt) && updatedAt < appStartedAt - 10000) return false
-      const key = `${task.id}:${task.updatedAt ?? task.transcript.length}`
-      return !reportedUsageRef.current.has(key)
-    })
-
-    for (const task of reportable) {
-      const key = `${task.id}:${task.updatedAt ?? task.transcript.length}`
-      const usage = estimateTaskUsage(task)
-      if (!usage.totalTokens) continue
-      reportedUsageRef.current.add(key)
-      window.localStorage.setItem(reportedUsageStorageKey, JSON.stringify(Array.from(reportedUsageRef.current).slice(-500)))
-      enterpriseFetch('/me/usage', authToken, {
-        method: 'POST',
-        body: JSON.stringify({ ...usage, taskId: task.id }),
-      })
-        .then((response) => response.json().then((payload) => ({ ok: response.ok, payload })))
-        .then(({ ok, payload }: { ok: boolean; payload: { data?: { user: AccountUser } } }) => {
-          if (ok && payload.data?.user) setAuthUser(payload.data.user)
-        })
-        .catch(() => {})
-    }
-  }, [authToken, authUser, tasks])
 
   useEffect(() => {
     const transcript = transcriptRef.current

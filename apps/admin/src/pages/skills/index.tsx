@@ -8,7 +8,7 @@ import {
   ProFormSwitch,
   ProFormText,
 } from '@ant-design/pro-components'
-import { Alert, App, Button, Space, Tag, Typography } from 'antd'
+import { Alert, App, Button, Space, Tag } from 'antd'
 import { useState } from 'react'
 import { videoRatioOptions, videoResolutionOptions, type ImageSkillConfig, type VideoRatio, type VideoResolution, type VideoSkillConfig } from '@eaw/shared'
 import { defaultImageSkill, defaultVideoSkill } from '@/data/defaults'
@@ -95,7 +95,7 @@ export default function SkillsPage() {
             <strong>{imageSkill.apiKeyConfigured ? 'API Key 已配置' : 'API Key 未配置'}</strong>
             <span>
               {imageSkill.apiKeyConfigured
-                ? `当前使用 ${imageSkill.maskedApiKey}，图片接口返回 usage.total_tokens 后按真实用量扣员工额度。`
+                ? `当前使用 ${imageSkill.maskedApiKey}，输入新 KEY 后会替换；留空保存会沿用现有 KEY。`
                 : '还没有保存可用的 gpt-image-2 KEY。请输入 KEY 后再启用图片技能。'}
             </span>
           </div>
@@ -222,9 +222,6 @@ export default function SkillsPage() {
       </ProCard>
 
       <ProCard className="section-card" title="大脑调用方式">
-        <Typography.Paragraph>
-          用户在桌面端要求生成图片、生成视频、让图片动起来、制作产品短片时，墨渊会把这些能力作为工具调用；KEY 只在企业后台服务端保存，桌面端不直接持有明文。
-        </Typography.Paragraph>
         <Space wrap>
           <Tag color="blue" icon={<PictureOutlined />}>图片生成</Tag>
           <Tag color="blue">文生视频</Tag>
