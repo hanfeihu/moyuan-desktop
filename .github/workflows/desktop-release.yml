@@ -22,7 +22,7 @@ jobs:
         include:
           - name: macOS
             os: macos-latest
-            command: npm run build:release && npm run prepare:desktop-runtime && electron-builder --project apps/desktop --mac dmg zip --publish never -c.mac.identity=null
+            command: npm run build:release && npm run prepare:desktop-runtime && npx electron-builder --project apps/desktop --mac dmg zip --publish never -c.mac.identity=null
             artifact: apps/desktop/release/Moyuan-Desktop-*
           - name: Windows
             os: windows-latest
