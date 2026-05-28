@@ -228,6 +228,7 @@ cp /opt/moyuan-api/data/admin-config.json /opt/moyuan-api/data/admin-config.$(da
 - 模型通道：`/api/admin/model-provider`，给桌面端和 Runtime 下发模型地址、模型名和可用状态。
 - 图片技能：`/api/admin/skills/image/generations`，要求上游返回 `usage.total_tokens`，否则拒绝计费。
 - 视频技能：`/api/admin/skills/video/generations` 和 `/api/admin/skills/video/generations/:taskId`，Seedance 任务成功后读取查询接口里的 `usage.total_tokens` 扣费。
+- 客户端日志：桌面端登录后会 POST 到 `/api/admin/client-logs`，后台“日志管理”页面通过 GET `/api/admin/client-logs` 查看用户、设备、系统、IP、事件、任务和错误详情。
 
 资源记录在：
 
@@ -310,4 +311,3 @@ curl -i http://codex.tminos.com:18080/admin-health
 6. 新增技能时遵循四段结构：后台配置、技能说明、工具契约、执行器。
 7. 修改后台 UI 时优先拆页面和服务文件，不要把所有逻辑堆进单个大文件。
 8. 改完至少跑对应 workspace 的 typecheck 和 build。
-

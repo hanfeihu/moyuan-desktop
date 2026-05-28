@@ -4,6 +4,7 @@ import { LogoutOutlined } from '@ant-design/icons'
 import { App, Button, ConfigProvider, Tag, theme } from 'antd'
 import React from 'react'
 import { clearAdminToken, isAdminSignedIn } from '@/services/admin'
+import moyuanIcon from '@/assets/moyuan-icon.svg'
 import './global.css'
 
 export async function getInitialState() {
@@ -42,7 +43,7 @@ export const layout: RunTimeLayoutConfig = () => ({
   },
   menuHeaderRender: () => (
     <div className="admin-menu-brand">
-      <div className="admin-logo-mark">墨</div>
+      <img alt="墨渊" className="admin-logo-mark" src={moyuanIcon} />
       <span>墨渊控制台</span>
     </div>
   ),

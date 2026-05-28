@@ -165,6 +165,31 @@ export type GeneratedAssetRecord = {
   updatedAt: string
 }
 
+export type ClientLogLevel = 'debug' | 'info' | 'warn' | 'error'
+
+export type ClientLogRecord = {
+  id: string
+  userId?: string
+  userEmail?: string
+  userName?: string
+  deviceId: string
+  deviceName?: string
+  platform: string
+  osVersion?: string
+  appVersion?: string
+  source: string
+  level: ClientLogLevel
+  event: string
+  details?: unknown
+  taskId?: string
+  sessionId?: string
+  workspace?: string
+  ip?: string
+  userAgent?: string
+  createdAt: string
+  receivedAt: string
+}
+
 export type CodexTaskEvent = {
   id: string
   taskId: string

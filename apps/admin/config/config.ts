@@ -25,6 +25,7 @@ export default defineConfig({
     { path: '/models', name: '模型与密钥', icon: 'ApiOutlined', component: './models' },
     { path: '/skills', name: '技能配置', icon: 'VideoCameraOutlined', component: './skills' },
     { path: '/assets', name: '资源记录', icon: 'PictureOutlined', component: './assets' },
+    { path: '/logs', name: '日志管理', icon: 'BugOutlined', component: './logs' },
     { path: '/accounts', name: '账号与用量', icon: 'UserOutlined', component: './accounts' },
     { path: '/settings', name: '系统设置', icon: 'SettingOutlined', component: './settings' },
     { path: '/organization', name: '组织同步', icon: 'TeamOutlined', component: './organization' },

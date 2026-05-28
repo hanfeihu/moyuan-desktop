@@ -1,4 +1,4 @@
-import type { AccountUser, Employee, EnterprisePolicy, GeneratedAssetRecord, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
+import type { AccountUser, ClientLogRecord, Employee, EnterprisePolicy, GeneratedAssetRecord, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
 import { defaultEmployees, defaultImageSkill, defaultMailSettings, defaultPolicy, defaultProviders, defaultVideoSkill } from '@/data/defaults'
 
 const apiBase = '/admin-api'
@@ -242,6 +242,19 @@ export async function saveVideoSkill(values: Record<string, unknown>) {
 export async function loadAssets() {
   try {
     const payload = await getJson<GeneratedAssetRecord[]>('/generated-assets')
+    return payload.data
+  } catch {
+    return []
+  }
+}
+
+export async function loadClientLogs(params: { deviceId?: string; event?: string; level?: string; limit?: number; userId?: string } = {}) {
+  try {
+    const search = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== '') search.set(key, String(value))
+    })
+    const payload = await getJson<ClientLogRecord[]>(`/client-logs${search.size ? `?${search.toString()}` : ''}`)
     return payload.data
   } catch {
     return []

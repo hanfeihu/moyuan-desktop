@@ -63,8 +63,8 @@ export default function AccountsPage() {
     >
       <StatisticCard.Group className="dashboard-stats">
         <StatisticCard statistic={{ title: '注册用户', value: usage.users, icon: <UserOutlined /> }} />
-        <StatisticCard statistic={{ title: '已用 Token', value: usage.used }} footer={formatNumber(usage.used)} />
-        <StatisticCard statistic={{ title: '总额度', value: usage.budget }} footer={formatNumber(usage.budget)} />
+        <StatisticCard statistic={{ title: '已用 Token', value: usage.used }} />
+        <StatisticCard statistic={{ title: '总额度', value: usage.budget }} />
       </StatisticCard.Group>
 
       <ProCard className="section-card" title="用户与 Token 用量">

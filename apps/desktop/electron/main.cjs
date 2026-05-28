@@ -270,6 +270,7 @@ async function createWindow() {
       query: {
         enterpriseApiBase,
         defaultWorkspace: runtime.defaultWorkspace,
+        appVersion: app.getVersion(),
         platform: process.platform,
         runtimeUrl: runtime.url,
         runtimeToken: runtime.token,
@@ -280,6 +281,7 @@ async function createWindow() {
     const url = appendLaunchParams(devUrl, {
       enterpriseApiBase,
       defaultWorkspace: runtime.defaultWorkspace,
+      appVersion: app.getVersion(),
       platform: process.platform,
       runtimeUrl: runtime.url,
       runtimeToken: runtime.token,

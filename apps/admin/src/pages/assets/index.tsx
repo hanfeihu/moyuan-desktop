@@ -1,6 +1,6 @@
 import { EyeOutlined, LinkOutlined, PictureOutlined, VideoCameraOutlined } from '@ant-design/icons'
 import { PageContainer, ProCard, ProTable, StatisticCard } from '@ant-design/pro-components'
-import { Button, Image, Space, Tag } from 'antd'
+import { Button, Image, Modal, Space, Tag } from 'antd'
 import { useEffect, useMemo, useState } from 'react'
 import type { GeneratedAssetRecord } from '@eaw/shared'
 import { loadAssets } from '@/services/admin'
@@ -25,8 +25,14 @@ function statusTag(status: GeneratedAssetRecord['status']) {
   return <Tag color="blue">生成中</Tag>
 }
 
+function assetPreviewUrl(asset: GeneratedAssetRecord) {
+  return asset.url || asset.storageUrl || ''
+}
+
 export default function AssetsPage() {
   const [assets, setAssets] = useState<GeneratedAssetRecord[]>([])
+  const [previewAsset, setPreviewAsset] = useState<GeneratedAssetRecord | null>(null)
+  const previewUrl = previewAsset ? assetPreviewUrl(previewAsset) : ''
 
   useEffect(() => {
     void loadAssets().then(setAssets)
@@ -50,7 +56,7 @@ export default function AssetsPage() {
       <StatisticCard.Group className="dashboard-stats">
         <StatisticCard statistic={{ title: '图片资源', value: summary.images, icon: <PictureOutlined /> }} />
         <StatisticCard statistic={{ title: '视频资源', value: summary.videos, icon: <VideoCameraOutlined /> }} />
-        <StatisticCard statistic={{ title: '技能 Token', value: summary.tokens }} footer={formatNumber(summary.tokens)} />
+        <StatisticCard statistic={{ title: '技能 Token', value: summary.tokens }} />
       </StatisticCard.Group>
 
       <ProCard className="section-card">
@@ -60,14 +66,22 @@ export default function AssetsPage() {
               title: '资源',
               dataIndex: 'url',
               width: 120,
-              render: (_, row) =>
-                row.type === 'image' && row.url ? (
-                  <Image className="asset-thumb" height={64} src={row.url} width={84} />
-                ) : (
-                  <div className={`asset-thumb-placeholder ${row.type}`}>
+              render: (_, row) => {
+                const url = assetPreviewUrl(row)
+                if (row.type === 'image' && url) {
+                  return (
+                    <button className="asset-preview-trigger" onClick={() => setPreviewAsset(row)} type="button">
+                      <img alt={row.prompt || '图片资源'} className="asset-thumb" height={64} src={url} width={84} />
+                    </button>
+                  )
+                }
+
+                return (
+                  <button className={`asset-thumb-placeholder ${row.type}`} disabled={!url} onClick={() => setPreviewAsset(row)} type="button">
                     {row.type === 'video' ? <VideoCameraOutlined /> : <PictureOutlined />}
-                  </div>
-                ),
+                  </button>
+                )
+              },
             },
             {
               title: '类型',
@@ -122,7 +136,7 @@ export default function AssetsPage() {
               width: 120,
               render: (_, row) => (
                 <Space>
-                  <Button disabled={!row.url} href={row.url} icon={<EyeOutlined />} size="small" target="_blank" type="text" />
+                  <Button disabled={!assetPreviewUrl(row)} icon={<EyeOutlined />} onClick={() => setPreviewAsset(row)} size="small" type="text" />
                   <Button disabled={!row.storageUrl} href={row.storageUrl} icon={<LinkOutlined />} size="small" target="_blank" type="text" />
                 </Space>
               ),
@@ -136,6 +150,23 @@ export default function AssetsPage() {
           scroll={{ x: 1280 }}
         />
       </ProCard>
+
+      <Modal
+        centered
+        className="asset-preview-modal"
+        footer={null}
+        onCancel={() => setPreviewAsset(null)}
+        open={Boolean(previewAsset)}
+        title={previewAsset?.type === 'video' ? '视频预览' : '图片预览'}
+        width={previewAsset?.type === 'video' ? 920 : 760}
+      >
+        {previewAsset?.type === 'video' && previewUrl ? (
+          <video autoPlay className="asset-preview-video" controls src={previewUrl} />
+        ) : previewAsset?.type === 'image' && previewUrl ? (
+          <Image alt={previewAsset.prompt || '图片资源'} className="asset-preview-image" preview={false} src={previewUrl} />
+        ) : null}
+        {previewAsset?.prompt ? <p className="asset-preview-prompt">{previewAsset.prompt}</p> : null}
+      </Modal>
     </PageContainer>
   )
 }

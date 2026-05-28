@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="base" x1="104" x2="920" y1="60" y2="964" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".54" stop-color="#f5f8fb"/>
+      <stop offset="1" stop-color="#dfe7ef"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="280" x2="742" y1="250" y2="790" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#202327"/>
+      <stop offset="1" stop-color="#07090c"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="628" x2="806" y1="246" y2="470" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7da2c8"/>
+      <stop offset="1" stop-color="#245d8f"/>
+    </linearGradient>
+    <radialGradient id="softLight" cx="32%" cy="22%" r="78%">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".92"/>
+      <stop offset=".58" stop-color="#ffffff" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <g transform="translate(72 72) scale(.86)">
+    <rect width="1024" height="1024" rx="230" fill="url(#base)"/>
+    <rect x="34" y="34" width="956" height="956" rx="206" fill="none" stroke="#ffffff" stroke-opacity=".58" stroke-width="16"/>
+    <path fill="url(#softLight)" d="M84 282c0-96 78-174 174-174h426c-211 56-362 200-445 394-34 80-53 163-58 248-63-77-97-171-97-275V282Z"/>
+    <path fill="url(#ink)" d="M298 640c0-188 116-342 290-409 42-16 91-26 144-26-84 82-104 159-75 237 20 55 64 94 118 116-54 100-157 171-279 171-66 0-130-20-198-89Z"/>
+    <path fill="#f8fafc" d="M407 590c35 29 72 43 112 43 78 0 145-46 177-112-71-34-110-93-115-168-104 60-170 149-174 237Z" opacity=".97"/>
+    <path fill="url(#accent)" d="M676 220c54 3 101 21 141 53 32 27 55 61 68 100-65-8-116-33-152-76-21-24-39-50-57-77Z"/>
+    <circle cx="699" cy="326" r="36" fill="#dbe8f0" opacity=".82"/>
+    <path fill="none" stroke="#111418" stroke-linecap="round" stroke-width="34" d="M270 727c110 89 265 103 390 36 82-44 140-114 170-199"/>
+  </g>
+</svg>

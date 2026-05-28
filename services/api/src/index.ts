@@ -9,6 +9,7 @@ import { Readable } from 'node:stream'
 import { z } from 'zod'
 import type {
   AccountUser,
+  ClientLogRecord,
   Employee,
   EnterprisePolicy,
   GeneratedAssetRecord,
@@ -69,6 +70,23 @@ const imageGenerationSchema = z.object({
   n: z.coerce.number().int().min(1).max(4).default(1),
   prompt: z.string().min(1),
   size: z.enum(['1024x1024', '1024x1536', '1536x1024']).optional(),
+})
+
+const clientLogSchema = z.object({
+  appVersion: z.string().max(80).optional(),
+  details: z.unknown().optional(),
+  deviceId: z.string().min(1).max(120),
+  deviceName: z.string().max(160).optional(),
+  event: z.string().min(1).max(160),
+  level: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  osVersion: z.string().max(160).optional(),
+  platform: z.string().min(1).max(80),
+  sessionId: z.string().max(160).optional(),
+  source: z.string().min(1).max(80).default('desktop-renderer'),
+  taskId: z.string().max(160).optional(),
+  timestamp: z.string().optional(),
+  userAgent: z.string().max(500).optional(),
+  workspace: z.string().max(1000).optional(),
 })
 
 const videoGenerationSchema = z
@@ -143,6 +161,7 @@ type StoredAdminConfig = {
   sessions?: Array<{ tokenHash: string; userId: string; createdAt: string; lastSeenAt: string }>
   videoTaskCharges?: VideoTaskCharge[]
   generatedAssets?: GeneratedAssetRecord[]
+  clientLogs?: ClientLogRecord[]
   usageReportIds?: string[]
 }
 
@@ -213,6 +232,7 @@ let users: AccountUser[] = storedConfig.users ?? []
 let sessions = storedConfig.sessions ?? []
 let videoTaskCharges: VideoTaskCharge[] = storedConfig.videoTaskCharges ?? []
 let generatedAssets: GeneratedAssetRecord[] = storedConfig.generatedAssets ?? []
+let clientLogs: ClientLogRecord[] = storedConfig.clientLogs ?? []
 let usageReportIds = new Set(storedConfig.usageReportIds ?? [])
 let adminAuth: AdminAuthConfig | undefined = storedConfig.adminAuth ?? buildAdminAuthFromEnv()
 let adminSessions: AdminSession[] = storedConfig.adminSessions ?? []
@@ -265,6 +285,7 @@ async function persistStoredConfig() {
         sessions,
         videoTaskCharges,
         generatedAssets,
+        clientLogs,
         usageReportIds: Array.from(usageReportIds).slice(-5000),
       },
       null,
@@ -565,6 +586,7 @@ app.addHook('preHandler', async (request, reply) => {
   if (pathname.startsWith('/api/admin/skills/')) return
   if (pathname === '/api/admin/desktop/bootstrap') return
   if (pathname.startsWith('/api/admin/model-proxy/')) return
+  if (pathname === '/api/admin/client-logs' && request.method === 'POST') return
   if (pathname === '/api/admin/me' || pathname === '/api/admin/me/usage') return
 
   if (!adminAuth) return
@@ -843,6 +865,39 @@ function upsertGeneratedAsset(input: {
     generatedAssets = [next, ...generatedAssets].slice(0, 2000)
   }
   return next
+}
+
+function requestIp(request: { headers: Record<string, unknown>; ip?: string }) {
+  const forwardedFor = String(request.headers['x-forwarded-for'] ?? '').split(',')[0]?.trim()
+  return forwardedFor || request.ip
+}
+
+function appendClientLog(user: AccountUser, payload: z.infer<typeof clientLogSchema>, request: { headers: Record<string, unknown>; ip?: string }) {
+  const now = new Date().toISOString()
+  const log: ClientLogRecord = {
+    id: randomUUID(),
+    userId: user.id,
+    userEmail: user.email,
+    userName: user.name,
+    deviceId: payload.deviceId,
+    deviceName: payload.deviceName,
+    platform: payload.platform,
+    osVersion: payload.osVersion,
+    appVersion: payload.appVersion,
+    source: payload.source,
+    level: payload.level,
+    event: payload.event,
+    details: payload.details,
+    taskId: payload.taskId,
+    sessionId: payload.sessionId,
+    workspace: payload.workspace,
+    ip: requestIp(request),
+    userAgent: payload.userAgent,
+    createdAt: payload.timestamp ?? now,
+    receivedAt: now,
+  }
+  clientLogs = [log, ...clientLogs].slice(0, 10000)
+  return log
 }
 
 function hmac(key: Buffer | string, data: string) {
@@ -1231,6 +1286,39 @@ app.get('/api/admin/users', async () => ({ data: users.map(sanitizeUser) }))
 app.get('/api/admin/generated-assets', async () => ({
   data: generatedAssets,
 }))
+
+app.get('/api/admin/client-logs', async (request) => {
+  const query = z
+    .object({
+      deviceId: z.string().optional(),
+      event: z.string().optional(),
+      level: z.enum(['debug', 'info', 'warn', 'error']).optional(),
+      limit: z.coerce.number().int().positive().max(1000).default(300),
+      userId: z.string().optional(),
+    })
+    .parse(request.query ?? {})
+  const filtered = clientLogs.filter((log) => {
+    if (query.level && log.level !== query.level) return false
+    if (query.userId && log.userId !== query.userId) return false
+    if (query.deviceId && log.deviceId !== query.deviceId) return false
+    if (query.event && !log.event.toLowerCase().includes(query.event.toLowerCase())) return false
+    return true
+  })
+  return { data: filtered.slice(0, query.limit) }
+})
+
+app.post('/api/admin/client-logs', async (request, reply) => {
+  const user = getRequestUser(request)
+  if (!user) return unauthorized(reply)
+  normalizeUser(user)
+
+  const parsed = clientLogSchema.safeParse(request.body)
+  if (!parsed.success) return reply.status(400).send({ error: '客户端日志参数不完整', detail: parsed.error.flatten() })
+
+  const log = appendClientLog(user, parsed.data, request)
+  await persistStoredConfig()
+  return { data: { id: log.id } }
+})
 
 app.put('/api/admin/users/:id/quota', async (request, reply) => {
   const params = userIdParamSchema.safeParse(request.params)

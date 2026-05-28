@@ -1,4 +1,4 @@
-import { CheckCircleOutlined, ExclamationCircleOutlined, KeyOutlined, PictureOutlined, VideoCameraOutlined } from '@ant-design/icons'
+import { KeyOutlined, PictureOutlined, VideoCameraOutlined } from '@ant-design/icons'
 import {
   PageContainer,
   ProCard,
@@ -29,6 +29,10 @@ const resolutionLabels: Record<VideoResolution, string> = {
   '480p': '480p',
   '720p': '720p',
   '1080p': '1080p',
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat('zh-CN').format(value)
 }
 
 export default function SkillsPage() {
@@ -81,28 +85,33 @@ export default function SkillsPage() {
         extra={
           <Space wrap>
             <Tag color={imageStatusColor}>{imageStatus}</Tag>
-            <Tag color={imageSkill.enabled ? 'green' : 'default'}>{imageSkill.enabled ? '技能已启用' : '技能未启用'}</Tag>
-            <Tag color={imageSkill.apiKeyConfigured ? 'green' : 'orange'}>{imageSkill.apiKeyConfigured ? 'KEY 已配置' : 'KEY 未配置'}</Tag>
           </Space>
         }
         title="图片生成 · gpt-image-2"
       >
-        <div className={imageSkill.apiKeyConfigured ? 'skill-key-status configured' : 'skill-key-status missing'}>
-          <div className="skill-key-icon">
-            {imageSkill.apiKeyConfigured ? <CheckCircleOutlined /> : <ExclamationCircleOutlined />}
+        <div className="skill-summary">
+          <div>
+            <span>默认模型</span>
+            <strong>{imageSkill.defaultModel}</strong>
           </div>
-          <div className="skill-key-copy">
-            <strong>{imageSkill.apiKeyConfigured ? 'API Key 已配置' : 'API Key 未配置'}</strong>
-            <span>
-              {imageSkill.apiKeyConfigured
-                ? `当前使用 ${imageSkill.maskedApiKey}，输入新 KEY 后会替换；留空保存会沿用现有 KEY。`
-                : '还没有保存可用的 gpt-image-2 KEY。请输入 KEY 后再启用图片技能。'}
-            </span>
+          <div>
+            <span>API Key</span>
+            <Tag color={imageSkill.apiKeyConfigured ? 'green' : 'orange'} icon={<KeyOutlined />}>
+              {imageSkill.apiKeyConfigured ? imageSkill.maskedApiKey : '未配置'}
+            </Tag>
           </div>
-          <Tag color={imageSkill.apiKeyConfigured ? 'green' : 'orange'} icon={<KeyOutlined />}>
-            {imageSkill.maskedApiKey}
-          </Tag>
+          <div>
+            <span>默认尺寸</span>
+            <strong>{imageSkill.defaultSize}</strong>
+          </div>
+          <div>
+            <span>月度额度</span>
+            <strong>{formatNumber(imageSkill.monthlyLimit)} 次</strong>
+          </div>
         </div>
+        {!imageSkill.apiKeyConfigured && imageSkill.enabled ? (
+          <Alert className="skill-alert" message="图片技能已启用但缺少 KEY，请补齐后保存。" showIcon type="warning" />
+        ) : null}
         <ProForm
           grid
           initialValues={{
@@ -126,7 +135,7 @@ export default function SkillsPage() {
             fieldProps={{ autoComplete: 'new-password', className: 'secret-input', spellCheck: false }}
             label="API Key"
             name="apiKey"
-            placeholder={imageSkill.apiKeyConfigured ? '已配置，留空沿用' : '请输入图片接口 API Key'}
+            placeholder={imageSkill.apiKeyConfigured ? '已配置，留空沿用；输入新 KEY 会替换' : '请输入图片接口 API Key'}
           />
           <ProFormText colProps={{ md: 12, xs: 24 }} label="默认图片模型" name="defaultModel" />
           <ProFormSelect
@@ -149,27 +158,29 @@ export default function SkillsPage() {
         extra={
           <Space wrap>
             <Tag color={skillStatusColor}>{skillStatus}</Tag>
-            <Tag color={videoSkill.enabled ? 'green' : 'default'}>{videoSkill.enabled ? '技能已启用' : '技能未启用'}</Tag>
-            <Tag color={apiKeyConfigured ? 'green' : 'orange'}>{apiKeyConfigured ? 'KEY 已配置' : 'KEY 未配置'}</Tag>
           </Space>
         }
         title="视频生成 · 火山方舟 Seedance"
       >
-        <div className={apiKeyConfigured ? 'skill-key-status configured' : 'skill-key-status missing'}>
-          <div className="skill-key-icon">
-            {apiKeyConfigured ? <CheckCircleOutlined /> : <ExclamationCircleOutlined />}
+        <div className="skill-summary">
+          <div>
+            <span>默认模型</span>
+            <strong>{videoSkill.defaultModel}</strong>
           </div>
-          <div className="skill-key-copy">
-            <strong>{apiKeyConfigured ? 'API Key 已配置' : 'API Key 未配置'}</strong>
-            <span>
-              {apiKeyConfigured
-                ? `当前使用 ${videoSkill.maskedApiKey}，输入新 KEY 后会替换；留空保存会沿用现有 KEY。`
-                : '还没有保存可用的火山方舟 KEY。请输入 KEY 后再启用视频技能。'}
-            </span>
+          <div>
+            <span>API Key</span>
+            <Tag color={apiKeyConfigured ? 'green' : 'orange'} icon={<KeyOutlined />}>
+              {apiKeyConfigured ? videoSkill.maskedApiKey : '未配置'}
+            </Tag>
           </div>
-          <Tag color={apiKeyConfigured ? 'green' : 'orange'} icon={<KeyOutlined />}>
-            {videoSkill.maskedApiKey}
-          </Tag>
+          <div>
+            <span>默认规格</span>
+            <strong>{videoSkill.defaultRatio} · {videoSkill.defaultResolution}</strong>
+          </div>
+          <div>
+            <span>月度额度</span>
+            <strong>{formatNumber(videoSkill.monthlyLimit)} 次</strong>
+          </div>
         </div>
         {!apiKeyConfigured && videoSkill.enabled ? (
           <Alert className="skill-alert" message="当前显示启用但缺少 KEY，请重新保存配置。" showIcon type="warning" />
@@ -200,7 +211,7 @@ export default function SkillsPage() {
             fieldProps={{ autoComplete: 'new-password', className: 'secret-input', spellCheck: false }}
             label="API Key"
             name="apiKey"
-            placeholder={apiKeyConfigured ? '已配置，留空沿用' : '请输入火山方舟 API Key'}
+            placeholder={apiKeyConfigured ? '已配置，留空沿用；输入新 KEY 会替换' : '请输入火山方舟 API Key'}
           />
           <ProFormText colProps={{ md: 12, xs: 24 }} label="默认视频模型" name="defaultModel" />
           <ProFormDigit colProps={{ md: 6, xs: 12 }} label="默认时长（秒）" name="defaultDuration" />
