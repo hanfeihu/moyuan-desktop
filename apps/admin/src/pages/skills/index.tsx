@@ -123,9 +123,10 @@ export default function SkillsPage() {
           <ProFormText colProps={{ md: 12, xs: 24 }} label="Base URL" name="baseUrl" />
           <ProFormText.Password
             colProps={{ md: 12, xs: 24 }}
+            fieldProps={{ autoComplete: 'new-password', className: 'secret-input', spellCheck: false }}
             label="API Key"
             name="apiKey"
-            placeholder={imageSkill.apiKeyConfigured ? `已配置 ${imageSkill.maskedApiKey}，留空沿用` : '请输入图片接口 API Key'}
+            placeholder={imageSkill.apiKeyConfigured ? '已配置，留空沿用' : '请输入图片接口 API Key'}
           />
           <ProFormText colProps={{ md: 12, xs: 24 }} label="默认图片模型" name="defaultModel" />
           <ProFormSelect
@@ -196,9 +197,10 @@ export default function SkillsPage() {
           <ProFormText colProps={{ md: 12, xs: 24 }} label="Base URL" name="baseUrl" />
           <ProFormText.Password
             colProps={{ md: 12, xs: 24 }}
+            fieldProps={{ autoComplete: 'new-password', className: 'secret-input', spellCheck: false }}
             label="API Key"
             name="apiKey"
-            placeholder={apiKeyConfigured ? `已配置 ${videoSkill.maskedApiKey}，留空沿用` : '请输入火山方舟 API Key'}
+            placeholder={apiKeyConfigured ? '已配置，留空沿用' : '请输入火山方舟 API Key'}
           />
           <ProFormText colProps={{ md: 12, xs: 24 }} label="默认视频模型" name="defaultModel" />
           <ProFormDigit colProps={{ md: 6, xs: 12 }} label="默认时长（秒）" name="defaultDuration" />

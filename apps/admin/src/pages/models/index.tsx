@@ -20,14 +20,17 @@ export default function ModelsPage() {
   const snapshot = useAdminSnapshot()
   const [providers, setProviders] = useState<ModelProviderConfig[]>(snapshot.providers)
   const [activeProvider, setActiveProvider] = useState<ModelProviderConfig | undefined>()
+  const [formSeed, setFormSeed] = useState(0)
   const modelProvider = activeProvider ?? snapshot.modelProvider
   const tableProviders = activeProvider ? providers : snapshot.providers
+  const keyConfigured = Boolean(modelProvider.maskedApiKey && modelProvider.maskedApiKey !== '未配置')
 
   async function save(values: Record<string, unknown>) {
     try {
       const payload = await saveModelProvider(values)
       setActiveProvider(payload)
       setProviders((current) => [payload, ...current.filter((item) => item.id !== payload.id)])
+      setFormSeed((current) => current + 1)
       message.success('模型配置已保存')
     } catch {
       message.warning('后台 API 暂不可用，已保留页面配置草稿')
@@ -45,14 +48,16 @@ export default function ModelsPage() {
         <ProForm
           grid
           initialValues={{
+            apiKey: undefined,
             baseUrl: modelProvider.baseUrl,
             defaultModel: modelProvider.defaultModel,
             enabled: modelProvider.enabled,
             monthlyLimit: 5000000,
             provider: modelProvider.id,
           }}
-          key={`${modelProvider.id}-${modelProvider.baseUrl}-${modelProvider.defaultModel}`}
+          key={`${formSeed}-${modelProvider.id}-${modelProvider.baseUrl}-${modelProvider.defaultModel}`}
           onFinish={save}
+          preserve={false}
           submitter={{
             resetButtonProps: false,
             searchConfig: { submitText: '保存配置' },
@@ -71,9 +76,10 @@ export default function ModelsPage() {
           <ProFormText colProps={{ md: 8, xs: 24 }} label="Base URL" name="baseUrl" />
           <ProFormText.Password
             colProps={{ md: 8, xs: 24 }}
+            fieldProps={{ autoComplete: 'new-password', className: 'secret-input', spellCheck: false }}
             label="API Key"
             name="apiKey"
-            placeholder="后台保存，前端不展示明文"
+            placeholder={keyConfigured ? '已配置，留空沿用' : '请输入 API Key'}
           />
           <ProFormText colProps={{ md: 8, xs: 24 }} label="默认模型" name="defaultModel" />
           <ProFormDigit colProps={{ md: 8, xs: 24 }} label="月度 Token 额度" name="monthlyLimit" />

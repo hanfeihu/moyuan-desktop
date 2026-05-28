@@ -8,6 +8,7 @@ release
 **/src/.umi
 **/src/.umi-production
 apps/desktop/.moyuan-runtime
+apps/desktop/build/icon.iconset
 src/**/*.js
 src/**/*.d.ts
 .env

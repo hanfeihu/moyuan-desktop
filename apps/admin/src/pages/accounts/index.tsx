@@ -1,10 +1,9 @@
-import { MailOutlined, PlusCircleOutlined, ThunderboltOutlined, UserOutlined } from '@ant-design/icons'
-import { PageContainer, ProCard, ProForm, ProFormDigit, ProFormSwitch, ProFormText, ProTable, StatisticCard } from '@ant-design/pro-components'
-import { App, Button, InputNumber, Modal, Progress, Segmented, Space, Tag, Typography } from 'antd'
+import { PlusCircleOutlined, ThunderboltOutlined, UserOutlined } from '@ant-design/icons'
+import { PageContainer, ProCard, ProTable, StatisticCard } from '@ant-design/pro-components'
+import { App, Button, InputNumber, Modal, Progress, Segmented, Tag, Typography } from 'antd'
 import { useEffect, useMemo, useState } from 'react'
-import type { AccountUser, MailServiceConfig } from '@eaw/shared'
-import { defaultMailSettings } from '@/data/defaults'
-import { loadMailSettings, loadUsers, saveMailSettings, saveUserQuota, sendTestMail } from '@/services/admin'
+import type { AccountUser } from '@eaw/shared'
+import { loadUsers, saveUserQuota } from '@/services/admin'
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat('zh-CN').format(value)
@@ -12,16 +11,13 @@ function formatNumber(value: number) {
 
 export default function AccountsPage() {
   const { message } = App.useApp()
-  const [mailSettings, setMailSettings] = useState<MailServiceConfig>(defaultMailSettings)
   const [users, setUsers] = useState<AccountUser[]>([])
   const [quotaTarget, setQuotaTarget] = useState<AccountUser | null>(null)
   const [quotaMode, setQuotaMode] = useState<'grant' | 'set'>('grant')
   const [quotaAmount, setQuotaAmount] = useState<number | null>(100000)
   const [quotaBusy, setQuotaBusy] = useState(false)
-  const [testMailBusy, setTestMailBusy] = useState(false)
 
   useEffect(() => {
-    void loadMailSettings().then(setMailSettings)
     void loadUsers().then(setUsers)
   }, [])
 
@@ -37,28 +33,6 @@ export default function AccountsPage() {
       ),
     [users],
   )
-
-  async function save(values: Record<string, unknown>) {
-    try {
-      const payload = await saveMailSettings(values)
-      setMailSettings(payload)
-      message.success('邮箱服务配置已保存')
-    } catch (error) {
-      message.warning(error instanceof Error ? error.message : '邮箱服务配置保存失败')
-    }
-  }
-
-  async function testMail() {
-    setTestMailBusy(true)
-    try {
-      await sendTestMail()
-      message.success('测试邮件已发送到发件邮箱')
-    } catch (error) {
-      message.warning(error instanceof Error ? error.message : '测试邮件发送失败')
-    } finally {
-      setTestMailBusy(false)
-    }
-  }
 
   function openQuotaModal(user: AccountUser) {
     setQuotaTarget(user)
@@ -84,12 +58,7 @@ export default function AccountsPage() {
   return (
     <PageContainer
       className="admin-page"
-      extra={
-        <Button disabled={!mailSettings.enabled || !mailSettings.authCodeConfigured} icon={<MailOutlined />} loading={testMailBusy} onClick={testMail} type="primary">
-          发送测试邮件
-        </Button>
-      }
-      subTitle="管理员工邮箱注册登录、SMTP 授权码和企业 Token 额度"
+      subTitle="管理员工注册用户和企业 Token 额度"
       title="账号与用量"
     >
       <StatisticCard.Group className="dashboard-stats">
@@ -97,66 +66,6 @@ export default function AccountsPage() {
         <StatisticCard statistic={{ title: '已用 Token', value: usage.used }} footer={formatNumber(usage.used)} />
         <StatisticCard statistic={{ title: '总额度', value: usage.budget }} footer={formatNumber(usage.budget)} />
       </StatisticCard.Group>
-
-      <ProCard
-        className="section-card"
-        extra={
-          <Space wrap>
-            <Tag color={mailSettings.enabled ? 'green' : 'default'}>{mailSettings.enabled ? '邮箱已启用' : '邮箱未启用'}</Tag>
-            <Tag color={mailSettings.authCodeConfigured ? 'green' : 'orange'}>
-              {mailSettings.authCodeConfigured ? '授权码已配置' : '授权码未配置'}
-            </Tag>
-          </Space>
-        }
-        title="邮箱验证码服务"
-      >
-        <div className={mailSettings.authCodeConfigured ? 'skill-key-status configured' : 'skill-key-status missing'}>
-          <div className="skill-key-icon">
-            <MailOutlined />
-          </div>
-          <div className="skill-key-copy">
-            <strong>{mailSettings.authCodeConfigured ? 'QQ 邮箱授权码已配置' : 'QQ 邮箱授权码未配置'}</strong>
-            <span>
-              {mailSettings.authCodeConfigured
-                ? `当前使用 ${mailSettings.maskedAuthCode}，留空保存会沿用现有授权码。`
-                : '请填写 QQ 邮箱完整地址和授权码，客户端注册登录验证码会从这个邮箱发出。'}
-            </span>
-          </div>
-          <Tag color={mailSettings.authCodeConfigured ? 'green' : 'orange'}>{mailSettings.maskedAuthCode}</Tag>
-        </div>
-
-        <ProForm
-          grid
-          initialValues={{
-            authCode: '',
-            enabled: mailSettings.enabled,
-            fromName: mailSettings.fromName,
-            secure: mailSettings.secure,
-            smtpHost: mailSettings.smtpHost,
-            smtpPort: mailSettings.smtpPort,
-            username: mailSettings.username,
-          }}
-          key={`${mailSettings.username}-${mailSettings.maskedAuthCode}-${mailSettings.enabled}`}
-          onFinish={save}
-          submitter={{
-            resetButtonProps: false,
-            searchConfig: { submitText: '保存邮箱配置' },
-          }}
-        >
-          <ProFormText colProps={{ md: 8, xs: 24 }} label="SMTP 服务器" name="smtpHost" />
-          <ProFormDigit colProps={{ md: 4, xs: 12 }} label="端口" name="smtpPort" />
-          <ProFormSwitch colProps={{ md: 4, xs: 12 }} label="SSL" name="secure" />
-          <ProFormText colProps={{ md: 8, xs: 24 }} label="QQ 邮箱账号" name="username" placeholder="你的 QQ 邮箱完整地址" />
-          <ProFormText.Password
-            colProps={{ md: 8, xs: 24 }}
-            label="授权码"
-            name="authCode"
-            placeholder={mailSettings.authCodeConfigured ? `已配置 ${mailSettings.maskedAuthCode}，留空沿用` : '请输入 QQ 邮箱授权码'}
-          />
-          <ProFormText colProps={{ md: 4, xs: 12 }} label="发件名称" name="fromName" />
-          <ProFormSwitch colProps={{ md: 4, xs: 12 }} label="启用邮箱登录" name="enabled" />
-        </ProForm>
-      </ProCard>
 
       <ProCard className="section-card" title="用户与 Token 用量">
         <ProTable<AccountUser>

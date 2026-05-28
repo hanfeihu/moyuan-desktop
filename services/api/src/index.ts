@@ -34,7 +34,7 @@ function defaultVideoRatioForModel(model?: string): VideoRatio {
 const modelConfigSchema = z.object({
   name: z.string().min(1),
   baseUrl: z.string().url(),
-  apiKey: z.string().min(1),
+  apiKey: z.string().optional(),
   defaultModel: z.string().min(1),
   enabled: z.boolean(),
 })
@@ -1379,7 +1379,7 @@ app.put('/api/admin/model-provider', async (request, reply) => {
     id: 'blector',
     name: parsed.data.name,
     baseUrl: parsed.data.baseUrl,
-    maskedApiKey: maskKey(parsed.data.apiKey),
+    maskedApiKey: parsed.data.apiKey?.trim() ? maskKey(parsed.data.apiKey) : modelProvider.maskedApiKey,
     defaultModel: parsed.data.defaultModel,
     enabled: parsed.data.enabled,
   }

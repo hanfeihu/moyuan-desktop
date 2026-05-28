@@ -52,6 +52,22 @@ body {
   line-height: 1.7;
 }
 
+.secret-input input::placeholder,
+.secret-input .ant-input::placeholder {
+  color: #64748b;
+  font-weight: 560;
+  opacity: 1;
+}
+
+.secret-input.ant-input-affix-wrapper {
+  background: #fff;
+}
+
+.secret-input.ant-input-affix-wrapper:hover,
+.secret-input.ant-input-affix-wrapper-focused {
+  border-color: #1677ff;
+}
+
 .skill-key-status {
   display: grid;
   grid-template-columns: 38px minmax(0, 1fr) auto;

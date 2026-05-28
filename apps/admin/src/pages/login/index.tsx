@@ -57,7 +57,7 @@ export default function LoginPage() {
 
         <div className="admin-login-copy">
           <h1>{mode === 'setup' ? '初始化管理员' : '管理员登录'}</h1>
-          <p>{mode === 'setup' ? '首次部署需要创建管理员账号，后续可在后台管理模型、技能和额度。' : '登录后配置模型、技能、邮箱服务和员工 Token 额度。'}</p>
+          <p>{mode === 'setup' ? '首次部署需要创建管理员账号，后续可在后台管理模型、技能和额度。' : '登录后配置模型、技能、系统设置和员工 Token 额度。'}</p>
         </div>
 
         <Segmented

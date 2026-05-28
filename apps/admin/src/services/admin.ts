@@ -172,7 +172,7 @@ export async function loadAdminSnapshot(): Promise<AdminSnapshot> {
 export async function saveModelProvider(values: Record<string, unknown>) {
   const response = await adminFetch('/model-provider', {
     body: JSON.stringify({
-      apiKey: values.apiKey || 'configured-in-admin',
+      apiKey: values.apiKey,
       baseUrl: values.baseUrl,
       defaultModel: values.defaultModel,
       enabled: Boolean(values.enabled),

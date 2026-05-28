@@ -26,6 +26,7 @@ export default defineConfig({
     { path: '/skills', name: '技能配置', icon: 'VideoCameraOutlined', component: './skills' },
     { path: '/assets', name: '资源记录', icon: 'PictureOutlined', component: './assets' },
     { path: '/accounts', name: '账号与用量', icon: 'UserOutlined', component: './accounts' },
+    { path: '/settings', name: '系统设置', icon: 'SettingOutlined', component: './settings' },
     { path: '/organization', name: '组织同步', icon: 'TeamOutlined', component: './organization' },
     { path: '/runtime', name: 'Codex Runtime', icon: 'CodeOutlined', component: './runtime' },
     { path: '/security', name: '安全策略', icon: 'SafetyCertificateOutlined', component: './security' },
