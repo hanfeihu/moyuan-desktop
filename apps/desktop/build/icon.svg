@@ -19,7 +19,7 @@
       <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
     </radialGradient>
   </defs>
-  <g transform="translate(72 72) scale(.86)">
+  <g transform="translate(113 113) scale(.78)">
     <rect width="1024" height="1024" rx="230" fill="url(#base)"/>
     <rect x="34" y="34" width="956" height="956" rx="206" fill="none" stroke="#ffffff" stroke-opacity=".58" stroke-width="16"/>
     <path fill="url(#softLight)" d="M84 282c0-96 78-174 174-174h426c-211 56-362 200-445 394-34 80-53 163-58 248-63-77-97-171-97-275V282Z"/>
