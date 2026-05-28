@@ -58,6 +58,9 @@ export function Composer({
         value={prompt}
         onChange={(event) => onPromptChange(event.target.value)}
         onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing || event.keyCode === 229) {
+            return
+          }
           if (event.key === 'Enter' && !event.shiftKey) {
             event.preventDefault()
             onSubmit()
