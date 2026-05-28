@@ -9,6 +9,7 @@ export type ModelProviderConfig = {
   maskedApiKey: string
   defaultModel: string
   enabled: boolean
+  monthlyLimit: number
 }
 
 export const videoRatioOptions = ['adaptive', '16:9', '4:3', '1:1', '3:4', '9:16', '21:9'] as const
@@ -116,7 +117,10 @@ export type CodexTask = {
     role: 'user' | 'assistant' | 'tool' | 'system'
     content: string
     timestamp: string
+    eventId?: string
     itemId?: string
+    seq?: number
+    turnId?: string
   }>
 }
 
@@ -168,6 +172,8 @@ export type CodexTaskEvent = {
   role: 'user' | 'assistant' | 'tool' | 'system'
   content: string
   timestamp: string
+  seq?: number
   itemId?: string
+  turnId?: string
   raw?: unknown
 }

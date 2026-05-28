@@ -5,6 +5,7 @@ import nodemailer from 'nodemailer'
 import { createHash, createHmac, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { Readable } from 'node:stream'
 import { z } from 'zod'
 import type {
   AccountUser,
@@ -32,11 +33,13 @@ function defaultVideoRatioForModel(model?: string): VideoRatio {
 }
 
 const modelConfigSchema = z.object({
+  id: z.preprocess((value) => (value === '' ? undefined : value), z.string().min(1).optional()),
   name: z.string().min(1),
   baseUrl: z.string().url(),
   apiKey: z.string().optional(),
   defaultModel: z.string().min(1),
   enabled: z.boolean(),
+  monthlyLimit: z.coerce.number().int().min(0),
 })
 
 const videoSkillConfigSchema = z.object({
@@ -126,6 +129,9 @@ const userIdParamSchema = z.object({
 type StoredAdminConfig = {
   adminAuth?: AdminAuthConfig
   adminSessions?: AdminSession[]
+  modelProvider?: Omit<ModelProviderConfig, 'maskedApiKey'>
+  modelProviders?: Array<Omit<ModelProviderConfig, 'maskedApiKey'>>
+  modelProviderApiKeys?: Record<string, string>
   imageSkillApiKey?: string
   imageSkill?: Partial<Omit<ImageSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>> & Partial<Pick<ImageSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>>
   videoSkillApiKey?: string
@@ -167,17 +173,14 @@ const employees: Employee[] = [
   { id: 'u-1003', name: '周然', department: '产品部', title: '产品经理', source: 'dingtalk', manager: '陈立' },
 ]
 
-let modelProvider: ModelProviderConfig = {
-  id: 'blector',
-  name: 'Blector 中转',
-  baseUrl: process.env.AI_BASE_URL ?? 'https://ai.blector.com/v1',
-  maskedApiKey: maskKey(process.env.AI_API_KEY),
-  defaultModel: process.env.AI_MODEL ?? 'gpt-5-codex',
-  enabled: true,
-}
-
 const configFile = process.env.ADMIN_CONFIG_FILE ?? './data/admin-config.json'
 let storedConfig = await loadStoredConfig()
+let modelProviderApiKeys: Record<string, string> = {
+  blector: process.env.AI_API_KEY ?? '',
+  ...(storedConfig.modelProviderApiKeys ?? {}),
+}
+let modelProviders: ModelProviderConfig[] = buildModelProviders(storedConfig)
+let modelProvider: ModelProviderConfig = activeModelProvider()
 let imageSkillApiKey = storedConfig.imageSkillApiKey ?? process.env.IMAGE_API_KEY ?? ''
 let imageSkill: ImageSkillConfig = buildImageSkillConfig(storedConfig.imageSkill)
 let videoSkillApiKey = storedConfig.videoSkillApiKey ?? process.env.VOLCENGINE_ARK_API_KEY ?? ''
@@ -226,6 +229,8 @@ async function persistStoredConfig() {
       {
         imageSkill: toStoredImageSkillConfig(imageSkill),
         imageSkillApiKey,
+        modelProviderApiKeys,
+        modelProviders: modelProviders.map(toStoredModelProviderConfig),
         videoSkill: toStoredVideoSkillConfig(videoSkill),
         videoSkillApiKey,
         adminAuth,
@@ -246,6 +251,7 @@ async function persistStoredConfig() {
 
 function needsStoredConfigMigration(config: StoredAdminConfig) {
   return (
+    !config.modelProviders ||
     !config.imageSkill ||
     !config.videoSkill ||
     'maskedApiKey' in config.imageSkill ||
@@ -253,6 +259,89 @@ function needsStoredConfigMigration(config: StoredAdminConfig) {
     'maskedApiKey' in config.videoSkill ||
     'apiKeyConfigured' in config.videoSkill
   )
+}
+
+function toStoredModelProviderConfig(provider: ModelProviderConfig): Omit<ModelProviderConfig, 'maskedApiKey'> {
+  return {
+    id: provider.id,
+    name: provider.name,
+    baseUrl: provider.baseUrl,
+    defaultModel: provider.defaultModel,
+    enabled: provider.enabled,
+    monthlyLimit: provider.monthlyLimit,
+  }
+}
+
+function defaultModelProviders(): ModelProviderConfig[] {
+  return [
+    {
+      id: 'blector',
+      name: 'Blector 中转',
+      baseUrl: process.env.AI_BASE_URL ?? 'https://ai.blector.com/v1',
+      maskedApiKey: maskKey(modelProviderApiKeys.blector),
+      defaultModel: process.env.AI_MODEL ?? 'gpt-5.5',
+      enabled: true,
+      monthlyLimit: 5000000,
+    },
+    {
+      id: 'local',
+      name: '本地私有模型',
+      baseUrl: 'http://model-gateway:8000/v1',
+      maskedApiKey: maskKey(modelProviderApiKeys.local),
+      defaultModel: 'qwen3-coder',
+      enabled: false,
+      monthlyLimit: 5000000,
+    },
+  ]
+}
+
+function normalizeModelProviders(providers: ModelProviderConfig[]) {
+  const seen = new Set<string>()
+  const unique = providers.filter((provider) => {
+    if (seen.has(provider.id)) return false
+    seen.add(provider.id)
+    return true
+  })
+  const enabledIndex = unique.findIndex((provider) => provider.enabled)
+  return unique.map((provider, index) => ({
+    ...provider,
+    maskedApiKey: maskKey(modelProviderApiKeys[provider.id]),
+    enabled: enabledIndex < 0 ? index === 0 : index === enabledIndex,
+    monthlyLimit: provider.monthlyLimit ?? 5000000,
+  }))
+}
+
+function buildModelProviders(config: StoredAdminConfig): ModelProviderConfig[] {
+  const stored = config.modelProviders ?? (config.modelProvider ? [config.modelProvider] : undefined)
+  if (!stored?.length) return normalizeModelProviders(defaultModelProviders())
+
+  return normalizeModelProviders(
+    stored.map((provider) => ({
+      ...provider,
+      maskedApiKey: maskKey(modelProviderApiKeys[provider.id]),
+      monthlyLimit: provider.monthlyLimit ?? 5000000,
+    })),
+  )
+}
+
+function activeModelProvider() {
+  return modelProviders.find((provider) => provider.enabled) ?? modelProviders[0]
+}
+
+function refreshActiveModelProvider() {
+  modelProviders = normalizeModelProviders(modelProviders)
+  modelProvider = activeModelProvider()
+}
+
+function createModelProviderId(name: string) {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  const base = slug || 'provider'
+  if (!modelProviders.some((provider) => provider.id === base)) return base
+  return `${base}-${randomUUID().slice(0, 8)}`
 }
 
 function toStoredImageSkillConfig(skill: ImageSkillConfig): Omit<ImageSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'> {
@@ -451,6 +540,7 @@ app.addHook('preHandler', async (request, reply) => {
   if (pathname.startsWith('/api/admin/auth/')) return
   if (pathname.startsWith('/api/admin/skills/')) return
   if (pathname === '/api/admin/desktop/bootstrap') return
+  if (pathname.startsWith('/api/admin/model-proxy/')) return
   if (pathname === '/api/admin/me' || pathname === '/api/admin/me/usage') return
 
   if (!adminAuth) return
@@ -523,10 +613,13 @@ function buildDesktopBootstrap() {
     runtime: {
       codexRuntimeUrl: process.env.CODEX_RUNTIME_URL ?? 'http://localhost:4100',
       modelProvider: {
+        id: modelProvider.id,
         name: modelProvider.name,
         baseUrl: modelProvider.baseUrl,
         defaultModel: modelProvider.defaultModel,
         enabled: modelProvider.enabled,
+        apiKeyConfigured: Boolean(modelProviderApiKeys[modelProvider.id]),
+        monthlyLimit: modelProvider.monthlyLimit,
       },
       skills: {
         imageGeneration: {
@@ -826,6 +919,58 @@ async function callVideoSkillApi(url: string, init: RequestInit) {
   return { ok: response.ok, status: response.status, payload }
 }
 
+const hopByHopHeaders = new Set(['connection', 'content-length', 'host', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade'])
+
+function modelProxyTarget(pathname: string, query = '') {
+  const upstreamBase = modelProvider.baseUrl.replace(/\/$/, '')
+  let upstreamPath = pathname.replace(/^\/api\/admin\/model-proxy/, '') || '/'
+  if (upstreamBase.endsWith('/v1') && upstreamPath.startsWith('/v1/')) {
+    upstreamPath = upstreamPath.slice('/v1'.length)
+  }
+  return `${upstreamBase}${upstreamPath}${query ? `?${query}` : ''}`
+}
+
+async function proxyModelProvider(request: { body?: unknown; headers: Record<string, unknown>; method: string; url: string }, reply: any) {
+  const user = getUserByToken(getAuthToken(request))
+  if (!user) return unauthorized(reply)
+  if (user.status !== 'active') return reply.status(403).send({ error: '账号已停用，请联系管理员' })
+  if (!modelProvider.enabled || !modelProviderApiKeys[modelProvider.id]) {
+    return reply.status(400).send({ error: '模型通道未启用或未配置 KEY，请管理员在后台检查模型设置' })
+  }
+
+  const [pathname, query = ''] = request.url.split('?')
+  const target = modelProxyTarget(pathname, query)
+  const headers = new Headers()
+  const contentType = request.headers['content-type']
+  const accept = request.headers.accept
+  if (typeof contentType === 'string') headers.set('Content-Type', contentType)
+  if (typeof accept === 'string') headers.set('Accept', accept)
+  headers.set('Authorization', `Bearer ${modelProviderApiKeys[modelProvider.id]}`)
+
+  const body =
+    request.method === 'GET' || request.method === 'HEAD'
+      ? undefined
+      : typeof request.body === 'string'
+        ? request.body
+        : request.body == null
+          ? undefined
+          : JSON.stringify(request.body)
+
+  const response = await fetch(target, {
+    body,
+    headers,
+    method: request.method,
+  })
+
+  reply.code(response.status)
+  response.headers.forEach((value, key) => {
+    if (!hopByHopHeaders.has(key.toLowerCase())) reply.header(key, value)
+  })
+
+  if (!response.body) return reply.send(null)
+  return reply.send(Readable.fromWeb(response.body as unknown as Parameters<typeof Readable.fromWeb>[0]))
+}
+
 app.get('/health', async () => ({
   ok: true,
   service: 'enterprise-api',
@@ -871,6 +1016,10 @@ app.get('/api/admin/admin-auth/me', async (request, reply) => {
 })
 
 app.get('/api/admin/model-provider', async () => ({ data: modelProvider }))
+
+app.get('/api/admin/model-providers', async () => ({ data: modelProviders }))
+
+app.all('/api/admin/model-proxy/*', proxyModelProvider)
 
 app.get('/api/admin/image-skill', async () => ({ data: imageSkill }))
 
@@ -1375,16 +1524,53 @@ app.put('/api/admin/model-provider', async (request, reply) => {
     return reply.status(400).send({ error: '模型配置不完整', detail: parsed.error.flatten() })
   }
 
-  modelProvider = {
-    id: 'blector',
-    name: parsed.data.name,
-    baseUrl: parsed.data.baseUrl,
-    maskedApiKey: parsed.data.apiKey?.trim() ? maskKey(parsed.data.apiKey) : modelProvider.maskedApiKey,
-    defaultModel: parsed.data.defaultModel,
-    enabled: parsed.data.enabled,
+  const id = parsed.data.id?.trim() || createModelProviderId(parsed.data.name)
+  if (parsed.data.apiKey?.trim()) {
+    modelProviderApiKeys = { ...modelProviderApiKeys, [id]: parsed.data.apiKey.trim() }
   }
 
-  return { data: modelProvider }
+  const nextProvider: ModelProviderConfig = {
+    id,
+    name: parsed.data.name,
+    baseUrl: parsed.data.baseUrl,
+    maskedApiKey: maskKey(modelProviderApiKeys[id]),
+    defaultModel: parsed.data.defaultModel,
+    enabled: parsed.data.enabled,
+    monthlyLimit: parsed.data.monthlyLimit,
+  }
+
+  modelProviders = [
+    nextProvider,
+    ...modelProviders.filter((provider) => provider.id !== id),
+  ].map((provider) => ({
+    ...provider,
+    enabled: nextProvider.enabled ? provider.id === id : provider.enabled,
+  }))
+  refreshActiveModelProvider()
+  await persistStoredConfig()
+
+  return { data: { active: modelProvider, providers: modelProviders, provider: nextProvider } }
+})
+
+app.delete('/api/admin/model-provider/:id', async (request, reply) => {
+  const params = z.object({ id: z.string().min(1) }).parse(request.params)
+
+  if (modelProviders.length <= 1) {
+    return reply.status(400).send({ error: '至少保留一个模型通道' })
+  }
+
+  const removed = modelProviders.find((provider) => provider.id === params.id)
+  if (!removed) return reply.status(404).send({ error: '模型通道不存在' })
+
+  modelProviders = modelProviders.filter((provider) => provider.id !== params.id)
+  delete modelProviderApiKeys[params.id]
+  if (removed.enabled && modelProviders.length) {
+    modelProviders = modelProviders.map((provider, index) => ({ ...provider, enabled: index === 0 }))
+  }
+  refreshActiveModelProvider()
+  await persistStoredConfig()
+
+  return { data: { active: modelProvider, providers: modelProviders } }
 })
 
 app.get('/api/admin/employees', async () => ({

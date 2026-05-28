@@ -7,8 +7,9 @@ export const defaultProviders: ModelProviderConfig[] = [
     name: 'Blector 中转',
     baseUrl: 'https://ai.blector.com/v1',
     maskedApiKey: 'sk-************************demo',
-    defaultModel: 'gpt-5-codex',
+    defaultModel: 'gpt-5.5',
     enabled: true,
+    monthlyLimit: 5000000,
   },
   {
     id: 'local',
@@ -17,6 +18,7 @@ export const defaultProviders: ModelProviderConfig[] = [
     maskedApiKey: '未配置',
     defaultModel: 'qwen3-coder',
     enabled: false,
+    monthlyLimit: 5000000,
   },
 ]
 

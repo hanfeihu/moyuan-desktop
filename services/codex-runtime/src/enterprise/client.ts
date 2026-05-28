@@ -1,4 +1,4 @@
-import { defaultEnterpriseApiBase } from '../config.js'
+import { defaultEnterpriseApiBase, getModelConfig, type ModelRuntimeConfig } from '../config.js'
 import { localSkillSet } from '../skills/catalog.js'
 import type { EnterpriseSkillSet } from '../skills/contracts.js'
 
@@ -17,9 +17,25 @@ export function enterpriseEndpoint(baseUrl: string, pathname: string) {
   return `${baseUrl.replace(/\/$/, '')}/${pathname.replace(/^\//, '')}`
 }
 
-export async function loadEnterpriseSkillSet(authToken?: string, baseUrl = defaultEnterpriseApiBase): Promise<EnterpriseSkillSet> {
+function providerId(value?: string) {
+  const normalized = (value ?? 'moyuan-enterprise')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return normalized || 'moyuan-enterprise'
+}
+
+function modelProxyBaseUrl(baseUrl: string) {
+  return enterpriseEndpoint(baseUrl, '/model-proxy/v1')
+}
+
+export async function loadEnterpriseRuntimeConfig(
+  authToken?: string,
+  baseUrl = defaultEnterpriseApiBase,
+): Promise<{ skills: EnterpriseSkillSet; modelConfig: ModelRuntimeConfig }> {
   const skills = localSkillSet()
-  if (!authToken) return skills
+  let modelConfig = getModelConfig()
+  if (!authToken) return { skills, modelConfig }
 
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 5000)
@@ -31,6 +47,12 @@ export async function loadEnterpriseSkillSet(authToken?: string, baseUrl = defau
     const payload = (await response.json().catch(() => ({}))) as {
       data?: {
         runtime?: {
+          modelProvider?: {
+            id?: string
+            name?: string
+            defaultModel?: string
+            enabled?: boolean
+          }
           skills?: {
             imageGeneration?: EnterpriseSkillSet['imageGeneration']
             videoGeneration?: EnterpriseSkillSet['videoGeneration']
@@ -46,13 +68,29 @@ export async function loadEnterpriseSkillSet(authToken?: string, baseUrl = defau
     if (response.ok && videoGeneration) {
       skills.videoGeneration = videoGeneration
     }
+    const modelProvider = payload.data?.runtime?.modelProvider
+    if (response.ok && modelProvider?.enabled !== false && modelProvider?.defaultModel) {
+      modelConfig = {
+        providerId: providerId(modelProvider.id ?? modelProvider.name),
+        providerName: modelProvider.name ?? 'Moyuan Enterprise Model Proxy',
+        baseUrl: modelProxyBaseUrl(baseUrl),
+        apiKeyConfigured: true,
+        apiKey: authToken,
+        envKey: 'OPENAI_API_KEY',
+        defaultModel: modelProvider.defaultModel,
+      }
+    }
   } catch {
     // Keep local tools available if the enterprise bootstrap endpoint is temporarily unavailable.
   } finally {
     clearTimeout(timeout)
   }
 
-  return skills
+  return { skills, modelConfig }
+}
+
+export async function loadEnterpriseSkillSet(authToken?: string, baseUrl = defaultEnterpriseApiBase): Promise<EnterpriseSkillSet> {
+  return (await loadEnterpriseRuntimeConfig(authToken, baseUrl)).skills
 }
 
 export async function validateEnterpriseQuota(authToken?: string, baseUrl = defaultEnterpriseApiBase) {
@@ -85,18 +123,26 @@ export async function validateEnterpriseQuota(authToken?: string, baseUrl = defa
   }
 }
 
-export async function enterpriseJson(pathname: string, authToken: string, baseUrl: string, init: RequestInit = {}) {
+export async function enterpriseJson(pathname: string, authToken: string, baseUrl: string, init: RequestInit & { timeoutMs?: number } = {}) {
+  const { timeoutMs = 30000, ...requestInit } = init
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
   const response = await fetch(enterpriseEndpoint(baseUrl, pathname), {
-    ...init,
+    ...requestInit,
     headers: {
       Authorization: `Bearer ${authToken}`,
       'Content-Type': 'application/json',
-      ...(init.headers ?? {}),
+      ...(requestInit.headers ?? {}),
     },
+    signal: requestInit.signal ?? controller.signal,
   })
-  const payload = (await response.json().catch(() => ({}))) as { data?: unknown; error?: string; message?: string; upstream?: unknown }
-  if (!response.ok) {
-    throw new Error(payload.error ?? payload.message ?? `企业技能代理返回 ${response.status}`)
+  try {
+    const payload = (await response.json().catch(() => ({}))) as { data?: unknown; error?: string; message?: string; upstream?: unknown }
+    if (!response.ok) {
+      throw new Error(payload.error ?? payload.message ?? `企业技能代理返回 ${response.status}`)
+    }
+    return payload.data
+  } finally {
+    clearTimeout(timeout)
   }
-  return payload.data
 }

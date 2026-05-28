@@ -20,3 +20,4 @@ src/**/*.d.ts
 *.key
 .DS_Store
 npm-debug.log*
+.playwright-cli/

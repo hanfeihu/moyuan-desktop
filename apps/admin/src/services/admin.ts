@@ -50,6 +50,18 @@ function normalizeVideoSkill(skill?: Partial<VideoSkillConfig> | null): VideoSki
   }
 }
 
+function normalizeProvider(provider: Partial<ModelProviderConfig>): ModelProviderConfig {
+  return {
+    id: provider.id ?? 'blector',
+    name: provider.name ?? 'Blector 中转',
+    baseUrl: provider.baseUrl ?? 'https://ai.blector.com/v1',
+    maskedApiKey: provider.maskedApiKey ?? '未配置',
+    defaultModel: provider.defaultModel ?? 'gpt-5.5',
+    enabled: provider.enabled ?? false,
+    monthlyLimit: provider.monthlyLimit ?? 5000000,
+  }
+}
+
 export function getAdminToken() {
   if (typeof window === 'undefined') return ''
   return window.localStorage.getItem(adminTokenStorageKey) ?? ''
@@ -76,7 +88,7 @@ function redirectToLogin() {
 
 async function adminFetch(path: string, init: RequestInit = {}, auth = true) {
   const headers = new Headers(init.headers)
-  headers.set('Content-Type', headers.get('Content-Type') ?? 'application/json')
+  if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   const token = getAdminToken()
   if (auth && token) headers.set('Authorization', `Bearer ${token}`)
   const response = await fetch(`${apiBase}${path}`, { ...init, headers })
@@ -139,18 +151,20 @@ export function policyText(policy: EnterprisePolicy): PolicyView {
 
 export async function loadAdminSnapshot(): Promise<AdminSnapshot> {
   try {
-    const [modelPayload, employeePayload, policyPayload, imageSkillPayload, videoSkillPayload] = await Promise.all([
+    const [modelPayload, providersPayload, employeePayload, policyPayload, imageSkillPayload, videoSkillPayload] = await Promise.all([
       getJson<ModelProviderConfig>('/model-provider'),
+      getJson<ModelProviderConfig[]>('/model-providers'),
       getJson<Employee[]>('/employees'),
       getJson<EnterprisePolicy>('/policy'),
       getJson<ImageSkillConfig>('/image-skill'),
       getJson<VideoSkillConfig>('/video-skill'),
     ])
-    const providers = [modelPayload.data, ...defaultProviders.filter((item) => item.id !== modelPayload.data.id)]
+    const providers = providersPayload.data.length ? providersPayload.data.map(normalizeProvider) : [normalizeProvider(modelPayload.data)]
+    const modelProvider = providers.find((item) => item.enabled) ?? normalizeProvider(modelPayload.data)
     return {
       apiState: 'online',
       employees: employeePayload.data,
-      modelProvider: modelPayload.data,
+      modelProvider,
       policy: policyText(policyPayload.data),
       providers,
       imageSkill: normalizeImageSkill(imageSkillPayload.data),
@@ -172,18 +186,36 @@ export async function loadAdminSnapshot(): Promise<AdminSnapshot> {
 export async function saveModelProvider(values: Record<string, unknown>) {
   const response = await adminFetch('/model-provider', {
     body: JSON.stringify({
+      id: values.id,
       apiKey: values.apiKey,
       baseUrl: values.baseUrl,
       defaultModel: values.defaultModel,
       enabled: Boolean(values.enabled),
-      name: values.provider === 'local' ? '本地私有模型' : 'Blector 中转',
+      monthlyLimit: values.monthlyLimit,
+      name: values.name,
     }),
     headers: { 'Content-Type': 'application/json' },
     method: 'PUT',
   })
-  const payload = (await response.json()) as { data?: ModelProviderConfig; error?: string }
+  const payload = (await response.json()) as { data?: { active: ModelProviderConfig; provider: ModelProviderConfig; providers: ModelProviderConfig[] }; error?: string }
   if (!response.ok || !payload.data) throw new Error(payload.error ?? '保存失败')
-  return payload.data
+  return {
+    active: normalizeProvider(payload.data.active),
+    provider: normalizeProvider(payload.data.provider),
+    providers: payload.data.providers.map(normalizeProvider),
+  }
+}
+
+export async function deleteModelProvider(id: string) {
+  const response = await adminFetch(`/model-provider/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+  const payload = (await response.json()) as { data?: { active: ModelProviderConfig; providers: ModelProviderConfig[] }; error?: string; message?: string }
+  if (!response.ok || !payload.data) throw new Error(payload.error ?? payload.message ?? '删除失败')
+  return {
+    active: normalizeProvider(payload.data.active),
+    providers: payload.data.providers.map(normalizeProvider),
+  }
 }
 
 export async function saveVideoSkill(values: Record<string, unknown>) {

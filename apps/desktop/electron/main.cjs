@@ -18,9 +18,30 @@ const startupLogPath = path.join(app.getPath('temp'), 'moyuan-desktop-startup.lo
 app.setName('墨渊')
 app.setPath('userData', path.join(app.getPath('appData'), 'Moyuan Desktop'))
 
+function mainLogPath() {
+  return path.join(app.getPath('userData'), 'logs', 'electron-main.ndjson')
+}
+
 function logStartup(message, error) {
   const suffix = error ? ` ${error.stack || error.message || String(error)}` : ''
-  fs.appendFileSync(startupLogPath, `[${new Date().toISOString()}] ${message}${suffix}\n`)
+  const timestamp = new Date().toISOString()
+  fs.appendFileSync(startupLogPath, `[${timestamp}] ${message}${suffix}\n`)
+  try {
+    const filePath = mainLogPath()
+    fs.mkdirSync(path.dirname(filePath), { recursive: true })
+    fs.appendFileSync(
+      filePath,
+      `${JSON.stringify({
+        details: error ? { message: error.message || String(error), stack: error.stack } : undefined,
+        event: message,
+        level: error ? 'error' : 'info',
+        source: 'electron-main',
+        timestamp,
+      })}\n`,
+    )
+  } catch {
+    // Startup logging must never block the app from opening.
+  }
 }
 
 function isPackagedApp() {
@@ -29,6 +50,17 @@ function isPackagedApp() {
 
 function getAppRoot() {
   return isPackagedApp() ? app.getAppPath() : path.join(__dirname, '../../..')
+}
+
+function getIconPath() {
+  const appRoot = getAppRoot()
+  const candidates = [
+    path.join(appRoot, 'apps/desktop/build/icon.png'),
+    path.join(appRoot, 'build/icon.png'),
+    path.join(appRoot, 'build/icon.icns'),
+    path.join(process.resourcesPath ?? '', 'icon.png'),
+  ]
+  return candidates.find((filePath) => filePath && fs.existsSync(filePath))
 }
 
 function parseEnvFile(filePath) {
@@ -175,6 +207,8 @@ async function createWindow() {
   logStartup('createWindow begin')
   const runtime = await startRuntime()
   logStartup(`createWindow runtime url=${runtime.url}`)
+  const iconPath = getIconPath()
+  if (iconPath && app.dock) app.dock.setIcon(iconPath)
   const win = new BrowserWindow({
     width: 1480,
     height: 940,
@@ -184,6 +218,7 @@ async function createWindow() {
     backgroundColor: '#f7f7f5',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 18, y: 18 },
+    icon: iconPath,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,

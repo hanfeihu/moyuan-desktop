@@ -12,10 +12,22 @@ import Fastify from 'fastify'
 import { z } from 'zod'
 import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
 import { defaultEnterpriseApiBase as enterpriseApiBase, getImageConfig, getModelConfig } from './config.js'
-import { enterpriseJson, loadEnterpriseSkillSet, validateEnterpriseQuota } from './enterprise/client.js'
-import { buildSkillInstructionBlock, isLikelyToolCallFragment, isMoyuanToolCallContent, parseMoyuanToolCall } from './skills/contracts.js'
+import { enterpriseJson, loadEnterpriseRuntimeConfig, validateEnterpriseQuota } from './enterprise/client.js'
+import { buildSkillInstructionBlock, isLikelyToolCallFragment, parseMoyuanToolCall } from './skills/contracts.js'
 import type { RuntimeRunOptions } from './skills/contracts.js'
 import { runImageGenerationTool, runMoyuanToolCall } from './skills/executor.js'
+import { createRuntimeLogger } from './observability/logger.js'
+import {
+  applyTaskLifecycleEvent,
+  canReuseLifecycleSession,
+  finishTaskLifecycle,
+  hasFinalAssistantReply,
+  hydrateTaskLifecycle,
+  resetTaskLifecycleForNewTurn,
+  setTaskLifecyclePhase,
+} from './tasks/lifecycle.js'
+import { finalAssistantContent, friendlyRuntimeMessage, isRuntimeFailureNotice, mergeAssistantContent, runtimeFailureDiagnostic, sanitizeTask } from './tasks/sanitize.js'
+import { approvalSchema, clientLogSchema, forkSchema, imageGenerationSchema, taskSchema } from './tasks/schemas.js'
 import type { TaskRecord } from './tasks/types.js'
 
 function redactRequestUrl(rawUrl = '') {
@@ -86,40 +98,11 @@ app.addHook('onRequest', async (request, reply) => {
   return reply.status(401).send({ error: '未授权的本地 Runtime 请求' })
 })
 
-const taskSchema = z.object({
-  prompt: z.string().min(1),
-  workspace: z.string().default(process.cwd()),
-  employeeId: z.string().min(1),
-  enterpriseApiBase: z.string().url().optional(),
-  enterpriseAuthToken: z.string().optional(),
-  parentTaskId: z.string().optional(),
-  sessionId: z.string().optional(),
-})
-
-const approvalSchema = z.object({
-  taskId: z.string(),
-  decision: z.enum(['allow_once', 'deny']),
-  reason: z.string().optional(),
-})
-
-const forkSchema = z.object({
-  prompt: z.string().optional(),
-})
-
-const imageGenerationSchema = z.object({
-  prompt: z.string().min(1),
-  workspace: z.string().default(process.cwd()),
-  employeeId: z.string().min(1),
-  enterpriseApiBase: z.string().url().optional(),
-  enterpriseAuthToken: z.string().optional(),
-  model: z.string().optional(),
-  size: z.enum(['1024x1024', '1024x1536', '1536x1024']).default('1024x1024'),
-})
-
 const records = new Map<string, TaskRecord>()
 const runtimeRoot = process.env.MOYUAN_RUNTIME_HOME ?? path.join(tmpdir(), 'moyuan-runtime')
 const storePath = path.join(runtimeRoot, 'sessions.json')
 const memoryPath = path.join(runtimeRoot, 'workspace-memory.json')
+const runtimeLogger = createRuntimeLogger(runtimeRoot)
 const workspaceMemory = new Map<string, string>()
 const mutedStderrPatterns = [
   'failed to warm featured plugin ids cache',
@@ -133,127 +116,247 @@ const mutedStderrPatterns = [
   'Reconnecting...',
 ]
 
-function isInternalCodexJson(content: string) {
-  const text = content.trim()
-  if (!text.startsWith('{') || !text.endsWith('}')) return false
+const maxVisibleToolOutput = 6000
+const maxContextBlockLength = 9000
+const maxCommandHistoryItemLength = 1800
+const maxDiffContextLength = 2400
+const codexOperatingGuidance = [
+  '项目分析和排障时优先使用 rg、rg --files、精确目录和小范围读取。',
+  '默认避开 node_modules、dist、release、build、coverage、.git、package-lock.json 等大型依赖或构建产物，除非用户明确要求。',
+  '命令输出很长时先总结关键路径和结论，再按需继续读取，不要把大段无关输出放进上下文。',
+].join('\n')
 
-  try {
-    const payload = JSON.parse(text) as { type?: unknown; item?: { type?: unknown } }
-    const type = typeof payload.type === 'string' ? payload.type : ''
-    const itemType = payload.item && typeof payload.item.type === 'string' ? payload.item.type : ''
-
-    return (
-      type.startsWith('item.') ||
-      type.startsWith('turn.') ||
-      type.includes('delta') ||
-      itemType === 'web_search' ||
-      itemType === 'reasoning' ||
-      itemType === 'command_execution'
-    )
-  } catch {
-    return text.includes('"type":"item.') || text.includes('"type":"web_search"')
-  }
+function logRuntime(event: string, details?: unknown, level: 'debug' | 'info' | 'warn' | 'error' = 'info') {
+  void runtimeLogger.append({ details, event, level, source: 'codex-runtime' })
 }
 
-function isMutedTranscriptStatus(content: string) {
-  const text = content.trim()
-  return (
-    /^正在生成图片[.。…]*$/.test(text) ||
-    text.startsWith('当前已接入静态图片生成，还没有接入视频或动图生成') ||
-    text === '正在调用视频生成技能...' ||
-    text === '视频任务已创建，正在生成...' ||
-    text === '视频仍在生成中' ||
-    text.startsWith('当前状态：')
+function logTask(
+  record: TaskRecord,
+  event: string,
+  details?: unknown,
+  level: 'debug' | 'info' | 'warn' | 'error' = 'info',
+) {
+  void runtimeLogger.append(
+    {
+      details,
+      event,
+      level,
+      sessionId: record.task.sessionId,
+      source: 'codex-runtime',
+      taskId: record.task.id,
+      workspace: record.task.workspace,
+    },
+    'runtime',
   )
 }
 
-function sanitizeTask(task: CodexTask): CodexTask {
-  const transcript = compactTranscript(
-    task.transcript
-      .filter((item) => {
-        const content = item.content.trim()
-        return content && !isInternalCodexJson(content) && !isMoyuanToolCallContent(content) && !isMutedTranscriptStatus(content) && !isRawRuntimeFailure(content)
-      })
-      .map((item) => ({ ...item, content: friendlyRuntimeMessage(item.content) })),
-  )
+function previewLogContent(content: string, maxLength = 240) {
+  const compact = content.replace(/\s+/g, ' ').trim()
+  if (compact.length <= maxLength) return compact
+  return `${compact.slice(0, maxLength)}...`
+}
 
-  if (task.status === 'failed' && transcript.length === 1 && transcript[0]?.role === 'user') {
-    transcript.push({
-      role: 'system',
-      content: '模型服务暂时不可用，请检查模型密钥或稍后重试。',
-      timestamp: task.updatedAt ?? transcript[0].timestamp,
-    })
+function truncateMiddle(value: string, maxLength: number) {
+  if (value.length <= maxLength) return value
+  const headLength = Math.floor(maxLength * 0.65)
+  const tailLength = Math.max(0, maxLength - headLength - 80)
+  return `${value.slice(0, headLength)}\n\n... 输出过长，已截断 ${value.length - headLength - tailLength} 个字符 ...\n\n${value.slice(-tailLength)}`
+}
+
+function boundedJoin(items: string[], maxLength: number) {
+  const result: string[] = []
+  let length = 0
+  for (const item of items) {
+    const next = truncateMiddle(item, maxCommandHistoryItemLength)
+    if (length + next.length > maxLength) break
+    result.push(next)
+    length += next.length
   }
+  return result.join('\n\n')
+}
 
+function isRuntimeFailureContent(content: string) {
+  const text = content.trim()
+  if (!text || text.startsWith('$ ')) return false
+  return isRuntimeFailureNotice(text)
+}
+
+function buildBaseInstructions(skillInstructions: string) {
+  return [codexOperatingGuidance, skillInstructions].filter(Boolean).join('\n\n')
+}
+
+function buildPromptWithContext(prompt: string, context: {
+  commandHistory?: string[]
+  diffSummary?: string
+  memory?: string
+  skillInstructions: string
+}) {
+  const commandContext = boundedJoin(context.commandHistory?.slice(-8) ?? [], maxContextBlockLength)
+  const contextBlock = [
+    context.skillInstructions,
+    codexOperatingGuidance,
+    context.memory ? `工作区记忆:\n${truncateMiddle(context.memory, maxContextBlockLength)}` : '',
+    commandContext ? `最近命令历史:\n${commandContext}` : '',
+    context.diffSummary ? `当前文件变更摘要:\n${truncateMiddle(context.diffSummary, maxDiffContextLength)}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+
+  return contextBlock ? `${contextBlock}\n\n用户本轮请求:\n${prompt}` : prompt
+}
+
+function taskUpdatedAtMs(task: CodexTask) {
+  return new Date(task.updatedAt ?? task.createdAt ?? 0).getTime()
+}
+
+function reconcileTaskBeforeResponse(record: TaskRecord) {
+  if (record.task.status !== 'queued' && record.task.status !== 'running') return
+  if (record.task.id.startsWith('image-') || record.task.id.startsWith('video-')) return
+  if (record.cancel || record.cancelRequested) return
+  if (Date.now() - taskUpdatedAtMs(record.task) < 8000) return
+
+  setTaskLifecyclePhase(record, 'failed', isRuntimeFailureContent, '本地任务状态丢失')
+  pushEvent(record, {
+    taskId: record.task.id,
+    type: 'turn.failed',
+    role: 'system',
+    content: '失败诊断：本地任务状态丢失。Runtime 没有可管理的 Codex 子进程或连接，任务已停止，可以重新发送。',
+  })
+}
+
+function latestTurnTranscript(task: CodexTask) {
+  const lastUserIndex = task.transcript.map((item) => item.role).lastIndexOf('user')
+  return lastUserIndex >= 0 ? task.transcript.slice(lastUserIndex) : task.transcript
+}
+
+function latestTurnHasFailure(task: CodexTask) {
+  return latestTurnTranscript(task).some((item) => {
+    if (item.role !== 'system') return false
+    const content = item.content.trim()
+    return content.startsWith('失败诊断：') || /^Codex\s*任务退出，代码/.test(content) || isRuntimeFailureContent(content)
+  })
+}
+
+function requestedSkillFromPrompt(prompt: string) {
+  const text = prompt.trim()
+  if (/(怎么|如何|方案|架构|逻辑|设计|接入|集成|配置|开发|修复|bug|问题|为什么|可行性|思路)/i.test(text)) return undefined
+  const imageIntent =
+    /(生成|画|绘制|制作|做|出|创建).{0,16}(图片|图像|插画|海报|封面|头像|logo|照片|图)/i.test(text) ||
+    /(图片|图像|插画|海报|封面|头像|logo|照片|图).{0,16}(生成|画|绘制|制作|做|出|创建)/i.test(text)
+  if (imageIntent) return 'image_generation'
+
+  const videoIntent =
+    /(生成|制作|做|创建|出).{0,16}(视频|短片|影片|动画|动图)/i.test(text) ||
+    /(视频|短片|影片|动画|动图).{0,16}(生成|制作|做|创建|出)/i.test(text)
+  if (videoIntent) return 'video_generation'
+
+  return undefined
+}
+
+function hasGeneratedAssetForSkill(record: TaskRecord, skill: ReturnType<typeof requestedSkillFromPrompt>) {
+  if (skill === 'image_generation') return Boolean(record.task.generatedImages?.length)
+  if (skill === 'video_generation') return Boolean(record.task.generatedVideos?.length)
+  return true
+}
+
+async function failMissingSkillResult(record: TaskRecord, taskId: string, skill: ReturnType<typeof requestedSkillFromPrompt>) {
+  const name = skill === 'image_generation' ? '图片生成' : skill === 'video_generation' ? '视频生成' : '技能'
+  await failCodexTask(
+    record,
+    taskId,
+    `失败诊断：${name}没有返回真实资源。Codex 大脑没有输出可执行的结构化技能调用，或者技能执行器没有拿到资产结果；本轮不能把文字“已生成”当作成功。`,
+  )
+}
+
+async function waitForFinalAssistantAfterTurn(record: TaskRecord, timeoutMs = 15000) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    if (hasFinalAssistantReply(record, isRuntimeFailureContent)) return true
+    if (record.task.status === 'failed' || record.cancelRequested) return false
+    await sleep(250)
+  }
+  return hasFinalAssistantReply(record, isRuntimeFailureContent)
+}
+
+function canReuseParentTask(record: TaskRecord) {
+  return canReuseLifecycleSession(record, isRuntimeFailureContent) && !latestTurnHasFailure(record.task)
+}
+
+function safeVisibleToolContent(content: string) {
+  if (!content.startsWith('$ ')) return truncateMiddle(content, maxVisibleToolOutput)
+  const firstLineEnd = content.indexOf('\n')
+  if (firstLineEnd < 0) return content
+  const command = content.slice(0, firstLineEnd)
+  const output = content.slice(firstLineEnd + 1)
+  return `${command}\n${truncateMiddle(output, maxVisibleToolOutput)}`
+}
+
+function persistedTask(task: CodexTask): CodexTask {
+  ensureTaskTranscriptModel(task)
   return {
     ...task,
-    transcript,
+    transcript: task.transcript
+      .filter((item) => item.content.trim())
+      .map((item) => ({
+        ...item,
+        content: item.role === 'tool' ? safeVisibleToolContent(item.content) : item.content,
+      })),
   }
 }
 
-function compactTranscript(items: CodexTask['transcript']) {
-  return items.reduce<CodexTask['transcript']>((merged, item) => {
-    const previous = merged.at(-1)
-    if (previous?.role === 'assistant' && item.role === 'assistant') {
-      if (previous.itemId && item.itemId && previous.itemId === item.itemId) {
-        merged[merged.length - 1] = {
-          ...item,
-          content: mergeAssistantContent(previous.content, item.content),
-        }
-        return merged
-      }
-      if (item.content.startsWith(previous.content)) {
-        merged[merged.length - 1] = { ...item, content: mergeAssistantContent(previous.content, item.content) }
-        return merged
-      }
-      if (previous.content.startsWith(item.content)) return merged
+function ensureTaskTranscriptModel(task: CodexTask) {
+  let turnIndex = 0
+  let currentTurnId = `${task.id}-turn-1`
+  let maxSeq = 0
+
+  task.transcript.forEach((item, index) => {
+    if (item.role === 'user') {
+      turnIndex += 1
+      currentTurnId = item.turnId ?? `${task.id}-turn-${turnIndex}`
+    } else if (turnIndex === 0) {
+      turnIndex = 1
+      currentTurnId = item.turnId ?? `${task.id}-turn-1`
     }
-    merged.push(item)
-    return merged
-  }, [])
+
+    item.turnId ??= currentTurnId
+    if (typeof item.seq !== 'number') item.seq = index + 1
+    maxSeq = Math.max(maxSeq, item.seq)
+  })
+
+  return {
+    currentTurnId,
+    nextTranscriptSeq: maxSeq + 1,
+  }
 }
 
-function sharedPrefixSuffixLength(left: string, right: string) {
-  const maxLength = Math.min(left.length, right.length)
-  for (let length = maxLength; length > 0; length -= 1) {
-    if (left.endsWith(right.slice(0, length))) return length
-  }
-  return 0
+function hydrateRecordTranscriptState(record: TaskRecord) {
+  const state = ensureTaskTranscriptModel(record.task)
+  record.currentTurnId ??= state.currentTurnId
+  record.nextTranscriptSeq ??= state.nextTranscriptSeq
 }
 
-function mergeAssistantContent(current: string, incoming: string) {
-  if (!current) return incoming
-  if (!incoming) return current
-  if (current === incoming) return current
-  if (incoming.startsWith(current)) return incoming
-  if (current.startsWith(incoming)) return current
-
-  const overlap = sharedPrefixSuffixLength(current, incoming)
-  return `${current}${incoming.slice(overlap)}`
+function startTaskTurn(record: TaskRecord, now: string) {
+  hydrateRecordTranscriptState(record)
+  const nextTurnIndex = record.task.transcript.filter((item) => item.role === 'user').length + 1
+  record.currentTurnId = `${record.task.id}-turn-${nextTurnIndex}`
+  record.activeAssistantItemId = undefined
+  record.streamItemIndexes.clear()
+  resetTaskLifecycleForNewTurn(record, now)
 }
 
-function isRawRuntimeFailure(content: string) {
-  const text = content.trim()
-  return (
-    /^Codex\s*任务退出，代码/.test(text) ||
-    text.startsWith('Missing environment variable:') ||
-    text.includes('unexpected status 403 Forbidden: invalid api key') ||
-    text.includes('invalid api key') ||
-    text.startsWith('Codex app-server')
-  )
-}
-
-function friendlyRuntimeMessage(content: string) {
-  if (/not activated the model|has not activated the model|activate the model service/i.test(content)) {
-    return '火山方舟视频模型还没有开通，请管理员到 Ark 控制台开通当前视频模型后再试。'
+function appendTranscriptItem(
+  record: TaskRecord,
+  item: Omit<CodexTask['transcript'][number], 'seq' | 'turnId'> & Partial<Pick<CodexTask['transcript'][number], 'seq' | 'turnId'>>,
+) {
+  hydrateRecordTranscriptState(record)
+  const nextItem = {
+    ...item,
+    seq: item.seq ?? record.nextTranscriptSeq ?? 1,
+    turnId: item.turnId ?? record.currentTurnId ?? `${record.task.id}-turn-1`,
   }
-  if (/OPENAI_API_KEY|invalid api key|403 Forbidden/i.test(content)) {
-    return '模型服务暂时不可用，请检查模型密钥或稍后重试。'
-  }
-  if (/Codex app-server|Codex Runtime|ECONNREFUSED|connection/i.test(content)) {
-    return '本地 Codex 内核暂时没有启动成功，我会继续尝试恢复。'
-  }
-  return content.replace(/%!s\(int64=(\d+)\)/g, '$1')
+  record.nextTranscriptSeq = nextItem.seq + 1
+  record.task.transcript.push(nextItem)
+  return nextItem
 }
 
 function resolveCodexBin() {
@@ -264,7 +367,7 @@ async function saveStore() {
   await mkdir(runtimeRoot, { recursive: true })
   await writeFile(
     storePath,
-    JSON.stringify({ tasks: Array.from(records.values()).map((record) => sanitizeTask(record.task)) }, null, 2),
+    JSON.stringify({ tasks: Array.from(records.values()).map((record) => persistedTask(record.task)) }, null, 2),
   )
 }
 
@@ -280,7 +383,7 @@ async function loadStore() {
     const raw = await readFile(storePath, 'utf8')
     const saved = JSON.parse(raw) as { tasks?: CodexTask[] }
     for (const task of saved.tasks ?? []) {
-      const restored = sanitizeTask(task)
+      const restored = persistedTask(task)
       if (restored.status === 'queued' || restored.status === 'running') {
         restored.status = 'failed'
         restored.updatedAt = new Date().toISOString()
@@ -290,7 +393,16 @@ async function loadStore() {
           timestamp: restored.updatedAt,
         })
       }
-      records.set(restored.id, { task: restored, events: [], subscribers: new Set(), streamItemIndexes: new Map() })
+      const transcriptState = ensureTaskTranscriptModel(restored)
+      records.set(restored.id, {
+        task: restored,
+        events: [],
+        lifecycle: hydrateTaskLifecycle(restored, isRuntimeFailureContent),
+        currentTurnId: transcriptState.currentTurnId,
+        nextTranscriptSeq: transcriptState.nextTranscriptSeq,
+        subscribers: new Set(),
+        streamItemIndexes: new Map(),
+      })
     }
   } catch {
     await saveStore()
@@ -316,8 +428,7 @@ async function getGitDiff(workspace: string) {
   }
 }
 
-async function createCodexHome() {
-  const config = getModelConfig()
+async function createCodexHome(config = getModelConfig()) {
   const codexHome = process.env.MOYUAN_CODEX_HOME ?? path.join(tmpdir(), 'moyuan-codex', 'default')
 
   await mkdir(codexHome, { recursive: true })
@@ -369,6 +480,8 @@ function pushEvent(record: TaskRecord, event: Omit<CodexTaskEvent, 'id' | 'times
   let next: CodexTaskEvent = {
     ...event,
     id: `${event.taskId}-${record.events.length + 1}`,
+    turnId: event.turnId ?? record.currentTurnId,
+    seq: record.events.length + 1,
     timestamp: new Date().toISOString(),
   }
   const assistantItemId = resolveAssistantItemId(record, next)
@@ -384,6 +497,27 @@ function pushEvent(record: TaskRecord, event: Omit<CodexTaskEvent, 'id' | 'times
   if (!next.content && next.type !== 'thread.started') return
 
   record.events.push(next)
+  const previousPhase = record.lifecycle?.phase
+  applyTaskLifecycleEvent(record, next, isRuntimeFailureContent)
+  const nextPhase = record.lifecycle?.phase
+  const shouldLogEvent = next.type !== 'message_delta' || previousPhase !== nextPhase
+  if (shouldLogEvent) {
+    logTask(
+      record,
+      'task.event',
+      {
+        contentLength: next.content.length,
+        contentPreview: previewLogContent(next.content),
+        itemId: next.itemId,
+        nextPhase,
+        previousPhase,
+        role: next.role,
+        status: record.task.status,
+        type: next.type,
+      },
+      next.type === 'turn.failed' || next.type === 'error' ? 'error' : next.type === 'process.exit' && record.task.status !== 'completed' ? 'warn' : 'debug',
+    )
+  }
 
   if (next.type === 'message_delta') {
     const itemId = next.itemId ?? `assistant-${record.events.length}`
@@ -391,36 +525,39 @@ function pushEvent(record: TaskRecord, event: Omit<CodexTaskEvent, 'id' | 'times
 
     if (existingIndex === undefined) {
       record.streamItemIndexes.set(itemId, record.task.transcript.length)
-      record.task.transcript.push({
+      appendTranscriptItem(record, {
         role: 'assistant',
         content: next.content,
+        eventId: next.id,
         itemId,
         timestamp: next.timestamp,
       })
     } else {
       const current = record.task.transcript[existingIndex]
       const content = mergeAssistantContent(current.content, next.content)
-      record.task.transcript[existingIndex] = { ...current, content, timestamp: next.timestamp }
+      record.task.transcript[existingIndex] = { ...current, content, eventId: next.id, timestamp: next.timestamp }
     }
   } else if (next.type === 'message' && next.role === 'assistant') {
     const itemId = next.itemId ?? rawItemId(next.raw)
     const existingIndex = itemId ? record.streamItemIndexes.get(itemId) : undefined
     if (existingIndex !== undefined) {
       const current = record.task.transcript[existingIndex]
-      record.task.transcript[existingIndex] = { ...current, content: mergeAssistantContent(current.content, next.content), timestamp: next.timestamp }
+      record.task.transcript[existingIndex] = { ...current, content: finalAssistantContent(current.content, next.content), eventId: next.id, timestamp: next.timestamp }
     } else if (record.task.transcript.at(-1)?.role !== 'assistant' || record.task.transcript.at(-1)?.content !== next.content) {
-      record.task.transcript.push({
+      appendTranscriptItem(record, {
         role: next.role,
         content: next.content,
+        eventId: next.id,
         itemId,
         timestamp: next.timestamp,
       })
     }
     if (record.activeAssistantItemId === itemId) record.activeAssistantItemId = undefined
   } else if (next.content) {
-    record.task.transcript.push({
+    appendTranscriptItem(record, {
       role: next.role,
       content: next.content,
+      eventId: next.id,
       itemId: next.itemId,
       timestamp: next.timestamp,
     })
@@ -428,13 +565,20 @@ function pushEvent(record: TaskRecord, event: Omit<CodexTaskEvent, 'id' | 'times
 
   record.task.updatedAt = next.timestamp
   if (next.role === 'tool' && next.content.startsWith('$ ')) {
-    record.task.commandHistory = [...(record.task.commandHistory ?? []), next.content].slice(-80)
+    record.task.commandHistory = [...(record.task.commandHistory ?? []), safeVisibleToolContent(next.content)].slice(-80)
   }
   void saveStore()
 
   for (const subscriber of record.subscribers) {
     subscriber(next)
   }
+}
+
+function eventSequence(eventId: string, taskId: string) {
+  const prefix = `${taskId}-`
+  if (!eventId.startsWith(prefix)) return undefined
+  const value = Number(eventId.slice(prefix.length))
+  return Number.isFinite(value) ? value : undefined
 }
 
 function rawItemId(raw: unknown) {
@@ -652,7 +796,7 @@ function eventFromJson(taskId: string, payload: unknown): Omit<CodexTaskEvent, '
     }
 
     const command = firstString(item.command, item.commandLine, item.command_line)
-    const output = firstString(item.aggregated_output, item.aggregatedOutput, item.output).trim()
+    const output = truncateMiddle(firstString(item.aggregated_output, item.aggregatedOutput, item.output).trim(), maxVisibleToolOutput)
     const status = typeof item.status === 'string' ? item.status : 'completed'
     const rawExitCode = typeof item.exit_code === 'number' ? item.exit_code : typeof item.exitCode === 'number' ? item.exitCode : undefined
     const exitCode = typeof rawExitCode === 'number' ? `\nexit ${rawExitCode}` : ''
@@ -758,6 +902,7 @@ async function connectAppServer(url: string, onNotification: (message: Record<st
   type PendingRequest = {
     reject: (error: Error) => void
     resolve: (value: unknown) => void
+    timer: ReturnType<typeof setTimeout>
   }
 
   const WebSocketCtor = (globalThis as unknown as { WebSocket?: new (url: string) => {
@@ -822,6 +967,7 @@ async function connectAppServer(url: string, onNotification: (message: Record<st
       const waiter = pending.get(id)
       if (!waiter) return
       pending.delete(id)
+      clearTimeout(waiter.timer)
       const error = message.error as { message?: string } | undefined
       if (error) {
         waiter.reject(new Error(error.message ?? 'Codex app-server 请求失败'))
@@ -836,6 +982,7 @@ async function connectAppServer(url: string, onNotification: (message: Record<st
 
   socket.onclose = () => {
     for (const waiter of pending.values()) {
+      clearTimeout(waiter.timer)
       waiter.reject(new Error('Codex app-server 已断开'))
     }
     pending.clear()
@@ -845,11 +992,16 @@ async function connectAppServer(url: string, onNotification: (message: Record<st
     close() {
       socket.close()
     },
-    request(method: string, params: unknown) {
+    request(method: string, params: unknown, timeoutMs = 45000) {
       const id = requestId
       requestId += 1
       return new Promise<unknown>((resolve, reject) => {
-        pending.set(id, { resolve, reject })
+        const timer = setTimeout(() => {
+          pending.delete(id)
+          reject(new Error(`Codex app-server ${method} 请求超时`))
+        }, timeoutMs)
+        timer.unref()
+        pending.set(id, { resolve, reject, timer })
         socket.send(JSON.stringify({ id, method, params }))
       })
     },
@@ -908,9 +1060,24 @@ function terminateProcessTree(child: ReturnType<typeof spawn>) {
 }
 
 async function finishCodexTask(record: TaskRecord, taskId: string, code: number | null) {
-  record.task.exitCode = code
-  record.task.status = code === 0 && record.task.status !== 'failed' ? 'completed' : 'failed'
-  record.task.updatedAt = new Date().toISOString()
+  record.cancel = undefined
+  const lifecycle = finishTaskLifecycle(record, code, isRuntimeFailureContent)
+  logTask(record, 'task.finish', {
+    assistantEvents: lifecycle.assistantEvents,
+    code,
+    finalAssistantEvents: lifecycle.finalAssistantEvents,
+    phase: lifecycle.phase,
+    reason: lifecycle.reason,
+    toolEvents: lifecycle.toolEvents,
+  }, lifecycle.phase === 'failed' ? 'warn' : 'info')
+  if (lifecycle.phase === 'failed' && lifecycle.reason?.includes('没有返回最终回复') && !latestTurnHasFailure(record.task)) {
+    pushEvent(record, {
+      taskId,
+      type: 'turn.failed',
+      role: 'system',
+      content: '失败诊断：Codex 已结束本轮工具执行，但没有返回最终回复。任务已停止，可以重新发送；如果连续出现，需要检查 app-server 的 turn.completed 与 assistant message 事件。',
+    })
+  }
   const diff = await getGitDiff(record.task.workspace)
   record.task.diffSummary = diff
   if (diff) {
@@ -929,35 +1096,57 @@ async function finishCodexTask(record: TaskRecord, taskId: string, code: number 
   })
 }
 
+async function failCodexTask(record: TaskRecord, taskId: string, message: string, code: number | null = null) {
+  record.cancel = undefined
+  record.task.exitCode = code
+  setTaskLifecyclePhase(record, 'failed', isRuntimeFailureContent, message)
+  logTask(record, 'task.fail', { code, message }, 'error')
+  await saveStore()
+  pushEvent(record, {
+    taskId,
+    type: 'turn.failed',
+    role: 'system',
+    content: isRuntimeFailureContent(message) ? runtimeFailureDiagnostic(message) : friendlyRuntimeMessage(message),
+  })
+}
+
 async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: string, sessionId: string | undefined, options: RuntimeRunOptions) {
   const taskId = record.task.id
-  const codexHome = await createCodexHome()
+  const requiredSkill = requestedSkillFromPrompt(prompt)
   const codexBin = resolveCodexBin()
-  const config = getModelConfig()
-  const skills = await loadEnterpriseSkillSet(options.enterpriseAuthToken, options.enterpriseApiBase)
+  const { modelConfig: config, skills } = await loadEnterpriseRuntimeConfig(options.enterpriseAuthToken, options.enterpriseApiBase)
+  const codexHome = await createCodexHome(config)
   const skillInstructions = buildSkillInstructionBlock(skills)
   const port = await findOpenPort()
   const appServerUrl = `ws://127.0.0.1:${port}`
   const memory = workspaceMemory.get(workspace)
-  const commandContext = record.task.commandHistory?.slice(-8).join('\n\n')
   const diffSummary = await getGitDiff(workspace)
-  const contextBlock = [
+  const baseInstructions = buildBaseInstructions(skillInstructions)
+  const promptWithContext = buildPromptWithContext(prompt, {
+    commandHistory: record.task.commandHistory,
+    diffSummary,
+    memory,
     skillInstructions,
-    memory ? `工作区记忆:\n${memory}` : '',
-    commandContext ? `最近命令历史:\n${commandContext}` : '',
-    diffSummary ? `当前文件变更摘要:\n${diffSummary}` : '',
-  ]
-    .filter(Boolean)
-    .join('\n\n')
-  const promptWithContext = contextBlock ? `${contextBlock}\n\n用户本轮请求:\n${prompt}` : prompt
+  })
 
-  record.task.status = 'running'
+  setTaskLifecyclePhase(record, 'running', isRuntimeFailureContent)
   await saveStore()
+  logTask(record, 'codex.app_server.start', {
+    hasMemory: Boolean(memory),
+    model: config.defaultModel,
+    port,
+    promptLength: prompt.length,
+    providerId: config.providerId,
+    resume: Boolean(sessionId),
+    transport: 'app-server',
+  })
 
   let activeTurnId = ''
   let fallbackAssistantItemId = ''
   let completed = false
   let failed = false
+  let lastActivityAt = Date.now()
+  let idleWarningSent = false
   let resolveTurn: (() => void) | undefined
   let rejectTurn: ((error: Error) => void) | undefined
   const turnFinished = new Promise<void>((resolve, reject) => {
@@ -1007,181 +1196,205 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
     env: {
       ...process.env,
       CODEX_HOME: codexHome,
-      OPENAI_API_KEY: process.env.AI_API_KEY ?? '',
+      OPENAI_API_KEY: config.apiKey ?? process.env.AI_API_KEY ?? '',
       RUST_LOG: process.env.CODEX_RUST_LOG ?? 'warn',
     },
   })
+  logTask(record, 'codex.app_server.spawned', { pid: child.pid, port })
+  record.cancel = (reason = '已停止本次任务。') => {
+    if (record.cancelRequested) return
+    record.cancelRequested = true
+    failed = true
+    logTask(record, 'task.cancel.requested', { reason }, 'warn')
+    rejectTurn?.(new Error(reason))
+    terminateProcessTree(child)
+  }
+
+  const watchdog = setInterval(() => {
+    if (completed || failed || record.cancelRequested) return
+    const idleMs = Date.now() - lastActivityAt
+    if (!idleWarningSent && idleMs > 45000) {
+      idleWarningSent = true
+      pushEvent(record, {
+        taskId,
+        type: 'message',
+        role: 'system',
+        content: '等待模型响应超过 45 秒，可以继续等，也可以手动停止后重试。',
+      })
+      return
+    }
+    if (idleMs > 5 * 60 * 1000) {
+      failed = true
+      rejectTurn?.(new Error('模型响应超时，任务已停止。'))
+    }
+  }, 5000)
+  watchdog.unref()
 
   child.stderr.on('data', (chunk: Buffer) => {
     const text = chunk.toString('utf8').trim()
     if (!text) return
     if (mutedStderrPatterns.some((pattern) => text.includes(pattern))) return
     app.log.debug({ text }, 'codex app-server stderr')
+    logTask(record, 'codex.stderr', { text }, 'warn')
   })
 
   child.once('exit', (code) => {
+    logTask(record, 'codex.app_server.exit', { code, completed, failed, cancelRequested: Boolean(record.cancelRequested) }, code === 0 ? 'info' : 'warn')
+    if (record.cancelRequested) return
     if (!completed && !failed) {
       rejectTurn?.(new Error(`Codex app-server 退出，代码 ${code ?? 'unknown'}`))
     }
   })
 
-  const connection = await connectAppServer(appServerUrl, (message) => {
-    const method = typeof message.method === 'string' ? message.method : ''
-    const methodKey = method.replace(/[\/_.-]/g, '').toLowerCase()
-    const params = message.params && typeof message.params === 'object' ? (message.params as Record<string, unknown>) : {}
-    const item =
-      params.item && typeof params.item === 'object'
-        ? (params.item as Record<string, unknown>)
-        : params.type
-          ? params
-          : null
-    const explicitItemId = firstString(params.itemId, params.item_id, item?.id)
-    const isAssistantNotification =
-      (methodKey.includes('agentmessage') && (methodKey.includes('delta') || methodKey.includes('completed'))) ||
-      (methodKey === 'itemupdated' && isAgentMessageItem(item)) ||
-      (methodKey === 'itemcompleted' && isAgentMessageItem(item))
-    const itemId = explicitItemId || (isAssistantNotification ? fallbackAssistantItemId || `app-assistant-${activeTurnId || taskId}` : `app-item-${record.events.length}`)
-    if (isAssistantNotification && !explicitItemId) fallbackAssistantItemId = itemId
+  let connection: Awaited<ReturnType<typeof connectAppServer>> | undefined
 
-    if ((methodKey.includes('agentmessage') && methodKey.includes('delta')) || (methodKey === 'itemupdated' && isAgentMessageItem(item))) {
-      const delta = assistantDeltaFromParams(params) || firstString(item?.delta, item?.text, textFromContent(item?.content))
-      if (!delta) return
-      const buffered = assistantDeltaBuffers.get(itemId)
-      const combined = `${buffered ?? ''}${delta}`
-      if (buffered !== undefined || isLikelyToolCallFragment(combined)) {
-        if (isLikelyToolCallFragment(combined)) {
-          assistantDeltaBuffers.set(itemId, combined)
+  try {
+    connection = await connectAppServer(appServerUrl, (message) => {
+      lastActivityAt = Date.now()
+      const method = typeof message.method === 'string' ? message.method : ''
+      const methodKey = method.replace(/[\/_.-]/g, '').toLowerCase()
+      const params = message.params && typeof message.params === 'object' ? (message.params as Record<string, unknown>) : {}
+      const item =
+        params.item && typeof params.item === 'object'
+          ? (params.item as Record<string, unknown>)
+          : params.type
+            ? params
+            : null
+      const explicitItemId = firstString(params.itemId, params.item_id, item?.id)
+      const isAssistantNotification =
+        (methodKey.includes('agentmessage') && (methodKey.includes('delta') || methodKey.includes('completed'))) ||
+        (methodKey === 'itemupdated' && isAgentMessageItem(item)) ||
+        (methodKey === 'itemcompleted' && isAgentMessageItem(item))
+      const itemId = explicitItemId || (isAssistantNotification ? fallbackAssistantItemId || `app-assistant-${activeTurnId || taskId}` : `app-item-${record.events.length}`)
+      if (isAssistantNotification && !explicitItemId) fallbackAssistantItemId = itemId
+
+      if ((methodKey.includes('agentmessage') && methodKey.includes('delta')) || (methodKey === 'itemupdated' && isAgentMessageItem(item))) {
+        const delta = assistantDeltaFromParams(params) || firstString(item?.delta, item?.text, textFromContent(item?.content))
+        if (!delta) return
+        const buffered = assistantDeltaBuffers.get(itemId)
+        const combined = `${buffered ?? ''}${delta}`
+        if (buffered !== undefined || isLikelyToolCallFragment(combined)) {
+          if (isLikelyToolCallFragment(combined)) {
+            assistantDeltaBuffers.set(itemId, combined)
+            return
+          }
+          assistantDeltaBuffers.delete(itemId)
+          pushEvent(record, {
+            taskId,
+            type: 'message_delta',
+            role: 'assistant',
+            content: combined,
+            itemId,
+            raw: appServerRaw(itemId),
+          })
           return
         }
-        assistantDeltaBuffers.delete(itemId)
         pushEvent(record, {
           taskId,
           type: 'message_delta',
           role: 'assistant',
-          content: combined,
+          content: delta,
           itemId,
           raw: appServerRaw(itemId),
         })
         return
       }
-      pushEvent(record, {
-        taskId,
-        type: 'message_delta',
-        role: 'assistant',
-        content: delta,
-        itemId,
-        raw: appServerRaw(itemId),
-      })
-      return
-    }
 
-    if (methodKey === 'itemcompleted' || (methodKey.includes('agentmessage') && methodKey.includes('completed'))) {
-      if (isAgentMessageItem(item)) {
-        const content = assistantTextFromItem(item, params) || assistantDeltaBuffers.get(itemId) || ''
-        assistantDeltaBuffers.delete(itemId)
-        const toolCall = parseMoyuanToolCall(content)
-        if (startToolRun(toolCall)) {
+      if (methodKey === 'itemcompleted' || (methodKey.includes('agentmessage') && methodKey.includes('completed'))) {
+        if (isAgentMessageItem(item)) {
+          const content = assistantTextFromItem(item, params) || assistantDeltaBuffers.get(itemId) || ''
+          assistantDeltaBuffers.delete(itemId)
+          const toolCall = parseMoyuanToolCall(content)
+          if (startToolRun(toolCall)) {
+            if (fallbackAssistantItemId === itemId) fallbackAssistantItemId = ''
+            return
+          }
+          if (!content.trim()) return
+          pushEvent(record, {
+            taskId,
+            type: 'message',
+            role: 'assistant',
+            content,
+            itemId,
+            raw: appServerRaw(itemId),
+          })
           if (fallbackAssistantItemId === itemId) fallbackAssistantItemId = ''
           return
         }
-        if (!content.trim()) return
-        pushEvent(record, {
-          taskId,
-          type: 'message',
-          role: 'assistant',
-          content,
-          itemId,
-          raw: appServerRaw(itemId),
-        })
-        if (fallbackAssistantItemId === itemId) fallbackAssistantItemId = ''
+
+        if (isCommandExecutionItem(item)) {
+          const commandItem = item as Record<string, unknown>
+          const command = firstString(commandItem.command, commandItem.commandLine, commandItem.command_line)
+          const output = truncateMiddle(firstString(commandItem.aggregatedOutput, commandItem.aggregated_output, commandItem.output).trim(), maxVisibleToolOutput)
+          const status = typeof commandItem.status === 'string' ? commandItem.status : 'completed'
+          const rawExitCode =
+            typeof commandItem.exitCode === 'number' ? commandItem.exitCode : typeof commandItem.exit_code === 'number' ? commandItem.exit_code : undefined
+          const exitCode = typeof rawExitCode === 'number' ? `\nexit ${rawExitCode}` : ''
+          const body = output ? `$ ${command}\n${output}${exitCode}` : `$ ${command}\n${status}`
+          pushEvent(record, {
+            taskId,
+            type: 'tool',
+            role: 'tool',
+            content: body,
+            raw: { item: { id: itemId, type: 'command_execution' } },
+          })
+        }
         return
       }
 
-      if (isCommandExecutionItem(item)) {
-        const commandItem = item as Record<string, unknown>
-        const command = firstString(commandItem.command, commandItem.commandLine, commandItem.command_line)
-        const output = firstString(commandItem.aggregatedOutput, commandItem.aggregated_output, commandItem.output).trim()
-        const status = typeof commandItem.status === 'string' ? commandItem.status : 'completed'
-        const rawExitCode =
-          typeof commandItem.exitCode === 'number' ? commandItem.exitCode : typeof commandItem.exit_code === 'number' ? commandItem.exit_code : undefined
-        const exitCode = typeof rawExitCode === 'number' ? `\nexit ${rawExitCode}` : ''
-        const body = output ? `$ ${command}\n${output}${exitCode}` : `$ ${command}\n${status}`
-        pushEvent(record, {
-          taskId,
-          type: 'tool',
-          role: 'tool',
-          content: body,
-          raw: { item: { id: itemId, type: 'command_execution' } },
-        })
-      }
-      return
-    }
-
-    if (methodKey === 'turncompleted') {
-      completed = true
-      queueUsageReport(params)
-      flushBufferedAssistantItems()
-      if (!pendingToolRuns.length) record.task.status = 'completed'
-      pushEvent(record, {
-        taskId,
-        type: 'turn.completed',
-        role: 'system',
-        content: '任务完成',
-      })
-      resolveTurn?.()
-      return
-    }
-
-    if (methodKey === 'error') {
-      const willRetry = params.willRetry === true
-      if (willRetry) return
-      failed = true
-      const error = params.error && typeof params.error === 'object' ? (params.error as { message?: unknown }) : {}
-      pushEvent(record, {
-        taskId,
-        type: 'turn.failed',
-        role: 'system',
-        content: typeof error.message === 'string' ? friendlyRuntimeMessage(error.message) : '模型服务暂时不可用，请稍后重试。',
-      })
-      rejectTurn?.(new Error(typeof error.message === 'string' ? error.message : 'Codex app-server turn failed'))
-      return
-    }
-
-    const rawPayload =
-      params.type && typeof params.type === 'string'
-        ? params
-        : message.type && typeof message.type === 'string'
-          ? message
-          : undefined
-    if (rawPayload) {
-      const event = eventFromJson(taskId, rawPayload)
-      if (event.type === 'message_delta' && event.role === 'assistant') {
-        const itemIdFromRaw = rawItemId(event.raw) ?? itemId
-        const combined = `${assistantDeltaBuffers.get(itemIdFromRaw) ?? ''}${event.content}`
-        if (isLikelyToolCallFragment(combined)) {
-          assistantDeltaBuffers.set(itemIdFromRaw, combined)
-          return
-        }
-      }
-      const eventWithItemId = event.role === 'assistant' ? { ...event, itemId: rawItemId(event.raw) ?? itemId } : event
-      if (eventWithItemId.type === 'message' && eventWithItemId.role === 'assistant') {
-        const toolCall = parseMoyuanToolCall(eventWithItemId.content)
-        if (startToolRun(toolCall)) return
-      }
-      if (eventWithItemId.type === 'turn.completed') {
+      if (methodKey === 'turncompleted') {
         completed = true
-        queueUsageReport(eventWithItemId.raw)
+        setTaskLifecyclePhase(record, 'waiting_final', isRuntimeFailureContent)
+        queueUsageReport(params)
         flushBufferedAssistantItems()
-        if (!pendingToolRuns.length) record.task.status = 'completed'
-        pushEvent(record, eventWithItemId)
         resolveTurn?.()
         return
       }
-      pushEvent(record, eventWithItemId)
-    }
-  })
 
-  try {
+      if (methodKey === 'error') {
+        const willRetry = params.willRetry === true
+        if (willRetry) return
+        failed = true
+        const error = params.error && typeof params.error === 'object' ? (params.error as { message?: unknown }) : {}
+        logTask(record, 'codex.app_server.notification_error', { error, params }, 'error')
+        rejectTurn?.(new Error(typeof error.message === 'string' ? error.message : 'Codex app-server turn failed'))
+        return
+      }
+
+      const rawPayload =
+        params.type && typeof params.type === 'string'
+          ? params
+          : message.type && typeof message.type === 'string'
+            ? message
+            : undefined
+      if (rawPayload) {
+        const event = eventFromJson(taskId, rawPayload)
+        if (event.type === 'message_delta' && event.role === 'assistant') {
+          const itemIdFromRaw = rawItemId(event.raw) ?? itemId
+          const combined = `${assistantDeltaBuffers.get(itemIdFromRaw) ?? ''}${event.content}`
+          if (isLikelyToolCallFragment(combined)) {
+            assistantDeltaBuffers.set(itemIdFromRaw, combined)
+            return
+          }
+        }
+        const eventWithItemId = event.role === 'assistant' ? { ...event, itemId: rawItemId(event.raw) ?? itemId } : event
+        if (eventWithItemId.type === 'message' && eventWithItemId.role === 'assistant') {
+          const toolCall = parseMoyuanToolCall(eventWithItemId.content)
+          if (startToolRun(toolCall)) return
+        }
+        if (eventWithItemId.type === 'turn.completed') {
+          completed = true
+          setTaskLifecyclePhase(record, 'waiting_final', isRuntimeFailureContent)
+          queueUsageReport(eventWithItemId.raw)
+          flushBufferedAssistantItems()
+          resolveTurn?.()
+          return
+        }
+        pushEvent(record, eventWithItemId)
+      }
+    })
+    logTask(record, 'codex.app_server.connected', { port })
+
     await connection.request('initialize', {
       clientInfo: { name: 'moyuan-desktop', title: 'Moyuan Desktop', version: '0.1.3' },
       capabilities: {
@@ -1189,7 +1402,8 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
         requestAttestation: false,
         optOutNotificationMethods: [],
       },
-    })
+    }, 15000)
+    logTask(record, 'codex.app_server.initialized', { model: config.defaultModel })
 
     const threadResult = sessionId
       ? await connection.request('thread/resume', {
@@ -1199,23 +1413,24 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
           runtimeWorkspaceRoots: [workspace],
           approvalPolicy: 'never',
           sandbox: 'workspace-write',
-          baseInstructions: skillInstructions,
+          baseInstructions,
           persistExtendedHistory: false,
-        })
+        }, 45000)
       : await connection.request('thread/start', {
           cwd: workspace,
           model: config.defaultModel,
           runtimeWorkspaceRoots: [workspace],
           approvalPolicy: 'never',
           sandbox: 'workspace-write',
-          baseInstructions: skillInstructions,
+          baseInstructions,
           threadSource: 'user',
           experimentalRawEvents: false,
           persistExtendedHistory: false,
-        })
+        }, 45000)
     const threadId = appServerThreadId(threadResult)
     if (!threadId) throw new Error('Codex app-server 没有返回会话 id')
     record.task.sessionId = threadId
+    logTask(record, sessionId ? 'codex.thread.resumed' : 'codex.thread.started', { threadId })
     pushEvent(record, {
       taskId,
       type: 'thread.started',
@@ -1231,18 +1446,33 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
       approvalPolicy: 'never',
       sandboxPolicy: appServerSandboxPolicy(workspace),
       model: config.defaultModel,
-    })
+    }, 60000)
     activeTurnId = appServerTurnId(turnResult) ?? ''
+    logTask(record, 'codex.turn.started', { turnId: activeTurnId })
     await turnFinished
     await Promise.allSettled(pendingUsageReports)
     await Promise.allSettled(pendingToolRuns)
+    flushBufferedAssistantItems()
+    if (requiredSkill && !hasGeneratedAssetForSkill(record, requiredSkill)) {
+      await failMissingSkillResult(record, taskId, requiredSkill)
+      return
+    }
+    const finalAssistantArrived = await waitForFinalAssistantAfterTurn(record)
+    logTask(record, 'codex.turn.final_wait_finished', { finalAssistantArrived, turnId: activeTurnId }, finalAssistantArrived ? 'info' : 'warn')
     await finishCodexTask(record, taskId, 0)
   } catch (error) {
-    record.task.status = 'failed'
-    await saveStore()
-    throw error
+    if (record.cancelRequested) {
+      logTask(record, 'codex.run.cancelled', error, 'warn')
+      await saveStore()
+      return
+    }
+    logTask(record, 'codex.run.failed', error, 'error')
+    await failCodexTask(record, taskId, error instanceof Error ? error.message : String(error))
+    return
   } finally {
-    connection.close()
+    clearInterval(watchdog)
+    record.cancel = undefined
+    connection?.close()
     terminateProcessTree(child)
   }
 }
@@ -1258,10 +1488,10 @@ async function runCodex(record: TaskRecord, prompt: string, workspace: string, s
 
 async function runCodexExec(record: TaskRecord, prompt: string, workspace: string, sessionId: string | undefined, options: RuntimeRunOptions) {
   const taskId = record.task.id
-  const codexHome = await createCodexHome()
+  const requiredSkill = requestedSkillFromPrompt(prompt)
   const codexBin = resolveCodexBin()
-  const config = getModelConfig()
-  const skills = await loadEnterpriseSkillSet(options.enterpriseAuthToken, options.enterpriseApiBase)
+  const { modelConfig: config, skills } = await loadEnterpriseRuntimeConfig(options.enterpriseAuthToken, options.enterpriseApiBase)
+  const codexHome = await createCodexHome(config)
   const skillInstructions = buildSkillInstructionBlock(skills)
   const commonArgs = [
     '--json',
@@ -1278,33 +1508,45 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
     config.defaultModel,
   ]
   const memory = workspaceMemory.get(workspace)
-  const commandContext = record.task.commandHistory?.slice(-8).join('\n\n')
   const diffSummary = await getGitDiff(workspace)
-  const contextBlock = [
+  const promptWithContext = buildPromptWithContext(prompt, {
+    commandHistory: record.task.commandHistory,
+    diffSummary,
+    memory,
     skillInstructions,
-    memory ? `工作区记忆:\n${memory}` : '',
-    commandContext ? `最近命令历史:\n${commandContext}` : '',
-    diffSummary ? `当前文件变更摘要:\n${diffSummary}` : '',
-  ]
-    .filter(Boolean)
-    .join('\n\n')
-  const promptWithContext = contextBlock ? `${contextBlock}\n\n用户本轮请求:\n${prompt}` : prompt
+  })
   const args = sessionId
     ? [codexBin, 'exec', 'resume', ...commonArgs, sessionId, promptWithContext]
     : [codexBin, 'exec', ...commonArgs, '--sandbox', 'workspace-write', '-C', workspace, promptWithContext]
 
-  record.task.status = 'running'
+  setTaskLifecyclePhase(record, 'running', isRuntimeFailureContent)
+  logTask(record, 'codex.exec.start', {
+    model: config.defaultModel,
+    promptLength: prompt.length,
+    providerId: config.providerId,
+    resume: Boolean(sessionId),
+    transport: 'exec',
+  })
 
   const child = spawn(process.execPath, args, {
     cwd: workspace,
+    detached: true,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
       CODEX_HOME: codexHome,
-      OPENAI_API_KEY: process.env.AI_API_KEY ?? '',
+      OPENAI_API_KEY: config.apiKey ?? process.env.AI_API_KEY ?? '',
       RUST_LOG: process.env.CODEX_RUST_LOG ?? 'warn',
     },
   })
+  logTask(record, 'codex.exec.spawned', { pid: child.pid })
+  record.cancel = (reason = '已停止本次任务。') => {
+    if (record.cancelRequested) return
+    record.cancelRequested = true
+    void reason
+    logTask(record, 'task.cancel.requested', { reason }, 'warn')
+    terminateProcessTree(child)
+  }
 
   let buffer = ''
   const pendingAssistantStreams: Promise<void>[] = []
@@ -1363,6 +1605,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
     const text = chunk.toString('utf8').trim()
     if (!text) return
     if (mutedStderrPatterns.some((pattern) => text.includes(pattern))) return
+    logTask(record, 'codex.stderr', { text }, 'warn')
     pushEvent(record, {
       taskId,
       type: 'error',
@@ -1372,13 +1615,31 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
   })
 
   child.on('exit', (code) => {
+    logTask(record, 'codex.exec.exit', { code, cancelRequested: Boolean(record.cancelRequested) }, code === 0 ? 'info' : 'warn')
+    record.cancel = undefined
     record.task.exitCode = code
+    if (record.cancelRequested) {
+      finishTaskLifecycle(record, code, isRuntimeFailureContent)
+      void saveStore()
+      return
+    }
     void (async () => {
       await Promise.allSettled(pendingAssistantStreams)
       await Promise.allSettled(pendingToolRuns)
       await Promise.allSettled(pendingUsageReports)
-      record.task.status = code === 0 && record.task.status !== 'failed' ? 'completed' : 'failed'
-      record.task.updatedAt = new Date().toISOString()
+      if (requiredSkill && !hasGeneratedAssetForSkill(record, requiredSkill)) {
+        await failMissingSkillResult(record, taskId, requiredSkill)
+        return
+      }
+      const lifecycle = finishTaskLifecycle(record, code, isRuntimeFailureContent)
+      if (lifecycle.phase === 'failed' && lifecycle.reason?.includes('没有返回最终回复') && !latestTurnHasFailure(record.task)) {
+        pushEvent(record, {
+          taskId,
+          type: 'turn.failed',
+          role: 'system',
+          content: '失败诊断：Codex 已结束本轮工具执行，但没有返回最终回复。任务已停止，可以重新发送；如果连续出现，需要检查 app-server 的 turn.completed 与 assistant message 事件。',
+        })
+      }
       const diff = await getGitDiff(record.task.workspace)
       record.task.diffSummary = diff
       if (diff) {
@@ -1409,11 +1670,60 @@ app.get('/health', async () => ({
   bundledCodex: true,
   codexBin: resolveCodexBin(),
   host: runtimeHost,
+  logs: runtimeLogger.paths,
   protected: Boolean(runtimeToken),
   model: getModelConfig(),
   image: getImageConfig(),
 }))
 
+app.get('/api/logs/info', async () => ({
+  data: runtimeLogger.paths,
+}))
+
+app.get('/api/logs/recent', async (request, reply) => {
+  const parsed = z
+    .object({
+      limit: z.coerce.number().int().positive().max(1000).default(200),
+      target: z.enum(['runtime', 'client']).default('runtime'),
+    })
+    .safeParse(request.query ?? {})
+
+  if (!parsed.success) {
+    return reply.status(400).send({ error: '日志查询参数不完整', detail: parsed.error.flatten() })
+  }
+
+  return {
+    data: await runtimeLogger.recent(parsed.data.target, parsed.data.limit),
+    paths: runtimeLogger.paths,
+  }
+})
+
+app.post('/api/logs/client', async (request, reply) => {
+  const parsed = clientLogSchema.safeParse(request.body)
+
+  if (!parsed.success) {
+    return reply.status(400).send({ error: '日志参数不完整', detail: parsed.error.flatten() })
+  }
+
+  await runtimeLogger.append(
+    {
+      ...parsed.data,
+      source: parsed.data.source ?? 'desktop-renderer',
+    },
+    'client',
+  )
+
+  return { ok: true }
+})
+
+logRuntime('runtime.boot', {
+  codexBin: resolveCodexBin(),
+  host: runtimeHost,
+  logs: runtimeLogger.paths,
+  protected: Boolean(runtimeToken),
+  runtimeRoot,
+  storePath,
+})
 await loadStore()
 await saveStore()
 
@@ -1421,68 +1731,110 @@ app.post('/api/codex/tasks', async (request, reply) => {
   const parsed = taskSchema.safeParse(request.body)
 
   if (!parsed.success) {
+    logRuntime('task.create.invalid_request', parsed.error.flatten(), 'warn')
     return reply.status(400).send({ error: '任务参数不完整', detail: parsed.error.flatten() })
   }
 
   const quota = await validateEnterpriseQuota(parsed.data.enterpriseAuthToken, parsed.data.enterpriseApiBase)
   if (!quota.ok) {
+    logRuntime(
+      'task.create.quota_rejected',
+      {
+        employeeId: parsed.data.employeeId,
+        error: quota.error,
+        statusCode: quota.statusCode,
+        workspace: parsed.data.workspace,
+      },
+      'warn',
+    )
     return reply.status(quota.statusCode ?? 500).send({ error: quota.error ?? '额度校验失败' })
   }
 
   const now = new Date().toISOString()
   const existingRecord = parsed.data.parentTaskId ? records.get(parsed.data.parentTaskId) : undefined
+  const reusableRecord = existingRecord && canReuseParentTask(existingRecord) ? existingRecord : undefined
+  const requestedSessionId = reusableRecord || !parsed.data.parentTaskId ? parsed.data.sessionId : undefined
   const task: CodexTask =
-    existingRecord?.task ?? {
+    reusableRecord?.task ?? {
       id: `codex-${Date.now()}`,
       title: parsed.data.prompt.slice(0, 36),
       status: 'queued',
       workspace: parsed.data.workspace,
-      sessionId: parsed.data.sessionId,
+      sessionId: requestedSessionId,
       createdAt: now,
       updatedAt: now,
       exitCode: null,
       transcript: [],
     }
+  const record: TaskRecord = reusableRecord ?? {
+    task,
+    events: [],
+    lifecycle: hydrateTaskLifecycle(task, isRuntimeFailureContent),
+    subscribers: new Set(),
+    streamItemIndexes: new Map(),
+  }
+  if (reusableRecord) {
+    startTaskTurn(record, now)
+  } else {
+    hydrateRecordTranscriptState(record)
+    record.currentTurnId = `${task.id}-turn-1`
+  }
 
   task.status = 'queued'
   task.workspace = parsed.data.workspace
   task.workspaceMemory = workspaceMemory.get(parsed.data.workspace)
   task.diffSummary = await getGitDiff(parsed.data.workspace)
   task.updatedAt = now
-  task.transcript.push({
+  appendTranscriptItem(record, {
     role: 'user',
     content: parsed.data.prompt,
     timestamp: now,
   })
 
-  const record: TaskRecord = existingRecord ?? { task, events: [], subscribers: new Set(), streamItemIndexes: new Map() }
+  record.cancelRequested = false
+  record.cancel = undefined
   records.set(task.id, record)
   await saveStore()
+  logTask(record, 'task.create.accepted', {
+    employeeId: parsed.data.employeeId,
+    parentTaskId: parsed.data.parentTaskId,
+    promptLength: parsed.data.prompt.length,
+    promptPreview: previewLogContent(parsed.data.prompt),
+    reusable: Boolean(reusableRecord),
+    requestedSessionId,
+  })
 
-  void runCodex(record, parsed.data.prompt, parsed.data.workspace, parsed.data.sessionId ?? task.sessionId, {
+  void runCodex(record, parsed.data.prompt, parsed.data.workspace, requestedSessionId ?? task.sessionId, {
     enterpriseApiBase: parsed.data.enterpriseApiBase,
     enterpriseAuthToken: parsed.data.enterpriseAuthToken,
   }).catch((error: unknown) => {
-    task.status = 'failed'
+    if (record.cancelRequested) return
+    logTask(record, 'task.run.unhandled_error', error, 'error')
+    setTaskLifecyclePhase(record, 'failed', isRuntimeFailureContent, error instanceof Error ? error.message : String(error))
     pushEvent(record, {
       taskId: task.id,
       type: 'turn.failed',
       role: 'system',
-      content: error instanceof Error ? error.message : String(error),
+      content: friendlyRuntimeMessage(error instanceof Error ? error.message : String(error)),
     })
   })
 
   return { data: task }
 })
 
-app.get('/api/codex/tasks', async () => ({
-  data: Array.from(records.values()).map((record) => sanitizeTask(record.task)),
-}))
+app.get('/api/codex/tasks', async () => {
+  const taskRecords = Array.from(records.values())
+  taskRecords.forEach(reconcileTaskBeforeResponse)
+  return {
+    data: taskRecords.map((record) => sanitizeTask(record.task)),
+  }
+})
 
 app.post('/api/images/generations', async (request, reply) => {
   const parsed = imageGenerationSchema.safeParse(request.body)
 
   if (!parsed.success) {
+    logRuntime('image.create.invalid_request', parsed.error.flatten(), 'warn')
     return reply.status(400).send({ error: '图片生成参数不完整', detail: parsed.error.flatten() })
   }
 
@@ -1495,18 +1847,26 @@ app.post('/api/images/generations', async (request, reply) => {
     createdAt: now,
     updatedAt: now,
     exitCode: null,
-    transcript: [
-      {
-        role: 'user',
-        content: parsed.data.prompt,
-        timestamp: now,
-      },
-    ],
+    transcript: [],
   }
-  const record: TaskRecord = { task, events: [], subscribers: new Set(), streamItemIndexes: new Map() }
+  const record: TaskRecord = { task, events: [], lifecycle: hydrateTaskLifecycle(task, isRuntimeFailureContent), subscribers: new Set(), streamItemIndexes: new Map() }
+  hydrateRecordTranscriptState(record)
+  record.currentTurnId = `${task.id}-turn-1`
+  appendTranscriptItem(record, {
+    role: 'user',
+    content: parsed.data.prompt,
+    timestamp: now,
+  })
   records.set(task.id, record)
   await saveStore()
-  const skills = await loadEnterpriseSkillSet(parsed.data.enterpriseAuthToken, parsed.data.enterpriseApiBase)
+  logTask(record, 'image.create.accepted', {
+    employeeId: parsed.data.employeeId,
+    model: parsed.data.model,
+    promptLength: parsed.data.prompt.length,
+    promptPreview: previewLogContent(parsed.data.prompt),
+    size: parsed.data.size,
+  })
+  const { skills } = await loadEnterpriseRuntimeConfig(parsed.data.enterpriseAuthToken, parsed.data.enterpriseApiBase)
   void runImageGenerationTool({
     record,
     prompt: parsed.data.prompt,
@@ -1545,6 +1905,30 @@ app.get('/api/codex/tasks/:taskId', async (request, reply) => {
     return reply.status(404).send({ error: '任务不存在' })
   }
 
+  reconcileTaskBeforeResponse(record)
+  return { data: sanitizeTask(record.task) }
+})
+
+app.post('/api/codex/tasks/:taskId/cancel', async (request, reply) => {
+  const params = z.object({ taskId: z.string() }).parse(request.params)
+  const record = records.get(params.taskId)
+
+  if (!record) {
+    logRuntime('task.cancel.not_found', { taskId: params.taskId }, 'warn')
+    return reply.status(404).send({ error: '任务不存在' })
+  }
+
+  if (record.task.status !== 'queued' && record.task.status !== 'running') {
+    logTask(record, 'task.cancel.ignored_terminal', { status: record.task.status }, 'debug')
+    return { data: sanitizeTask(record.task) }
+  }
+
+  const message = '已停止本次任务。'
+  logTask(record, 'task.cancel.accepted', { status: record.task.status }, 'warn')
+  record.cancel?.(message)
+  record.cancelRequested = true
+  await failCodexTask(record, params.taskId, message)
+
   return { data: sanitizeTask(record.task) }
 })
 
@@ -1573,12 +1957,18 @@ app.post('/api/codex/tasks/:taskId/fork', async (request, reply) => {
     transcript: [...source.task.transcript],
   }
 
-  const record: TaskRecord = { task: forked, events: [], subscribers: new Set(), streamItemIndexes: new Map() }
+  const record: TaskRecord = { task: forked, events: [], lifecycle: hydrateTaskLifecycle(forked, isRuntimeFailureContent), subscribers: new Set(), streamItemIndexes: new Map() }
+  hydrateRecordTranscriptState(record)
   records.set(forked.id, record)
   await saveStore()
+  logTask(record, 'task.fork.created', {
+    hasPrompt: Boolean(parsed.data.prompt),
+    sourceTaskId: params.taskId,
+  })
 
   if (parsed.data.prompt) {
-    forked.transcript.push({ role: 'user', content: parsed.data.prompt, timestamp: now })
+    startTaskTurn(record, now)
+    appendTranscriptItem(record, { role: 'user', content: parsed.data.prompt, timestamp: now })
     void runCodex(record, parsed.data.prompt, forked.workspace, forked.sessionId)
   }
 
@@ -1587,30 +1977,46 @@ app.post('/api/codex/tasks/:taskId/fork', async (request, reply) => {
 
 app.get('/api/codex/tasks/:taskId/events', async (request, reply) => {
   const params = z.object({ taskId: z.string() }).parse(request.params)
+  const query = z.object({ after: z.string().optional() }).parse(request.query)
   const record = records.get(params.taskId)
 
   if (!record) {
     return reply.status(404).send({ error: '任务不存在' })
   }
 
+  reconcileTaskBeforeResponse(record)
+  const origin = typeof request.headers.origin === 'string' ? request.headers.origin : ''
+  const allowOrigin =
+    !origin || origin === 'null' || /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(origin)
+      ? origin || '*'
+      : 'http://127.0.0.1:5170'
   reply.hijack()
   reply.raw.writeHead(200, {
+    'Access-Control-Allow-Origin': allowOrigin,
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
+    Vary: 'Origin',
     'X-Accel-Buffering': 'no',
     Connection: 'keep-alive',
   })
   reply.raw.write(': connected\n\n')
 
   const send = (event: CodexTaskEvent) => {
+    reply.raw.write(`id: ${event.id}\n`)
     reply.raw.write(`data: ${JSON.stringify(event)}\n\n`)
   }
 
-  for (const event of record.events) send(event)
+  const lastEventId = query.after ?? (typeof request.headers['last-event-id'] === 'string' ? request.headers['last-event-id'] : undefined)
+  const afterSequence = lastEventId ? eventSequence(lastEventId, params.taskId) : undefined
+  const replayEvents = afterSequence === undefined ? record.events : record.events.filter((event) => (eventSequence(event.id, params.taskId) ?? 0) > afterSequence)
+
+  for (const event of replayEvents) send(event)
 
   record.subscribers.add(send)
+  logTask(record, 'sse.subscribe', { after: lastEventId, replayed: replayEvents.length, subscribers: record.subscribers.size }, 'debug')
   request.raw.on('close', () => {
     record.subscribers.delete(send)
+    logTask(record, 'sse.close', { subscribers: record.subscribers.size }, 'debug')
   })
 })
 
@@ -1639,3 +2045,4 @@ app.post('/api/codex/approvals', async (request, reply) => {
 
 const port = Number(process.env.CODEX_RUNTIME_PORT ?? 4101)
 await app.listen({ host: runtimeHost, port })
+logRuntime('runtime.listen', { host: runtimeHost, port, logs: runtimeLogger.paths })

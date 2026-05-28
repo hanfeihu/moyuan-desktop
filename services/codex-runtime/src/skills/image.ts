@@ -38,6 +38,12 @@ function usageTokensFromPayload(payload: unknown) {
   return typeof usageTokens === 'number' ? usageTokens : undefined
 }
 
+function storageUrlFromPayload(payload: unknown) {
+  if (!payload || typeof payload !== 'object') return undefined
+  const storageUrl = (payload as { storageUrl?: unknown }).storageUrl
+  return typeof storageUrl === 'string' && storageUrl ? storageUrl : undefined
+}
+
 export async function generateImage({ prompt, runtimeRoot, size, model, options, skills }: GenerateImageOptions) {
   const authToken = options.enterpriseAuthToken
   const imageSkill = skills.imageGeneration
@@ -53,11 +59,24 @@ export async function generateImage({ prompt, runtimeRoot, size, model, options,
       size,
     }),
     method: 'POST',
+    timeoutMs: 4 * 60 * 1000,
   })
   const id = randomUUID()
+  const storageUrl = storageUrlFromPayload(payload)
+  const usageTokens = usageTokensFromPayload(payload)
+  if (storageUrl) {
+    return {
+      id,
+      prompt,
+      model: model ?? imageSkill.defaultModel,
+      size,
+      url: storageUrl,
+      usageTokens,
+      createdAt: new Date().toISOString(),
+    }
+  }
   const firstImage = firstImageFromPayload(payload)
   const b64Json = firstImage?.b64_json
-  const usageTokens = usageTokensFromPayload(payload)
   if (firstImage?.url && !b64Json) {
     return {
       id,
