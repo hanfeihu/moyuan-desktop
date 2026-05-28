@@ -1,4 +1,5 @@
-const { app, BrowserWindow, Menu } = require('electron')
+const { app, BrowserWindow, dialog, Menu } = require('electron')
+const { autoUpdater } = require('electron-updater')
 const { spawn } = require('node:child_process')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
@@ -14,6 +15,7 @@ const runtimeToken = crypto.randomBytes(32).toString('hex')
 let runtimeProcess = null
 let runtimeLog = null
 const startupLogPath = path.join(app.getPath('temp'), 'moyuan-desktop-startup.log')
+let updateCheckStarted = false
 
 app.setName('墨渊')
 app.setPath('userData', path.join(app.getPath('appData'), 'Moyuan Desktop'))
@@ -222,6 +224,56 @@ function stopRuntime() {
   runtimeLog = null
 }
 
+function setupAutoUpdater(win) {
+  if (!isPackagedApp() || updateCheckStarted) return
+  updateCheckStarted = true
+
+  autoUpdater.autoDownload = false
+  autoUpdater.autoInstallOnAppQuit = true
+
+  autoUpdater.on('checking-for-update', () => logStartup('updater checking-for-update'))
+  autoUpdater.on('update-not-available', (info) => logStartup(`updater update-not-available version=${info?.version ?? ''}`))
+  autoUpdater.on('download-progress', (progress) => {
+    const percent = Number(progress?.percent ?? 0).toFixed(1)
+    logStartup(`updater download-progress ${percent}%`)
+  })
+  autoUpdater.on('error', (error) => logStartup('updater error', error))
+  autoUpdater.on('update-available', async (info) => {
+    logStartup(`updater update-available version=${info?.version ?? ''}`)
+    const result = await dialog.showMessageBox(win, {
+      type: 'info',
+      buttons: ['下载更新', '稍后再说'],
+      defaultId: 0,
+      cancelId: 1,
+      title: '发现新版本',
+      message: `发现墨渊新版本 ${info?.version ?? ''}`,
+      detail: '可以先在后台下载，下载完成后会提示重启安装。',
+    })
+    if (result.response === 0) {
+      autoUpdater.downloadUpdate().catch((error) => logStartup('updater download failed', error))
+    }
+  })
+  autoUpdater.on('update-downloaded', async (info) => {
+    logStartup(`updater update-downloaded version=${info?.version ?? ''}`)
+    const result = await dialog.showMessageBox(win, {
+      type: 'info',
+      buttons: ['重启安装', '下次启动安装'],
+      defaultId: 0,
+      cancelId: 1,
+      title: '更新已下载',
+      message: `墨渊 ${info?.version ?? ''} 已下载完成`,
+      detail: '重启后会自动完成安装。',
+    })
+    if (result.response === 0) {
+      autoUpdater.quitAndInstall(false, true)
+    }
+  })
+
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch((error) => logStartup('updater check failed', error))
+  }, 5000)
+}
+
 async function createWindow() {
   logStartup('createWindow begin')
   const runtime = await startRuntime()
@@ -263,6 +315,7 @@ async function createWindow() {
   })
   win.webContents.on('did-finish-load', () => {
     logStartup(`renderer loaded url=${win.webContents.getURL()}`)
+    setupAutoUpdater(win)
   })
 
   if (isPackagedApp()) {

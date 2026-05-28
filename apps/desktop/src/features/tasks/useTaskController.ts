@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react'
 import type { AccountUser, CodexTask, CodexTaskEvent } from '@eaw/shared'
-import { defaultWorkspace, enterpriseApiBase, localEmployeeId, runtimeUrl } from '../../config'
+import { defaultWorkspace, enterpriseApiBase, localEmployeeId, runtimeUrl, type ExecutionSettings } from '../../config'
 import { errorLogDetails, logClientEvent } from '../../logger'
 import { loadSignedInUser } from '../auth/useAuth'
 import type { RuntimeState } from '../runtime/types'
@@ -52,6 +52,7 @@ export function useTaskController({
   authState,
   authToken,
   authUser,
+  executionSettings,
   onAfterSelectTask,
   onFocusComposer,
   onPinToBottom,
@@ -60,6 +61,7 @@ export function useTaskController({
   authState: string
   authToken: string
   authUser: AccountUser | null
+  executionSettings: ExecutionSettings
   onAfterSelectTask: () => void
   onFocusComposer: () => void
   onPinToBottom: () => void
@@ -237,6 +239,7 @@ export function useTaskController({
     let currentUser = authUser
     logClientEvent('task.submit.preflight', {
       activeTask: taskLogSummary(activeTask),
+      executionSettings,
       promptLength: promptText.length,
       workspace: workspacePath,
     })
@@ -276,6 +279,8 @@ export function useTaskController({
         employeeId: currentUser?.id ?? localEmployeeId,
         enterpriseApiBase,
         enterpriseAuthToken: authToken,
+        reasoningEffort: executionSettings.reasoningEffort,
+        sandboxMode: executionSettings.sandboxMode,
         workspace: workspacePath,
         prompt: promptText,
         parentTaskId: shouldResume ? activeTask.id : undefined,

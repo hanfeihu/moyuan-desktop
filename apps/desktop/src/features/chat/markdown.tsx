@@ -44,7 +44,7 @@ function loadMermaid() {
 
 
 export function MarkdownText({ content }: { content: string }) {
-  const blocks = useMemo(() => markdownBlocks(content), [content])
+  const blocks = useMemo(() => markdownBlocks(repairMarkdownForDisplay(content)), [content])
 
   return (
     <div className="markdown">
@@ -73,9 +73,9 @@ export function MarkdownText({ content }: { content: string }) {
             return <MermaidDiagram code={block.code} key={index} />
           }
           return (
-            <pre className="code-block" key={index}>
+            <pre className="code-block" key={index} spellCheck={false}>
               {block.language ? <span className="code-language">{block.language}</span> : null}
-              <code>{block.code}</code>
+              <code spellCheck={false}>{block.code}</code>
             </pre>
           )
         }
@@ -258,6 +258,85 @@ function escapeMermaidLabel(label: string) {
 function resolveRuntimeAssetUrl(src: string) {
   if (src.startsWith('/api/')) return runtimeEndpoint(src)
   return src
+}
+
+function repairMarkdownForDisplay(content: string) {
+  const lines = content.replace(/\u00a0/g, ' ').split(/\r?\n/)
+  const repaired: string[] = []
+  let inFence = false
+  let fenceBody: string[] = []
+
+  const flushFenceBody = () => {
+    repaired.push(...trimFenceBody(fenceBody))
+    fenceBody = []
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim()
+    const isFence = /^`{3,}\s*([A-Za-z0-9_-]*)\s*$/.test(rawLine)
+    const isShortFence = /^`{2}\s*$/.test(rawLine)
+
+    if (isFence || (inFence && isShortFence)) {
+      if (inFence) flushFenceBody()
+      repaired.push(rawLine.replace(/^``\s*$/, '```'))
+      inFence = !inFence
+      continue
+    }
+
+    if (inFence && fenceBody.length >= 2 && looksLikeMarkdownRestart(line, fenceBody)) {
+      flushFenceBody()
+      repaired.push('```')
+      inFence = false
+    }
+
+    if (inFence) {
+      fenceBody.push(rawLine)
+    } else {
+      repaired.push(rawLine)
+    }
+  }
+
+  if (inFence) {
+    const splitIndex = findMarkdownTailIndex(fenceBody)
+    if (splitIndex >= 0) {
+      repaired.push(...trimFenceBody(fenceBody.slice(0, splitIndex)))
+      repaired.push('```')
+      repaired.push(...fenceBody.slice(splitIndex))
+    } else {
+      repaired.push(...trimFenceBody(fenceBody))
+      repaired.push('```')
+    }
+  }
+
+  return repaired.join('\n')
+}
+
+function trimFenceBody(lines: string[]) {
+  const trimmed = [...lines]
+  while (trimmed.length && /^`{1,2}\s*$/.test(trimmed[trimmed.length - 1].trim())) {
+    trimmed.pop()
+  }
+  return trimmed
+}
+
+function findMarkdownTailIndex(lines: string[]) {
+  for (let index = 1; index < lines.length; index += 1) {
+    if (looksLikeMarkdownRestart(lines[index].trim(), lines.slice(0, index))) return index
+  }
+  return -1
+}
+
+function looksLikeMarkdownRestart(line: string, previousFenceLines: string[]) {
+  if (!line) return false
+  const hasUsefulCode = previousFenceLines.some((item) => item.trim() && !/^`{1,2}\s*$/.test(item.trim()))
+  if (!hasUsefulCode) return false
+  return (
+    /^#{1,6}\s+/.test(line) ||
+    /^\*\*.+\*\*[:：]?$/.test(line) ||
+    /^\d+[.)]\s+\*\*.+/.test(line) ||
+    /^[-*]\s+/.test(line) ||
+    /^[\u4e00-\u9fa5A-Za-z].{0,32}[:：]$/.test(line)
+  )
 }
 
 function markdownBlocks(content: string): MarkdownBlock[] {

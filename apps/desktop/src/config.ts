@@ -8,3 +8,37 @@ export const desktopAppVersion = launchParams.get('appVersion') ?? import.meta.e
 export const defaultWorkspace = launchParams.get('defaultWorkspace') ?? import.meta.env.VITE_DEFAULT_WORKSPACE ?? ''
 export const localEmployeeId = import.meta.env.VITE_EMPLOYEE_ID ?? 'u-1001'
 export const authTokenStorageKey = 'moyuan.auth.token'
+export const executionSettingsStorageKey = 'moyuan.execution.settings'
+
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
+export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
+
+export type ExecutionSettings = {
+  reasoningEffort: ReasoningEffort
+  sandboxMode: SandboxMode
+}
+
+export const defaultExecutionSettings: ExecutionSettings = {
+  reasoningEffort: 'high',
+  sandboxMode: 'danger-full-access',
+}
+
+export function readExecutionSettings(): ExecutionSettings {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(executionSettingsStorageKey) ?? '{}') as Partial<ExecutionSettings>
+    return {
+      reasoningEffort: parsed.reasoningEffort === 'low' || parsed.reasoningEffort === 'medium' || parsed.reasoningEffort === 'high' || parsed.reasoningEffort === 'xhigh'
+        ? parsed.reasoningEffort
+        : defaultExecutionSettings.reasoningEffort,
+      sandboxMode: parsed.sandboxMode === 'read-only' || parsed.sandboxMode === 'workspace-write' || parsed.sandboxMode === 'danger-full-access'
+        ? parsed.sandboxMode
+        : defaultExecutionSettings.sandboxMode,
+    }
+  } catch {
+    return defaultExecutionSettings
+  }
+}
+
+export function writeExecutionSettings(settings: ExecutionSettings) {
+  window.localStorage.setItem(executionSettingsStorageKey, JSON.stringify(settings))
+}

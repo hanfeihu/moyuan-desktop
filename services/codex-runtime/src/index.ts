@@ -88,6 +88,16 @@ const execFileAsync = promisify(execFile)
 const runtimeToken = process.env.MOYUAN_RUNTIME_TOKEN ?? ''
 const runtimeHost = process.env.CODEX_RUNTIME_HOST ?? '127.0.0.1'
 const nodeHostPath = process.env.MOYUAN_NODE_HOST_PATH || process.execPath
+const codexSandboxMode = process.env.MOYUAN_CODEX_SANDBOX_MODE ?? 'danger-full-access'
+const codexReasoningEffort = process.env.MOYUAN_CODEX_REASONING_EFFORT ?? 'high'
+
+function effectiveSandboxMode(options?: RuntimeRunOptions) {
+  return options?.sandboxMode ?? codexSandboxMode
+}
+
+function effectiveReasoningEffort(options?: RuntimeRunOptions) {
+  return options?.reasoningEffort ?? codexReasoningEffort
+}
 
 await app.register(cors, {
   origin(origin, callback) {
@@ -434,6 +444,8 @@ async function ensureWorkspace(workspace: string) {
 
 async function createCodexHome(config = getModelConfig()) {
   const codexHome = process.env.MOYUAN_CODEX_HOME ?? path.join(tmpdir(), 'moyuan-codex', 'default')
+  const sandboxMode = codexSandboxMode
+  const reasoningEffort = codexReasoningEffort
 
   await mkdir(codexHome, { recursive: true })
   await writeFile(
@@ -442,8 +454,8 @@ async function createCodexHome(config = getModelConfig()) {
       `model_provider = "${config.providerId}"`,
       `model = "${config.defaultModel}"`,
       'approval_policy = "never"',
-      'sandbox_mode = "workspace-write"',
-      'model_reasoning_effort = "medium"',
+      `sandbox_mode = "${sandboxMode}"`,
+      `model_reasoning_effort = "${reasoningEffort}"`,
       'disable_response_storage = true',
       '',
       '[features]',
@@ -577,6 +589,8 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
   const codexBin = resolveCodexBin()
   const { modelConfig: config, skills } = await loadEnterpriseRuntimeConfig(options.enterpriseAuthToken, options.enterpriseApiBase)
   const codexHome = await createCodexHome(config)
+  const sandboxMode = effectiveSandboxMode(options)
+  const reasoningEffort = effectiveReasoningEffort(options)
   const skillInstructions = buildSkillInstructionBlock(skills)
   const port = await findOpenPort()
   const appServerUrl = `ws://127.0.0.1:${port}`
@@ -598,7 +612,9 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
     port,
     promptLength: prompt.length,
     providerId: config.providerId,
+    reasoningEffort,
     resume: Boolean(sessionId),
+    sandboxMode,
     transport: 'app-server',
   })
 
@@ -870,7 +886,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
           model: config.defaultModel,
           runtimeWorkspaceRoots: [workspace],
           approvalPolicy: 'never',
-          sandbox: 'workspace-write',
+          sandbox: sandboxMode,
           baseInstructions,
           persistExtendedHistory: false,
         }, 45000)
@@ -879,7 +895,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
           model: config.defaultModel,
           runtimeWorkspaceRoots: [workspace],
           approvalPolicy: 'never',
-          sandbox: 'workspace-write',
+          sandbox: sandboxMode,
           baseInstructions,
           threadSource: 'user',
           experimentalRawEvents: false,
@@ -902,8 +918,9 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
       input: [{ type: 'text', text: promptWithContext, text_elements: [] }],
       cwd: workspace,
       approvalPolicy: 'never',
-      sandboxPolicy: appServerSandboxPolicy(workspace),
+      sandboxPolicy: appServerSandboxPolicy(workspace, sandboxMode),
       model: config.defaultModel,
+      effort: reasoningEffort,
     }, 60000)
     activeTurnId = appServerTurnId(turnResult) ?? ''
     logTask(record, 'codex.turn.started', { turnId: activeTurnId })
@@ -952,6 +969,8 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
   const codexBin = resolveCodexBin()
   const { modelConfig: config, skills } = await loadEnterpriseRuntimeConfig(options.enterpriseAuthToken, options.enterpriseApiBase)
   const codexHome = await createCodexHome(config)
+  const sandboxMode = effectiveSandboxMode(options)
+  const reasoningEffort = effectiveReasoningEffort(options)
   const skillInstructions = buildSkillInstructionBlock(skills)
   const commonArgs = [
     '--json',
@@ -963,7 +982,9 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
     '-c',
     'approval_policy="never"',
     '-c',
-    'sandbox_mode="workspace-write"',
+    `sandbox_mode="${sandboxMode}"`,
+    '-c',
+    `model_reasoning_effort="${reasoningEffort}"`,
     '-m',
     config.defaultModel,
   ]
@@ -977,14 +998,16 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
   })
   const args = sessionId
     ? [codexBin, 'exec', 'resume', ...commonArgs, sessionId, promptWithContext]
-    : [codexBin, 'exec', ...commonArgs, '--sandbox', 'workspace-write', '-C', workspace, promptWithContext]
+    : [codexBin, 'exec', ...commonArgs, '--sandbox', sandboxMode, '-C', workspace, promptWithContext]
 
   setTaskLifecyclePhase(record, 'running', isRuntimeFailureContent)
   logTask(record, 'codex.exec.start', {
     model: config.defaultModel,
     promptLength: prompt.length,
     providerId: config.providerId,
+    reasoningEffort,
     resume: Boolean(sessionId),
+    sandboxMode,
     transport: 'exec',
   })
 
@@ -1220,6 +1243,8 @@ app.post('/api/codex/tasks', async (request, reply) => {
   void runCodex(record, parsed.data.prompt, parsed.data.workspace, requestedSessionId ?? task.sessionId, {
     enterpriseApiBase: parsed.data.enterpriseApiBase,
     enterpriseAuthToken: parsed.data.enterpriseAuthToken,
+    reasoningEffort: parsed.data.reasoningEffort,
+    sandboxMode: parsed.data.sandboxMode,
   }).catch((error: unknown) => {
     if (record.cancelRequested) return
     logTask(record, 'task.run.unhandled_error', error, 'error')

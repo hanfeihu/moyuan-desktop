@@ -33,6 +33,8 @@ export type EnterpriseSkillSet = {
 export type RuntimeRunOptions = {
   enterpriseApiBase?: string
   enterpriseAuthToken?: string
+  reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+  sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access'
 }
 
 export type MoyuanToolCall =

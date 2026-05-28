@@ -18,6 +18,8 @@ export const taskSchema = z.object({
   enterpriseApiBase: z.string().url().optional(),
   enterpriseAuthToken: z.string().optional(),
   parentTaskId: z.string().optional(),
+  reasoningEffort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']).optional(),
+  sandboxMode: z.enum(['read-only', 'workspace-write', 'danger-full-access']).optional(),
   sessionId: z.string().optional(),
 })
 

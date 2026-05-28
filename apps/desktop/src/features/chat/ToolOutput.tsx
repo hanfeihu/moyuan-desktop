@@ -40,7 +40,7 @@ export function ToolOutput({ content }: { content: string }) {
           <span>{summary}</span>
           <code>查看命令</code>
         </summary>
-        <pre>{detail ? `$ ${command}\n\n${detail}` : `$ ${command}`}</pre>
+        <pre spellCheck={false}>{detail ? `$ ${command}\n\n${detail}` : `$ ${command}`}</pre>
       </details>
     )
   }
@@ -56,7 +56,7 @@ export function ToolOutput({ content }: { content: string }) {
         <span>{summary}</span>
         {command ? <code>{command}</code> : null}
       </summary>
-      <pre>{detail}</pre>
+      <pre spellCheck={false}>{detail}</pre>
     </details>
   )
 }

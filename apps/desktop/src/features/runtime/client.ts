@@ -1,5 +1,6 @@
 import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
 import { runtimeEndpoint, runtimeFetch } from '../../api'
+import type { ExecutionSettings } from '../../config'
 
 type RuntimePayload<T> = {
   data?: T
@@ -12,6 +13,8 @@ export type CreateRuntimeTaskInput = {
   enterpriseAuthToken: string
   parentTaskId?: string
   prompt: string
+  reasoningEffort?: ExecutionSettings['reasoningEffort']
+  sandboxMode?: ExecutionSettings['sandboxMode']
   sessionId?: string
   workspace: string
 }

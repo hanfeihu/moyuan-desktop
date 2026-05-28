@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AuthScreen } from '../features/auth/AuthScreen'
 import { useAuth } from '../features/auth/useAuth'
 import { Composer } from '../features/chat/Composer'
@@ -9,7 +9,11 @@ import { Sidebar } from '../features/layout/Sidebar'
 import { Topbar } from '../features/layout/Topbar'
 import { useDesktopHotkeys } from '../features/layout/useDesktopHotkeys'
 import { useTaskController } from '../features/tasks/useTaskController'
+import { readExecutionSettings, writeExecutionSettings, type ExecutionSettings } from '../config'
 import { logClientEvent } from '../logger'
+
+const reasoningOrder: ExecutionSettings['reasoningEffort'][] = ['low', 'medium', 'high', 'xhigh']
+const sandboxOrder: ExecutionSettings['sandboxMode'][] = ['read-only', 'workspace-write', 'danger-full-access']
 
 export function DesktopApp() {
   const {
@@ -31,6 +35,7 @@ export function DesktopApp() {
   const transcriptBottomRef = useRef<HTMLDivElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const composerRef = useRef<HTMLElement | null>(null)
+  const [executionSettings, setExecutionSettings] = useState(readExecutionSettings)
   const focusComposer = () => textareaRef.current?.focus()
   const scrollApiRef = useRef({
     pinToBottom: () => {},
@@ -42,6 +47,7 @@ export function DesktopApp() {
     authToken,
     authUser,
     onAfterSelectTask: () => scrollApiRef.current.scheduleTranscriptBottom('auto'),
+    executionSettings,
     onFocusComposer: focusComposer,
     onPinToBottom: () => scrollApiRef.current.pinToBottom(),
     setAuthUser,
@@ -66,6 +72,28 @@ export function DesktopApp() {
       userAgent: window.navigator.userAgent,
     })
   }, [])
+
+  function updateExecutionSettings(next: ExecutionSettings) {
+    setExecutionSettings(next)
+    writeExecutionSettings(next)
+    logClientEvent('execution_settings.changed', next)
+  }
+
+  function cycleReasoningEffort() {
+    const index = reasoningOrder.indexOf(executionSettings.reasoningEffort)
+    updateExecutionSettings({
+      ...executionSettings,
+      reasoningEffort: reasoningOrder[(index + 1) % reasoningOrder.length],
+    })
+  }
+
+  function cycleSandboxMode() {
+    const index = sandboxOrder.indexOf(executionSettings.sandboxMode)
+    updateExecutionSettings({
+      ...executionSettings,
+      sandboxMode: sandboxOrder[(index + 1) % sandboxOrder.length],
+    })
+  }
 
   function handleLogout() {
     logClientEvent('auth.logout', { userId: authUser?.id })
@@ -120,10 +148,13 @@ export function DesktopApp() {
         <Composer
           canSubmit={taskController.canSubmit}
           composerRef={composerRef}
+          executionSettings={executionSettings}
           isBusy={taskController.isBusy}
           isCancelling={taskController.isCancelling}
           isSubmitting={taskController.isSubmitting}
           onPromptChange={(value) => taskController.setPrompt(value)}
+          onReasoningToggle={cycleReasoningEffort}
+          onSandboxToggle={cycleSandboxMode}
           onStop={taskController.stopActiveTask}
           onSubmit={() => void taskController.submitTask()}
           placeholder={taskController.placeholder}

@@ -152,11 +152,19 @@ export function appServerTurnId(result: unknown) {
   return typeof id === 'string' ? id : undefined
 }
 
-export function appServerSandboxPolicy(workspace: string) {
+export function appServerSandboxPolicy(workspace: string, sandboxMode = 'workspace-write') {
+  if (sandboxMode === 'danger-full-access') {
+    return { type: 'dangerFullAccess' }
+  }
+
+  if (sandboxMode === 'read-only') {
+    return { type: 'readOnly', networkAccess: true }
+  }
+
   return {
     type: 'workspaceWrite',
     writableRoots: [workspace],
-    networkAccess: false,
+    networkAccess: true,
     excludeTmpdirEnvVar: false,
     excludeSlashTmp: false,
   }

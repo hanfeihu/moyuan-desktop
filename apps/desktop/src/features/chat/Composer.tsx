@@ -1,13 +1,30 @@
 import { ChevronDown, Loader2, Plus, Send, Settings, Square, Zap } from 'lucide-react'
 import type { RefObject } from 'react'
+import type { ExecutionSettings } from '../../config'
+
+const reasoningLabel: Record<ExecutionSettings['reasoningEffort'], string> = {
+  low: '低',
+  medium: '中',
+  high: '高',
+  xhigh: '超高',
+}
+
+const sandboxLabel: Record<ExecutionSettings['sandboxMode'], string> = {
+  'danger-full-access': '全权限',
+  'read-only': '只读',
+  'workspace-write': '工作区',
+}
 
 export function Composer({
   canSubmit,
   composerRef,
+  executionSettings,
   isBusy,
   isCancelling,
   isSubmitting,
   onPromptChange,
+  onReasoningToggle,
+  onSandboxToggle,
   onStop,
   onSubmit,
   placeholder,
@@ -18,10 +35,13 @@ export function Composer({
 }: {
   canSubmit: boolean
   composerRef: RefObject<HTMLElement>
+  executionSettings: ExecutionSettings
   isBusy: boolean
   isCancelling: boolean
   isSubmitting: boolean
   onPromptChange: (value: string) => void
+  onReasoningToggle: () => void
+  onSandboxToggle: () => void
   onStop: () => void
   onSubmit: () => void
   placeholder: string
@@ -58,7 +78,7 @@ export function Composer({
           </button>
           <button className="composer-soft-button" title="自定义" type="button">
             <Settings size={15} />
-            <span>自定义</span>
+            <span>本机</span>
           </button>
         </div>
         <div className="composer-tools right">
@@ -66,8 +86,11 @@ export function Composer({
             <span>gpt-5.5</span>
             <ChevronDown size={14} />
           </button>
-          <button className="composer-soft-button compact" title="推理强度" type="button">
-            medium
+          <button className="composer-soft-button compact" title="推理强度在本机保存，点击切换" type="button" onClick={onReasoningToggle}>
+            {reasoningLabel[executionSettings.reasoningEffort]}
+          </button>
+          <button className="composer-soft-button compact permission" title="本机执行权限在本机保存，点击切换" type="button" onClick={onSandboxToggle}>
+            {sandboxLabel[executionSettings.sandboxMode]}
           </button>
           <button
             className={`send-button ${isBusy ? 'stop' : ''}`}

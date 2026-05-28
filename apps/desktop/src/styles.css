@@ -11,16 +11,12 @@
   --dim: #a2a7ad;
   --accent: #20252b;
   --danger: #be3a31;
-  --chat-message-size: 15.5px;
+  --chat-message-size: 14px;
   --font-ui:
     -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
     "PingFang SC", "Hiragino Sans GB", "Geist Variable", "Noto Sans SC Variable",
     "Helvetica Neue", Arial, sans-serif;
-  --font-chat:
-    -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
-    "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "微软雅黑",
-    "Geist Variable", "Noto Sans SC Variable",
-    "Helvetica Neue", Arial, sans-serif;
+  --font-chat: var(--font-ui);
   --font-mono: "SF Mono", SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace;
   font-family: var(--font-ui);
   color: var(--text);
@@ -824,21 +820,26 @@ button:disabled {
   font-family: var(--font-chat);
   font-size: var(--chat-message-size);
   font-weight: 460;
-  line-height: 1.72;
+  line-height: 1.68;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   text-wrap: pretty;
 }
 
+.message-body,
+.message-body * {
+  font-size: var(--chat-message-size);
+}
+
 .message.user .message-body {
   border: 0;
   border-radius: 18px;
-  padding: 7px 13px;
+  padding: 7px 12px;
   background: #f3f3f4;
   color: #30343a;
   font-size: var(--chat-message-size);
-  font-weight: 500;
-  line-height: 1.56;
+  font-weight: 460;
+  line-height: 1.52;
   justify-self: end;
   width: fit-content;
   max-width: min(620px, 72%);
@@ -930,7 +931,7 @@ button:disabled {
   font-family: inherit;
   color: #969a9f;
   font-size: var(--chat-message-size);
-  font-weight: 500;
+  font-weight: 460;
   line-height: 1.45;
 }
 
@@ -974,7 +975,7 @@ button:disabled {
   align-items: center;
   gap: 7px;
   color: #989ca1;
-  font-size: 12.5px;
+  font-size: var(--chat-message-size);
   line-height: 1.35;
   white-space: nowrap;
 }
@@ -1010,7 +1011,7 @@ button:disabled {
   background: rgba(246, 246, 244, 0.94);
   color: #7f858c;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--chat-message-size);
 }
 
 .tool-row span:not(.tool-summary-dot),
@@ -1221,6 +1222,7 @@ button:disabled {
 .markdown {
   display: grid;
   gap: 12px;
+  font-size: var(--chat-message-size);
 }
 
 .markdown h3,
@@ -1231,6 +1233,7 @@ button:disabled {
 .markdown pre,
 .markdown hr {
   margin: 0;
+  font-size: var(--chat-message-size);
 }
 
 .markdown h3 {
@@ -1238,10 +1241,11 @@ button:disabled {
   color: #1f242b;
   font-size: inherit;
   line-height: inherit;
-  font-weight: 660;
+  font-weight: 560;
 }
 
 .markdown p {
+  font-size: var(--chat-message-size);
   line-height: inherit;
 }
 
@@ -1258,6 +1262,7 @@ button:disabled {
 
 .markdown li {
   padding-left: 5px;
+  font-size: var(--chat-message-size);
   line-height: inherit;
 }
 
@@ -1273,7 +1278,7 @@ button:disabled {
 
 .markdown strong {
   color: #20242a;
-  font-weight: 650;
+  font-weight: 560;
 }
 
 .markdown a {
@@ -1294,7 +1299,7 @@ button:disabled {
   background: #f4f4f2;
   color: #3d4248;
   font-family: var(--font-mono);
-  font-size: inherit;
+  font-size: var(--chat-message-size);
 }
 
 .markdown .code-block {
@@ -1306,7 +1311,7 @@ button:disabled {
   padding: 13px 14px;
   background: #f8f8f6;
   color: #69707a;
-  font-size: inherit;
+  font-size: var(--chat-message-size);
   line-height: 1.58;
   white-space: pre;
 }
@@ -1327,7 +1332,7 @@ button:disabled {
   border-radius: 0;
   padding: 0;
   background: transparent;
-  font-size: inherit;
+  font-size: var(--chat-message-size);
 }
 
 .markdown-divider {
@@ -1350,7 +1355,7 @@ button:disabled {
   min-width: 560px;
   border-collapse: collapse;
   color: #30343a;
-  font-size: inherit;
+  font-size: var(--chat-message-size);
   line-height: inherit;
 }
 
@@ -1365,8 +1370,8 @@ button:disabled {
 .markdown-table th {
   background: rgba(246, 246, 243, 0.92);
   color: #6f747a;
-  font-size: inherit;
-  font-weight: 640;
+  font-size: var(--chat-message-size);
+  font-weight: 560;
   white-space: nowrap;
 }
 

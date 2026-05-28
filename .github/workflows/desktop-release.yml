@@ -23,11 +23,15 @@ jobs:
           - name: macOS
             os: macos-latest
             command: npm run build:release && npm run prepare:desktop-runtime && npx electron-builder --project apps/desktop --mac dmg zip --publish never -c.mac.identity=null
-            artifact: apps/desktop/release/Moyuan-Desktop-*
+            artifact: |
+              apps/desktop/release/Moyuan-Desktop-*
+              apps/desktop/release/latest*.yml
           - name: Windows
             os: windows-latest
             command: npm run dist:desktop:win
-            artifact: apps/desktop/release/Moyuan-Desktop-*
+            artifact: |
+              apps/desktop/release/Moyuan-Desktop-*
+              apps/desktop/release/latest*.yml
 
     steps:
       - name: Checkout

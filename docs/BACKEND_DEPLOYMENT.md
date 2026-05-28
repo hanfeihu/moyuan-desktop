@@ -301,6 +301,27 @@ curl -i http://codex.tminos.com:18080/admin-health
 - 视频查询接口成功后必须返回 `usage.total_tokens`。
 - MinIO 未配置时可能没有 `storageUrl`，但仍应有资源记录。
 
+## 桌面端自动更新
+
+墨渊桌面端使用 Electron 标准自动更新链路：
+
+- 更新源：`http://codex.tminos.com:18080/downloads/`
+- Windows 元数据：`latest.yml`
+- macOS 元数据：`latest-mac.yml`
+- Windows 安装包：`Moyuan-Desktop-x.x.x-win-x64.exe`
+- macOS 更新包：`Moyuan-Desktop-x.x.x-mac-arm64.zip`
+- 官网展示下载包：`Moyuan-Desktop-x.x.x-mac-arm64.dmg` 和 Windows exe
+
+发布新版本时，除了官网展示的 dmg/exe，也必须把以下文件同步到 `/opt/moyuan-site/downloads/`：
+
+- `latest.yml`
+- `latest-mac.yml`
+- `*.blockmap`
+- `Moyuan-Desktop-*-mac-arm64.zip`
+- `Moyuan-Desktop-*-win-x64.exe`
+
+客户端启动后会自动检查更新。有新版本时提示下载，下载完成后提示用户重启安装。不要让用户每次重新访问官网手动下载安装。
+
 ## 给其他 AI 的协作规则
 
 1. 先读本文件、`docs/MOYUAN_ARCHITECTURE.md`、`services/api/src/index.ts`、`apps/admin/src/services/admin.ts`。
