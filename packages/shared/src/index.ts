@@ -177,3 +177,13 @@ export type CodexTaskEvent = {
   turnId?: string
   raw?: unknown
 }
+
+export {
+  compactAssistantTranscript,
+  finalAssistantContent,
+  friendlyRuntimeMessage,
+  isRuntimeFailureNotice,
+  mergeAssistantContent,
+  runtimeFailureDiagnostic,
+  type CodexTranscriptItem,
+} from './task-normalization.js'

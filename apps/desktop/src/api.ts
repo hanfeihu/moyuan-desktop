@@ -21,6 +21,9 @@ export function runtimeEndpoint(pathname: string) {
 
 export function runtimeFetch(pathname: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers)
+  if (init.body != null && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
   if (runtimeToken) headers.set('x-moyuan-runtime-token', runtimeToken)
   return fetch(runtimeEndpoint(pathname), { ...init, headers })
 }

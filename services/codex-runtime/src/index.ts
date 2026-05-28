@@ -1,24 +1,27 @@
 import cors from '@fastify/cors'
 import { execFile, spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { createServer } from 'node:net'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import 'dotenv/config'
 import Fastify from 'fastify'
 import { z } from 'zod'
-import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
-import { defaultEnterpriseApiBase as enterpriseApiBase, getImageConfig, getModelConfig } from './config.js'
+import {
+  friendlyRuntimeMessage,
+  isRuntimeFailureNotice,
+  runtimeFailureDiagnostic,
+  type CodexTask,
+  type CodexTaskEvent,
+} from '@eaw/shared'
+import { defaultEnterpriseApiBase as enterpriseApiBase, getModelConfig } from './config.js'
 import { enterpriseJson, loadEnterpriseRuntimeConfig, validateEnterpriseQuota } from './enterprise/client.js'
 import { buildSkillInstructionBlock, isLikelyToolCallFragment, parseMoyuanToolCall } from './skills/contracts.js'
 import type { RuntimeRunOptions } from './skills/contracts.js'
 import { runImageGenerationTool, runMoyuanToolCall } from './skills/executor.js'
 import { createRuntimeLogger } from './observability/logger.js'
 import {
-  applyTaskLifecycleEvent,
   canReuseLifecycleSession,
   finishTaskLifecycle,
   hasFinalAssistantReply,
@@ -26,8 +29,23 @@ import {
   resetTaskLifecycleForNewTurn,
   setTaskLifecyclePhase,
 } from './tasks/lifecycle.js'
-import { finalAssistantContent, friendlyRuntimeMessage, isRuntimeFailureNotice, mergeAssistantContent, runtimeFailureDiagnostic, sanitizeTask } from './tasks/sanitize.js'
-import { approvalSchema, clientLogSchema, forkSchema, imageGenerationSchema, taskSchema } from './tasks/schemas.js'
+import { sanitizeTask } from './tasks/sanitize.js'
+import { approvalSchema, forkSchema, imageGenerationSchema, taskSchema } from './tasks/schemas.js'
+import { appServerRaw, createTaskEventBus, rawItemId } from './tasks/events.js'
+import { registerDiagnosticsRoutes } from './routes/diagnostics.js'
+import { appServerSandboxPolicy, appServerThreadId, appServerTurnId, connectAppServer, findOpenPort } from './codex/app-server.js'
+import { buildBaseInstructions, buildPromptWithContext } from './codex/context.js'
+import {
+  assistantDeltaFromParams,
+  assistantTextFromItem,
+  codexUsageFromPayload,
+  eventFromJson,
+  firstString,
+  isAgentMessageItem,
+  isCommandExecutionItem,
+  textFromContent,
+  usageReportId,
+} from './codex/protocol.js'
 import type { TaskRecord } from './tasks/types.js'
 
 function redactRequestUrl(rawUrl = '') {
@@ -117,14 +135,6 @@ const mutedStderrPatterns = [
 ]
 
 const maxVisibleToolOutput = 6000
-const maxContextBlockLength = 9000
-const maxCommandHistoryItemLength = 1800
-const maxDiffContextLength = 2400
-const codexOperatingGuidance = [
-  '项目分析和排障时优先使用 rg、rg --files、精确目录和小范围读取。',
-  '默认避开 node_modules、dist、release、build、coverage、.git、package-lock.json 等大型依赖或构建产物，除非用户明确要求。',
-  '命令输出很长时先总结关键路径和结论，再按需继续读取，不要把大段无关输出放进上下文。',
-].join('\n')
 
 function logRuntime(event: string, details?: unknown, level: 'debug' | 'info' | 'warn' | 'error' = 'info') {
   void runtimeLogger.append({ details, event, level, source: 'codex-runtime' })
@@ -163,46 +173,10 @@ function truncateMiddle(value: string, maxLength: number) {
   return `${value.slice(0, headLength)}\n\n... 输出过长，已截断 ${value.length - headLength - tailLength} 个字符 ...\n\n${value.slice(-tailLength)}`
 }
 
-function boundedJoin(items: string[], maxLength: number) {
-  const result: string[] = []
-  let length = 0
-  for (const item of items) {
-    const next = truncateMiddle(item, maxCommandHistoryItemLength)
-    if (length + next.length > maxLength) break
-    result.push(next)
-    length += next.length
-  }
-  return result.join('\n\n')
-}
-
 function isRuntimeFailureContent(content: string) {
   const text = content.trim()
   if (!text || text.startsWith('$ ')) return false
   return isRuntimeFailureNotice(text)
-}
-
-function buildBaseInstructions(skillInstructions: string) {
-  return [codexOperatingGuidance, skillInstructions].filter(Boolean).join('\n\n')
-}
-
-function buildPromptWithContext(prompt: string, context: {
-  commandHistory?: string[]
-  diffSummary?: string
-  memory?: string
-  skillInstructions: string
-}) {
-  const commandContext = boundedJoin(context.commandHistory?.slice(-8) ?? [], maxContextBlockLength)
-  const contextBlock = [
-    context.skillInstructions,
-    codexOperatingGuidance,
-    context.memory ? `工作区记忆:\n${truncateMiddle(context.memory, maxContextBlockLength)}` : '',
-    commandContext ? `最近命令历史:\n${commandContext}` : '',
-    context.diffSummary ? `当前文件变更摘要:\n${truncateMiddle(context.diffSummary, maxDiffContextLength)}` : '',
-  ]
-    .filter(Boolean)
-    .join('\n\n')
-
-  return contextBlock ? `${contextBlock}\n\n用户本轮请求:\n${prompt}` : prompt
 }
 
 function taskUpdatedAtMs(task: CodexTask) {
@@ -359,6 +333,14 @@ function appendTranscriptItem(
   return nextItem
 }
 
+const { eventSequence, pushEvent, streamAssistantMessage } = createTaskEventBus({
+  appendTranscriptItem,
+  isRuntimeFailureContent,
+  logTask,
+  saveStore,
+  safeVisibleToolContent,
+})
+
 function resolveCodexBin() {
   return require.resolve('@openai/codex/bin/codex.js')
 }
@@ -457,259 +439,6 @@ async function createCodexHome(config = getModelConfig()) {
   return codexHome
 }
 
-function resolveAssistantItemId(record: TaskRecord, event: CodexTaskEvent) {
-  if (event.role !== 'assistant') return undefined
-
-  const explicitItemId = event.itemId ?? rawItemId(event.raw)
-  if (explicitItemId) {
-    record.activeAssistantItemId = explicitItemId
-    return explicitItemId
-  }
-
-  if (event.type === 'message_delta') {
-    record.activeAssistantItemId ??= `assistant-${record.task.id}-${record.events.length + 1}`
-    return record.activeAssistantItemId
-  }
-
-  if (event.type === 'message' && record.activeAssistantItemId) return record.activeAssistantItemId
-
-  return `assistant-${record.task.id}-${record.events.length + 1}`
-}
-
-function pushEvent(record: TaskRecord, event: Omit<CodexTaskEvent, 'id' | 'timestamp'>) {
-  let next: CodexTaskEvent = {
-    ...event,
-    id: `${event.taskId}-${record.events.length + 1}`,
-    turnId: event.turnId ?? record.currentTurnId,
-    seq: record.events.length + 1,
-    timestamp: new Date().toISOString(),
-  }
-  const assistantItemId = resolveAssistantItemId(record, next)
-  if (assistantItemId) next = { ...next, itemId: assistantItemId }
-
-  if (next.type === 'thread.started' && next.raw && typeof next.raw === 'object') {
-    const threadId = (next.raw as { thread_id?: unknown }).thread_id
-    if (typeof threadId === 'string') {
-      record.task.sessionId = threadId
-    }
-  }
-
-  if (!next.content && next.type !== 'thread.started') return
-
-  record.events.push(next)
-  const previousPhase = record.lifecycle?.phase
-  applyTaskLifecycleEvent(record, next, isRuntimeFailureContent)
-  const nextPhase = record.lifecycle?.phase
-  const shouldLogEvent = next.type !== 'message_delta' || previousPhase !== nextPhase
-  if (shouldLogEvent) {
-    logTask(
-      record,
-      'task.event',
-      {
-        contentLength: next.content.length,
-        contentPreview: previewLogContent(next.content),
-        itemId: next.itemId,
-        nextPhase,
-        previousPhase,
-        role: next.role,
-        status: record.task.status,
-        type: next.type,
-      },
-      next.type === 'turn.failed' || next.type === 'error' ? 'error' : next.type === 'process.exit' && record.task.status !== 'completed' ? 'warn' : 'debug',
-    )
-  }
-
-  if (next.type === 'message_delta') {
-    const itemId = next.itemId ?? `assistant-${record.events.length}`
-    const existingIndex = record.streamItemIndexes.get(itemId)
-
-    if (existingIndex === undefined) {
-      record.streamItemIndexes.set(itemId, record.task.transcript.length)
-      appendTranscriptItem(record, {
-        role: 'assistant',
-        content: next.content,
-        eventId: next.id,
-        itemId,
-        timestamp: next.timestamp,
-      })
-    } else {
-      const current = record.task.transcript[existingIndex]
-      const content = mergeAssistantContent(current.content, next.content)
-      record.task.transcript[existingIndex] = { ...current, content, eventId: next.id, timestamp: next.timestamp }
-    }
-  } else if (next.type === 'message' && next.role === 'assistant') {
-    const itemId = next.itemId ?? rawItemId(next.raw)
-    const existingIndex = itemId ? record.streamItemIndexes.get(itemId) : undefined
-    if (existingIndex !== undefined) {
-      const current = record.task.transcript[existingIndex]
-      record.task.transcript[existingIndex] = { ...current, content: finalAssistantContent(current.content, next.content), eventId: next.id, timestamp: next.timestamp }
-    } else if (record.task.transcript.at(-1)?.role !== 'assistant' || record.task.transcript.at(-1)?.content !== next.content) {
-      appendTranscriptItem(record, {
-        role: next.role,
-        content: next.content,
-        eventId: next.id,
-        itemId,
-        timestamp: next.timestamp,
-      })
-    }
-    if (record.activeAssistantItemId === itemId) record.activeAssistantItemId = undefined
-  } else if (next.content) {
-    appendTranscriptItem(record, {
-      role: next.role,
-      content: next.content,
-      eventId: next.id,
-      itemId: next.itemId,
-      timestamp: next.timestamp,
-    })
-  }
-
-  record.task.updatedAt = next.timestamp
-  if (next.role === 'tool' && next.content.startsWith('$ ')) {
-    record.task.commandHistory = [...(record.task.commandHistory ?? []), safeVisibleToolContent(next.content)].slice(-80)
-  }
-  void saveStore()
-
-  for (const subscriber of record.subscribers) {
-    subscriber(next)
-  }
-}
-
-function eventSequence(eventId: string, taskId: string) {
-  const prefix = `${taskId}-`
-  if (!eventId.startsWith(prefix)) return undefined
-  const value = Number(eventId.slice(prefix.length))
-  return Number.isFinite(value) ? value : undefined
-}
-
-function rawItemId(raw: unknown) {
-  if (!raw || typeof raw !== 'object') return undefined
-  const direct = firstString((raw as { itemId?: unknown }).itemId, (raw as { item_id?: unknown }).item_id)
-  if (direct) return direct
-  const item = (raw as { item?: unknown }).item
-  if (!item || typeof item !== 'object') return undefined
-  const id = firstString((item as { id?: unknown }).id, (item as { itemId?: unknown }).itemId, (item as { item_id?: unknown }).item_id)
-  return id || undefined
-}
-
-function rawWithItemId(raw: unknown, fallbackId: string) {
-  if (rawItemId(raw)) return raw
-  return { item: { id: fallbackId, type: 'agent_message' }, payload: raw }
-}
-
-function assistantStreamChunks(content: string) {
-  const chars = Array.from(content)
-  const chunkSize = Math.max(1, Math.min(10, Math.ceil(chars.length / 90)))
-  const chunks: string[] = []
-  for (let index = 0; index < chars.length; index += chunkSize) {
-    chunks.push(chars.slice(index, index + chunkSize).join(''))
-  }
-  return chunks
-}
-
-async function streamAssistantMessage(record: TaskRecord, event: Omit<CodexTaskEvent, 'id' | 'timestamp'>) {
-  const itemId = rawItemId(event.raw) ?? `assistant-final-${record.events.length + 1}`
-  const raw = rawWithItemId(event.raw, itemId)
-
-  if (record.streamItemIndexes.has(itemId)) {
-    pushEvent(record, { ...event, raw })
-    return
-  }
-
-  let visible = ''
-  for (const chunk of assistantStreamChunks(event.content)) {
-    visible += chunk
-    pushEvent(record, {
-      ...event,
-      type: 'message_delta',
-      content: visible,
-      raw,
-    })
-    await sleep(18)
-  }
-
-  pushEvent(record, { ...event, raw })
-}
-
-function firstString(...values: unknown[]) {
-  for (const value of values) {
-    if (typeof value === 'string' && value) return value
-  }
-  return ''
-}
-
-function normalizedType(value: unknown) {
-  return typeof value === 'string' ? value.replace(/[_-]/g, '').toLowerCase() : ''
-}
-
-function isAgentMessageItem(item: Record<string, unknown> | null): item is Record<string, unknown> {
-  return normalizedType(item?.type) === 'agentmessage'
-}
-
-function isCommandExecutionItem(item: Record<string, unknown> | null): item is Record<string, unknown> {
-  return normalizedType(item?.type) === 'commandexecution'
-}
-
-function textFromContent(value: unknown): string {
-  if (typeof value === 'string') return value
-  if (!Array.isArray(value)) return ''
-
-  return value
-    .map((part) => {
-      if (typeof part === 'string') return part
-      if (!part || typeof part !== 'object') return ''
-      const record = part as Record<string, unknown>
-      return firstString(record.text, record.content, record.value)
-    })
-    .filter(Boolean)
-    .join('')
-}
-
-function findUsagePayload(payload: unknown): Record<string, unknown> | undefined {
-  if (!payload || typeof payload !== 'object') return undefined
-  if (Array.isArray(payload)) {
-    for (const item of payload) {
-      const found = findUsagePayload(item)
-      if (found) return found
-    }
-    return undefined
-  }
-
-  const record = payload as Record<string, unknown>
-  const direct = record.usage
-  if (direct && typeof direct === 'object' && !Array.isArray(direct)) return direct as Record<string, unknown>
-  if ('input_tokens' in record || 'output_tokens' in record || 'total_tokens' in record) return record
-  for (const value of Object.values(record)) {
-    const found = findUsagePayload(value)
-    if (found) return found
-  }
-  return undefined
-}
-
-function numericUsage(value: unknown) {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.ceil(value) : 0
-}
-
-function codexUsageFromPayload(payload: unknown) {
-  const usage = findUsagePayload(payload)
-  if (!usage) return undefined
-  const promptTokens = numericUsage(usage.input_tokens ?? usage.prompt_tokens ?? usage.promptTokens)
-  const completionTokens = numericUsage(usage.output_tokens ?? usage.completion_tokens ?? usage.completionTokens)
-  const totalTokens = numericUsage(usage.total_tokens ?? usage.totalTokens) || promptTokens + completionTokens
-  if (!totalTokens) return undefined
-  return { completionTokens, promptTokens, totalTokens }
-}
-
-function usageReportId(taskId: string, payload: unknown) {
-  const digest = createHash('sha256').update(compactJson(payload)).digest('hex').slice(0, 16)
-  const fromPayload = firstString(
-    (payload as { id?: unknown })?.id,
-    (payload as { turn_id?: unknown })?.turn_id,
-    (payload as { turnId?: unknown })?.turnId,
-    (payload as { turn?: { id?: unknown } })?.turn?.id,
-  )
-  return `codex:${taskId}:${fromPayload || digest}`
-}
-
 async function reportCodexUsage(taskId: string, payload: unknown, options: RuntimeRunOptions) {
   if (!options.enterpriseAuthToken) return
   const usage = codexUsageFromPayload(payload)
@@ -722,314 +451,6 @@ async function reportCodexUsage(taskId: string, payload: unknown, options: Runti
     }),
     method: 'POST',
   })
-}
-
-function assistantTextFromItem(item: Record<string, unknown> | null, params?: Record<string, unknown>) {
-  if (!item) return ''
-  return firstString(
-    item.text,
-    item.outputText,
-    item.output_text,
-    item.message,
-    textFromContent(item.content),
-    params?.text,
-    params?.outputText,
-    params?.output_text,
-    params?.message,
-    textFromContent(params?.content),
-  )
-}
-
-function assistantDeltaFromParams(params: Record<string, unknown>) {
-  return firstString(params.delta, params.text, params.outputText, params.output_text, params.message, textFromContent(params.content))
-}
-
-function compactJson(payload: unknown) {
-  try {
-    return JSON.stringify(payload)
-  } catch {
-    return ''
-  }
-}
-
-function eventFromJson(taskId: string, payload: unknown): Omit<CodexTaskEvent, 'id' | 'timestamp'> {
-  const obj = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
-  const type = typeof obj.type === 'string' ? obj.type : 'message'
-  const message = typeof obj.message === 'string' ? obj.message : ''
-  const item = obj.item && typeof obj.item === 'object' ? (obj.item as Record<string, unknown>) : null
-  const itemId = rawItemId(payload)
-
-  if (type === 'item.updated' && isAgentMessageItem(item)) {
-    const content = firstString(item.text, item.delta, obj.delta, obj.text, textFromContent(item.content), textFromContent(obj.content))
-
-    return {
-      taskId,
-      type: 'message_delta',
-      role: 'assistant',
-      content,
-      itemId,
-      raw: payload,
-    }
-  }
-
-  if (type === 'item.completed' && isAgentMessageItem(item)) {
-    return {
-      taskId,
-      type: 'message',
-      role: 'assistant',
-      content: assistantTextFromItem(item, obj),
-      itemId,
-      raw: payload,
-    }
-  }
-
-  if ((type === 'item.started' || type === 'item.completed') && isCommandExecutionItem(item)) {
-    if (type === 'item.started') {
-      return {
-        taskId,
-        type: 'tool',
-        role: 'tool',
-        content: '',
-        itemId,
-        raw: payload,
-      }
-    }
-
-    const command = firstString(item.command, item.commandLine, item.command_line)
-    const output = truncateMiddle(firstString(item.aggregated_output, item.aggregatedOutput, item.output).trim(), maxVisibleToolOutput)
-    const status = typeof item.status === 'string' ? item.status : 'completed'
-    const rawExitCode = typeof item.exit_code === 'number' ? item.exit_code : typeof item.exitCode === 'number' ? item.exitCode : undefined
-    const exitCode = typeof rawExitCode === 'number' ? `\nexit ${rawExitCode}` : ''
-    const body = output ? `$ ${command}\n${output}${exitCode}` : `$ ${command}\n${status}`
-
-    return {
-      taskId,
-      type: 'tool',
-      role: 'tool',
-      content: body,
-      itemId,
-      raw: payload,
-    }
-  }
-
-  if (type === 'item.started' || type === 'item.completed') {
-    return {
-      taskId,
-      type: 'message',
-      role: 'system',
-      content: '',
-      raw: payload,
-    }
-  }
-
-  if (type.includes('error') || type === 'turn.failed') {
-    return {
-      taskId,
-      type: type === 'turn.failed' ? 'turn.failed' : 'error',
-      role: 'system',
-      content: message || compactJson(payload),
-      raw: payload,
-    }
-  }
-
-  if (type.includes('exec') || type.includes('tool')) {
-    return {
-      taskId,
-      type: 'tool',
-      role: 'tool',
-      content: message,
-      raw: payload,
-    }
-  }
-
-  if (type === 'turn.completed') {
-    return { taskId, type: 'turn.completed', role: 'system', content: '任务完成', raw: payload }
-  }
-
-  if (type === 'thread.started' || type === 'turn.started') {
-    return { taskId, type, role: 'system', content: '', raw: payload }
-  }
-
-  if (!message) {
-    return {
-      taskId,
-      type: 'message',
-      role: 'system',
-      content: '',
-      raw: payload,
-    }
-  }
-
-  return {
-    taskId,
-    type: 'message',
-    role: 'assistant',
-    content: message,
-    raw: payload,
-  }
-}
-
-function findOpenPort(start = 49200) {
-  return new Promise<number>((resolve, reject) => {
-    let port = start + Math.floor(Math.random() * 200)
-
-    const tryPort = () => {
-      if (port > start + 500) {
-        reject(new Error('没有可用的本地 app-server 端口'))
-        return
-      }
-
-      const server = createServer()
-      server.once('error', () => {
-        port += 1
-        tryPort()
-      })
-      server.once('listening', () => {
-        server.close(() => resolve(port))
-      })
-      server.listen(port, '127.0.0.1')
-    }
-
-    tryPort()
-  })
-}
-
-function appServerRaw(itemId: string) {
-  return { item: { id: itemId, type: 'agent_message' } }
-}
-
-async function connectAppServer(url: string, onNotification: (message: Record<string, unknown>) => void) {
-  type PendingRequest = {
-    reject: (error: Error) => void
-    resolve: (value: unknown) => void
-    timer: ReturnType<typeof setTimeout>
-  }
-
-  const WebSocketCtor = (globalThis as unknown as { WebSocket?: new (url: string) => {
-    close: () => void
-    onclose: ((event: unknown) => void) | null
-    onerror: ((event: unknown) => void) | null
-    onmessage: ((event: { data: unknown }) => void) | null
-    onopen: (() => void) | null
-    send: (data: string) => void
-  } }).WebSocket
-
-  if (!WebSocketCtor) throw new Error('当前 Node 运行时不支持 WebSocket')
-
-  let requestId = 1
-  const pending = new Map<number, PendingRequest>()
-  const openSocket = () =>
-    new Promise<InstanceType<typeof WebSocketCtor>>((resolve, reject) => {
-      const ws = new WebSocketCtor(url)
-      let settled = false
-      const settle = (callback: () => void) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        callback()
-      }
-      const timer = setTimeout(() => {
-        try {
-          ws.close()
-        } catch {
-          // Ignore close errors while retrying startup.
-        }
-        settle(() => reject(new Error('Codex app-server 连接超时')))
-      }, 1200)
-
-      ws.onopen = () => settle(() => resolve(ws as InstanceType<typeof WebSocketCtor>))
-      ws.onerror = () => settle(() => reject(new Error('Codex app-server 连接失败')))
-      ws.onclose = () => settle(() => reject(new Error('Codex app-server 已断开')))
-    })
-
-  let socket: InstanceType<typeof WebSocketCtor> | undefined
-  let lastConnectError: unknown
-  const connectDeadline = Date.now() + 10000
-  while (!socket && Date.now() < connectDeadline) {
-    try {
-      socket = await openSocket()
-    } catch (error) {
-      lastConnectError = error
-      await sleep(160)
-    }
-  }
-
-  if (!socket) {
-    throw lastConnectError instanceof Error ? lastConnectError : new Error('Codex app-server 连接失败')
-  }
-
-  socket.onmessage = (event) => {
-    const raw = typeof event.data === 'string' ? event.data : String(event.data)
-    const message = JSON.parse(raw) as Record<string, unknown>
-    const id = typeof message.id === 'number' ? message.id : undefined
-
-    if (id !== undefined) {
-      const waiter = pending.get(id)
-      if (!waiter) return
-      pending.delete(id)
-      clearTimeout(waiter.timer)
-      const error = message.error as { message?: string } | undefined
-      if (error) {
-        waiter.reject(new Error(error.message ?? 'Codex app-server 请求失败'))
-      } else {
-        waiter.resolve(message.result)
-      }
-      return
-    }
-
-    onNotification(message)
-  }
-
-  socket.onclose = () => {
-    for (const waiter of pending.values()) {
-      clearTimeout(waiter.timer)
-      waiter.reject(new Error('Codex app-server 已断开'))
-    }
-    pending.clear()
-  }
-
-  return {
-    close() {
-      socket.close()
-    },
-    request(method: string, params: unknown, timeoutMs = 45000) {
-      const id = requestId
-      requestId += 1
-      return new Promise<unknown>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          pending.delete(id)
-          reject(new Error(`Codex app-server ${method} 请求超时`))
-        }, timeoutMs)
-        timer.unref()
-        pending.set(id, { resolve, reject, timer })
-        socket.send(JSON.stringify({ id, method, params }))
-      })
-    },
-  }
-}
-
-function appServerThreadId(result: unknown) {
-  const thread = result && typeof result === 'object' ? (result as { thread?: unknown }).thread : undefined
-  if (!thread || typeof thread !== 'object') return undefined
-  const id = (thread as { id?: unknown; threadId?: unknown }).id ?? (thread as { id?: unknown; threadId?: unknown }).threadId
-  return typeof id === 'string' ? id : undefined
-}
-
-function appServerTurnId(result: unknown) {
-  const turn = result && typeof result === 'object' ? (result as { turn?: unknown }).turn : undefined
-  if (!turn || typeof turn !== 'object') return undefined
-  const id = (turn as { id?: unknown }).id
-  return typeof id === 'string' ? id : undefined
-}
-
-function appServerSandboxPolicy(workspace: string) {
-  return {
-    type: 'workspaceWrite',
-    writableRoots: [workspace],
-    networkAccess: false,
-    excludeTmpdirEnvVar: false,
-    excludeSlashTmp: false,
-  }
 }
 
 function terminateProcessTree(child: ReturnType<typeof spawn>) {
@@ -1664,56 +1085,12 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-app.get('/health', async () => ({
-  ok: true,
-  service: 'codex-runtime',
-  bundledCodex: true,
-  codexBin: resolveCodexBin(),
-  host: runtimeHost,
-  logs: runtimeLogger.paths,
-  protected: Boolean(runtimeToken),
-  model: getModelConfig(),
-  image: getImageConfig(),
-}))
-
-app.get('/api/logs/info', async () => ({
-  data: runtimeLogger.paths,
-}))
-
-app.get('/api/logs/recent', async (request, reply) => {
-  const parsed = z
-    .object({
-      limit: z.coerce.number().int().positive().max(1000).default(200),
-      target: z.enum(['runtime', 'client']).default('runtime'),
-    })
-    .safeParse(request.query ?? {})
-
-  if (!parsed.success) {
-    return reply.status(400).send({ error: '日志查询参数不完整', detail: parsed.error.flatten() })
-  }
-
-  return {
-    data: await runtimeLogger.recent(parsed.data.target, parsed.data.limit),
-    paths: runtimeLogger.paths,
-  }
-})
-
-app.post('/api/logs/client', async (request, reply) => {
-  const parsed = clientLogSchema.safeParse(request.body)
-
-  if (!parsed.success) {
-    return reply.status(400).send({ error: '日志参数不完整', detail: parsed.error.flatten() })
-  }
-
-  await runtimeLogger.append(
-    {
-      ...parsed.data,
-      source: parsed.data.source ?? 'desktop-renderer',
-    },
-    'client',
-  )
-
-  return { ok: true }
+registerDiagnosticsRoutes({
+  app,
+  resolveCodexBin,
+  runtimeHost,
+  runtimeLogger,
+  runtimeToken,
 })
 
 logRuntime('runtime.boot', {

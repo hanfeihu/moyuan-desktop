@@ -24,18 +24,69 @@ export function renderFatalError(error: unknown) {
     return
   }
   logClientEvent('app.fatal_render_error', errorLogDetails(error), 'error')
-  const root = document.getElementById('root')
-  if (!root) return
+  const overlayId = 'moyuan-fatal-error-overlay'
+  const existing = document.getElementById(overlayId)
+  const overlay = existing ?? document.createElement('div')
+  overlay.id = overlayId
+  overlay.style.position = 'fixed'
+  overlay.style.inset = '0'
+  overlay.style.zIndex = '2147483647'
+  overlay.style.display = 'grid'
+  overlay.style.placeItems = 'center'
+  overlay.style.background = '#fbfbf9'
   const message = getErrorMessage(error)
-  root.innerHTML = `
-    <main style="min-height:100vh;display:grid;place-items:center;background:#fbfbf9;color:#202124;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC',sans-serif">
-      <section style="width:min(520px,calc(100vw - 48px));border:1px solid #e4e3df;border-radius:16px;background:#fff;padding:24px;box-shadow:0 18px 45px rgba(31,35,40,.08)">
-        <strong style="display:block;font-size:18px;margin-bottom:8px">客户端启动异常</strong>
-        <p style="margin:0;color:#626870;line-height:1.7">我已经把错误显示出来，避免白屏。请重启客户端；如果仍然出现，把下面这行发给开发人员。</p>
-        <pre style="margin:16px 0 0;white-space:pre-wrap;word-break:break-word;border-radius:10px;background:#f7f7f5;padding:12px;color:#6e747b">${message}</pre>
+  overlay.replaceChildren(fatalErrorCardElement(message))
+  if (!existing) document.body.append(overlay)
+}
+
+function fatalErrorCardElement(message: string) {
+  const card = document.createElement('section')
+  card.style.width = 'min(520px, calc(100vw - 48px))'
+  card.style.border = '1px solid #e4e3df'
+  card.style.borderRadius = '16px'
+  card.style.background = '#fff'
+  card.style.padding = '24px'
+  card.style.boxShadow = '0 18px 45px rgba(31,35,40,.08)'
+  card.style.color = '#202124'
+  card.style.fontFamily = "-apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC',sans-serif"
+
+  const title = document.createElement('strong')
+  title.style.display = 'block'
+  title.style.fontSize = '18px'
+  title.style.marginBottom = '8px'
+  title.textContent = '客户端启动异常'
+
+  const description = document.createElement('p')
+  description.style.margin = '0'
+  description.style.color = '#626870'
+  description.style.lineHeight = '1.7'
+  description.textContent = '我已经把错误显示出来，避免白屏。请重启客户端；如果仍然出现，把下面这行发给开发人员。'
+
+  const detail = document.createElement('pre')
+  detail.style.margin = '16px 0 0'
+  detail.style.whiteSpace = 'pre-wrap'
+  detail.style.wordBreak = 'break-word'
+  detail.style.borderRadius = '10px'
+  detail.style.background = '#f7f7f5'
+  detail.style.padding = '12px'
+  detail.style.color = '#6e747b'
+  detail.textContent = message
+
+  card.append(title, description, detail)
+  return card
+}
+
+function FatalErrorView({ error }: { error: unknown }) {
+  const message = getErrorMessage(error)
+  return (
+    <main style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: '#fbfbf9', color: '#202124', fontFamily: "-apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC',sans-serif" }}>
+      <section style={{ width: 'min(520px, calc(100vw - 48px))', border: '1px solid #e4e3df', borderRadius: 16, background: '#fff', padding: 24, boxShadow: '0 18px 45px rgba(31,35,40,.08)' }}>
+        <strong style={{ display: 'block', fontSize: 18, marginBottom: 8 }}>客户端启动异常</strong>
+        <p style={{ margin: 0, color: '#626870', lineHeight: 1.7 }}>我已经把错误显示出来，避免白屏。请重启客户端；如果仍然出现，把下面这行发给开发人员。</p>
+        <pre style={{ margin: '16px 0 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word', borderRadius: 10, background: '#f7f7f5', padding: 12, color: '#6e747b' }}>{message}</pre>
       </section>
     </main>
-  `
+  )
 }
 
 export function installGlobalErrorHandlers() {
@@ -74,11 +125,10 @@ export class AppErrorBoundary extends React.Component<{ children: React.ReactNod
       return
     }
     logClientEvent('app.error_boundary', errorLogDetails(error), 'error')
-    renderFatalError(error)
   }
 
   render() {
-    if (this.state.error) return null
+    if (this.state.error) return <FatalErrorView error={this.state.error} />
     return this.props.children
   }
 }

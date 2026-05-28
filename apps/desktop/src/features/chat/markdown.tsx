@@ -1,5 +1,6 @@
 import React, { useEffect, useId, useMemo, useState } from 'react'
 import { runtimeEndpoint } from '../../api'
+import { errorLogDetails, logClientEvent } from '../../logger'
 
 type MarkdownBlock =
   | { type: 'paragraph' | 'heading' | 'quote'; text: string }
@@ -141,6 +142,7 @@ export function MarkdownText({ content }: { content: string }) {
 function MermaidDiagram({ code }: { code: string }) {
   const reactId = useId()
   const diagramId = useMemo(() => `moyuan-mermaid-${reactId.replace(/[^a-zA-Z0-9_-]/g, '')}`, [reactId])
+  const renderCode = useMemo(() => sanitizeMermaid(code), [code])
   const [svg, setSvg] = useState('')
   const [error, setError] = useState('')
 
@@ -148,7 +150,7 @@ function MermaidDiagram({ code }: { code: string }) {
     let cancelled = false
 
     loadMermaid()
-      .then((mermaid) => mermaid.render(diagramId, code))
+      .then((mermaid) => mermaid.render(diagramId, renderCode))
       .then((result) => {
         if (cancelled) return
         setSvg(result.svg)
@@ -158,21 +160,28 @@ function MermaidDiagram({ code }: { code: string }) {
       .catch((renderError: unknown) => {
         if (cancelled) return
         setSvg('')
-        setError(renderError instanceof Error ? renderError.message : '图表渲染失败')
+        setError('图表语法暂时无法自动修复，已切换为源码视图。')
+        logClientEvent(
+          'mermaid.render.failed',
+          errorLogDetails(renderError, {
+            codeLength: code.length,
+            sanitized: renderCode !== code,
+          }),
+          'warn',
+        )
       })
 
     return () => {
       cancelled = true
     }
-  }, [code, diagramId])
+  }, [code, diagramId, renderCode])
 
   if (error) {
     return (
       <details className="mermaid-fallback">
-        <summary>图表暂时无法渲染</summary>
-        <p>{error}</p>
+        <summary>{error}</summary>
         <pre className="code-block">
-          <code>{code}</code>
+          <code>{renderCode}</code>
         </pre>
       </details>
     )
@@ -181,6 +190,69 @@ function MermaidDiagram({ code }: { code: string }) {
   if (!svg) return <div className="mermaid-loading">正在整理图表...</div>
 
   return <div className="mermaid-diagram" dangerouslySetInnerHTML={{ __html: svg }} />
+}
+
+function sanitizeMermaid(code: string) {
+  const firstLine = code.trimStart().split(/\r?\n/, 1)[0]?.trim().toLowerCase() ?? ''
+  if (!/^flowchart\b|^graph\b/.test(firstLine)) return code
+
+  return code
+    .split(/\r?\n/)
+    .map((line) => sanitizeFlowchartLine(line))
+    .join('\n')
+}
+
+function sanitizeFlowchartLine(line: string) {
+  const withoutComments = line.split('%%', 1)[0] ?? line
+  if (!withoutComments.includes('[')) return line
+
+  return quoteUnsafeNodeLabels(line)
+}
+
+function quoteUnsafeNodeLabels(line: string) {
+  let result = ''
+  let cursor = 0
+
+  while (cursor < line.length) {
+    const start = line.indexOf('[', cursor)
+    if (start < 0) {
+      result += line.slice(cursor)
+      break
+    }
+
+    const end = findNodeLabelEnd(line, start)
+    if (end < 0) {
+      result += line.slice(cursor)
+      break
+    }
+
+    const label = line.slice(start + 1, end)
+    result += line.slice(cursor, start)
+    result += shouldQuoteMermaidLabel(label) ? `["${escapeMermaidLabel(label)}"]` : `[${label}]`
+    cursor = end + 1
+  }
+
+  return result
+}
+
+function findNodeLabelEnd(line: string, start: number) {
+  let quoted = false
+  for (let index = start + 1; index < line.length; index += 1) {
+    const char = line[index]
+    if (char === '"' && line[index - 1] !== '\\') quoted = !quoted
+    if (char === ']' && !quoted) return index
+  }
+  return -1
+}
+
+function shouldQuoteMermaidLabel(label: string) {
+  const trimmed = label.trim()
+  if (!trimmed || trimmed.startsWith('"') || trimmed.startsWith("'")) return false
+  return /[<@/()（）{}，、；：:]|\s[-+]\s/.test(trimmed)
+}
+
+function escapeMermaidLabel(label: string) {
+  return label.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 }
 
 function resolveRuntimeAssetUrl(src: string) {
