@@ -11,6 +11,7 @@
   --dim: #a2a7ad;
   --accent: #20252b;
   --danger: #be3a31;
+  --chat-message-size: 15.5px;
   --font-ui:
     -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
     "PingFang SC", "Hiragino Sans GB", "Geist Variable", "Noto Sans SC Variable",
@@ -821,7 +822,7 @@ button:disabled {
 .message-body {
   color: var(--chat-text);
   font-family: var(--font-chat);
-  font-size: 14.25px;
+  font-size: var(--chat-message-size);
   font-weight: 460;
   line-height: 1.72;
   white-space: pre-wrap;
@@ -835,9 +836,9 @@ button:disabled {
   padding: 7px 13px;
   background: #f3f3f4;
   color: #30343a;
-  font-size: 14px;
-  font-weight: 520;
-  line-height: 1.48;
+  font-size: var(--chat-message-size);
+  font-weight: 500;
+  line-height: 1.56;
   justify-self: end;
   width: fit-content;
   max-width: min(620px, 72%);
@@ -869,7 +870,7 @@ button:disabled {
 
 .thinking-copy {
   color: #7d8288;
-  font-size: 13px;
+  font-size: var(--chat-message-size);
   line-height: 1.5;
 }
 
@@ -895,7 +896,7 @@ button:disabled {
 .message.system .message-body {
   color: #767778;
   font-family: var(--font-chat);
-  font-size: 14.25px;
+  font-size: var(--chat-message-size);
   font-weight: 460;
   line-height: 1.72;
 }
@@ -921,14 +922,14 @@ button:disabled {
 }
 
 .message.tool .message-body {
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: var(--chat-message-size);
+  line-height: 1.62;
 }
 
 .message.tool-status .message-body {
   font-family: inherit;
   color: #969a9f;
-  font-size: 13px;
+  font-size: var(--chat-message-size);
   font-weight: 500;
   line-height: 1.45;
 }
@@ -1071,7 +1072,7 @@ button:disabled {
   color: var(--chat-text);
   background: transparent;
   font-family: var(--font-chat);
-  font-size: 14.25px;
+  font-size: var(--chat-message-size);
   font-weight: 460;
   line-height: 1.72;
   overflow: auto;
@@ -1235,13 +1236,13 @@ button:disabled {
 .markdown h3 {
   margin: 10px 0 1px;
   color: #1f242b;
-  font-size: 16px;
-  line-height: 1.45;
+  font-size: inherit;
+  line-height: inherit;
   font-weight: 660;
 }
 
 .markdown p {
-  line-height: 1.72;
+  line-height: inherit;
 }
 
 .markdown ul,
@@ -1257,7 +1258,7 @@ button:disabled {
 
 .markdown li {
   padding-left: 5px;
-  line-height: 1.72;
+  line-height: inherit;
 }
 
 .markdown li::marker {
@@ -1267,7 +1268,7 @@ button:disabled {
 .markdown .list-meta {
   margin-top: 5px;
   color: #777c82;
-  font-size: 0.96em;
+  font-size: inherit;
 }
 
 .markdown strong {
@@ -1293,7 +1294,7 @@ button:disabled {
   background: #f4f4f2;
   color: #3d4248;
   font-family: var(--font-mono);
-  font-size: 0.9em;
+  font-size: inherit;
 }
 
 .markdown .code-block {
@@ -1305,7 +1306,8 @@ button:disabled {
   padding: 13px 14px;
   background: #f8f8f6;
   color: #69707a;
-  line-height: 1.56;
+  font-size: inherit;
+  line-height: 1.58;
   white-space: pre;
 }
 
@@ -1325,7 +1327,7 @@ button:disabled {
   border-radius: 0;
   padding: 0;
   background: transparent;
-  font-size: 12.5px;
+  font-size: inherit;
 }
 
 .markdown-divider {
@@ -1348,8 +1350,8 @@ button:disabled {
   min-width: 560px;
   border-collapse: collapse;
   color: #30343a;
-  font-size: 13.25px;
-  line-height: 1.58;
+  font-size: inherit;
+  line-height: inherit;
 }
 
 .markdown-table th,
@@ -1363,7 +1365,7 @@ button:disabled {
 .markdown-table th {
   background: rgba(246, 246, 243, 0.92);
   color: #6f747a;
-  font-size: 12px;
+  font-size: inherit;
   font-weight: 640;
   white-space: nowrap;
 }
@@ -1631,10 +1633,6 @@ button:disabled {
     width: calc(100% - 24px);
     margin-bottom: 10px;
     padding: 6px 8px;
-  }
-
-  .composer textarea {
-    font-size: 13.5px;
   }
 
   .composer-toolbar {

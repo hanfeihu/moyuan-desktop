@@ -20,6 +20,19 @@ function run(command, args, cwd) {
   })
 }
 
+async function patchBundledCodexLauncher() {
+  const launcherPath = path.join(runtimeTarget, 'node_modules/@openai/codex/bin/codex.js')
+  let launcher = await readFile(launcherPath, 'utf8')
+
+  if (!launcher.includes('windowsHide: true')) {
+    launcher = launcher.replace(
+      'const child = spawn(binaryPath, process.argv.slice(2), {\n  stdio: "inherit",\n  env,\n});',
+      'const child = spawn(binaryPath, process.argv.slice(2), {\n  stdio: "inherit",\n  env,\n  windowsHide: true,\n});',
+    )
+    await writeFile(launcherPath, launcher)
+  }
+}
+
 await rm(path.join(root, 'apps/desktop/.moyuan-runtime'), { force: true, recursive: true })
 await mkdir(runtimeTarget, { recursive: true })
 await cp(path.join(runtimeSource, 'dist'), path.join(runtimeTarget, 'dist'), { recursive: true })
@@ -45,6 +58,7 @@ await writeFile(
 )
 
 await run(npmBin, ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--package-lock=false'], runtimeTarget)
+await patchBundledCodexLauncher()
 
 const sharedPackage = JSON.parse(await readFile(path.join(sharedSource, 'package.json'), 'utf8'))
 await mkdir(sharedTarget, { recursive: true })
