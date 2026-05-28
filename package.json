@@ -18,7 +18,7 @@
     "dev:desktop": "npm run dev -w @eaw/desktop",
     "dev:api": "npm run dev -w @eaw/api",
     "dev:codex": "npm run dev -w @eaw/codex-runtime",
-    "build:release": "npm run build -w @eaw/codex-runtime && npm run build -w @eaw/desktop",
+    "build:release": "npm run build -w @eaw/shared && npm run build -w @eaw/codex-runtime && npm run build -w @eaw/desktop",
     "prepare:desktop-runtime": "node scripts/prepare-desktop-runtime.mjs",
     "dist:desktop:dir": "npm run build:release && npm run prepare:desktop-runtime && electron-builder --project apps/desktop --dir --publish never",
     "dist:desktop:mac": "npm run build:release && npm run prepare:desktop-runtime && electron-builder --project apps/desktop --mac dmg zip --publish never",

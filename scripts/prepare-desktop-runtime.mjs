@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const runtimeSource = path.join(root, 'services/codex-runtime')
 const runtimeTarget = path.join(root, 'apps/desktop/.moyuan-runtime/services/codex-runtime')
+const sharedSource = path.join(root, 'packages/shared')
+const sharedTarget = path.join(runtimeTarget, 'node_modules/@eaw/shared')
 const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 
 function run(command, args, cwd) {
@@ -43,3 +45,22 @@ await writeFile(
 )
 
 await run(npmBin, ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--package-lock=false'], runtimeTarget)
+
+const sharedPackage = JSON.parse(await readFile(path.join(sharedSource, 'package.json'), 'utf8'))
+await mkdir(sharedTarget, { recursive: true })
+await cp(path.join(sharedSource, 'dist'), path.join(sharedTarget, 'dist'), { recursive: true })
+await writeFile(
+  path.join(sharedTarget, 'package.json'),
+  `${JSON.stringify(
+    {
+      name: sharedPackage.name,
+      version: sharedPackage.version,
+      private: true,
+      type: 'module',
+      main: 'dist/index.js',
+      types: 'dist/index.d.ts',
+    },
+    null,
+    2,
+  )}\n`,
+)
