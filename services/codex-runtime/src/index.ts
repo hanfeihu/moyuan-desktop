@@ -87,6 +87,7 @@ const require = createRequire(import.meta.url)
 const execFileAsync = promisify(execFile)
 const runtimeToken = process.env.MOYUAN_RUNTIME_TOKEN ?? ''
 const runtimeHost = process.env.CODEX_RUNTIME_HOST ?? '127.0.0.1'
+const nodeHostPath = process.env.MOYUAN_NODE_HOST_PATH || process.execPath
 
 await app.register(cors, {
   origin(origin, callback) {
@@ -610,7 +611,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
     }
   }
 
-  const child = spawn(process.execPath, [codexBin, 'app-server', '--listen', appServerUrl, '--disable', 'remote_plugin', '--disable', 'plugin_sharing'], {
+  const child = spawn(nodeHostPath, [codexBin, 'app-server', '--listen', appServerUrl, '--disable', 'remote_plugin', '--disable', 'plugin_sharing'], {
     cwd: workspace,
     detached: true,
     stdio: ['ignore', 'ignore', 'pipe'],
@@ -621,7 +622,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
       RUST_LOG: process.env.CODEX_RUST_LOG ?? 'warn',
     },
   })
-  logTask(record, 'codex.app_server.spawned', { pid: child.pid, port })
+  logTask(record, 'codex.app_server.spawned', { nodeHostPath, pid: child.pid, port })
   record.cancel = (reason = '已停止本次任务。') => {
     if (record.cancelRequested) return
     record.cancelRequested = true
@@ -657,6 +658,12 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
     if (mutedStderrPatterns.some((pattern) => text.includes(pattern))) return
     app.log.debug({ text }, 'codex app-server stderr')
     logTask(record, 'codex.stderr', { text }, 'warn')
+  })
+
+  child.once('error', (error) => {
+    failed = true
+    logTask(record, 'codex.app_server.spawn_error', { message: error.message, nodeHostPath }, 'error')
+    rejectTurn?.(new Error(`Codex 子进程启动失败：${error.message}`))
   })
 
   child.once('exit', (code) => {
@@ -949,7 +956,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
     transport: 'exec',
   })
 
-  const child = spawn(process.execPath, args, {
+  const child = spawn(nodeHostPath, args, {
     cwd: workspace,
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -960,7 +967,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
       RUST_LOG: process.env.CODEX_RUST_LOG ?? 'warn',
     },
   })
-  logTask(record, 'codex.exec.spawned', { pid: child.pid })
+  logTask(record, 'codex.exec.spawned', { nodeHostPath, pid: child.pid })
   record.cancel = (reason = '已停止本次任务。') => {
     if (record.cancelRequested) return
     record.cancelRequested = true
@@ -1033,6 +1040,12 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
       role: 'system',
       content: text,
     })
+  })
+
+  child.once('error', (error) => {
+    logTask(record, 'codex.exec.spawn_error', { message: error.message, nodeHostPath }, 'error')
+    record.cancel = undefined
+    void failCodexTask(record, taskId, `Codex 子进程启动失败：${error.message}`)
   })
 
   child.on('exit', (code) => {

@@ -183,6 +183,7 @@ async function startRuntime() {
       ELECTRON_RUN_AS_NODE: '1',
       CODEX_RUNTIME_HOST: runtimeHost,
       CODEX_RUNTIME_PORT: String(port),
+      MOYUAN_NODE_HOST_PATH: process.execPath,
       MOYUAN_RUNTIME_TOKEN: runtimeToken,
       MOYUAN_RUNTIME_HOME: path.join(userData, 'runtime'),
       MOYUAN_CODEX_HOME: path.join(userData, 'codex-home'),
