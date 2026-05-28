@@ -180,6 +180,19 @@ function isRuntimeFailureContent(content: string) {
   return isRuntimeFailureNotice(text)
 }
 
+function userVisibleFailureMessage(message: string) {
+  if (/Codex app-server|Codex Runtime|ECONNREFUSED|本地 Codex 内核|子进程|spawn|ENOENT|连接失败|连接超时|已断开|退出/i.test(message)) {
+    return '本地 Codex 连接中断，已停止。可以重新发送；详细原因已写入本地日志。'
+  }
+  if (/OPENAI_API_KEY|invalid api key|403 Forbidden|401 Unauthorized|模型服务暂时不可用/i.test(message)) {
+    return '模型服务暂时不可用，已停止。请检查后台模型配置后重试。'
+  }
+  if (/timeout|timed out|超时|模型响应超时/i.test(message)) {
+    return '模型响应超时，已停止。可以缩小任务范围或稍后重试。'
+  }
+  return friendlyRuntimeMessage(message)
+}
+
 function taskUpdatedAtMs(task: CodexTask) {
   return new Date(task.updatedAt ?? task.createdAt ?? 0).getTime()
 }
@@ -488,6 +501,22 @@ function terminateProcessTree(child: ReturnType<typeof spawn>) {
   }, 800).unref()
 }
 
+function childProcessOptions(workspace: string, codexHome: string, apiKey: string, stdio: ['ignore', 'ignore' | 'pipe', 'pipe']) {
+  return {
+    cwd: workspace,
+    detached: process.platform !== 'win32',
+    stdio,
+    windowsHide: true,
+    env: {
+      ...process.env,
+      CODEX_HOME: codexHome,
+      ELECTRON_RUN_AS_NODE: '1',
+      OPENAI_API_KEY: apiKey,
+      RUST_LOG: process.env.CODEX_RUST_LOG ?? 'warn',
+    },
+  } satisfies Parameters<typeof spawn>[2]
+}
+
 async function finishCodexTask(record: TaskRecord, taskId: string, code: number | null) {
   record.cancel = undefined
   const lifecycle = finishTaskLifecycle(record, code, isRuntimeFailureContent)
@@ -529,13 +558,13 @@ async function failCodexTask(record: TaskRecord, taskId: string, message: string
   record.cancel = undefined
   record.task.exitCode = code
   setTaskLifecyclePhase(record, 'failed', isRuntimeFailureContent, message)
-  logTask(record, 'task.fail', { code, message }, 'error')
+  logTask(record, 'task.fail', { code, diagnostic: runtimeFailureDiagnostic(message), message }, 'error')
   await saveStore()
   pushEvent(record, {
     taskId,
     type: 'turn.failed',
     role: 'system',
-    content: isRuntimeFailureContent(message) ? runtimeFailureDiagnostic(message) : friendlyRuntimeMessage(message),
+    content: userVisibleFailureMessage(message),
   })
 }
 
@@ -620,17 +649,8 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
     }
   }
 
-  const child = spawn(nodeHostPath, [codexBin, 'app-server', '--listen', appServerUrl, '--disable', 'remote_plugin', '--disable', 'plugin_sharing'], {
-    cwd: workspace,
-    detached: true,
-    stdio: ['ignore', 'ignore', 'pipe'],
-    env: {
-      ...process.env,
-      CODEX_HOME: codexHome,
-      OPENAI_API_KEY: config.apiKey ?? process.env.AI_API_KEY ?? '',
-      RUST_LOG: process.env.CODEX_RUST_LOG ?? 'warn',
-    },
-  })
+  const childEnv = childProcessOptions(workspace, codexHome, config.apiKey ?? process.env.AI_API_KEY ?? '', ['ignore', 'ignore', 'pipe'])
+  const child = spawn(nodeHostPath, [codexBin, 'app-server', '--listen', appServerUrl, '--disable', 'remote_plugin', '--disable', 'plugin_sharing'], childEnv)
   logTask(record, 'codex.app_server.spawned', { nodeHostPath, pid: child.pid, port })
   record.cancel = (reason = '已停止本次任务。') => {
     if (record.cancelRequested) return
@@ -661,7 +681,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
   }, 5000)
   watchdog.unref()
 
-  child.stderr.on('data', (chunk: Buffer) => {
+  child.stderr?.on('data', (chunk: Buffer) => {
     const text = chunk.toString('utf8').trim()
     if (!text) return
     if (mutedStderrPatterns.some((pattern) => text.includes(pattern))) return
@@ -967,17 +987,8 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
     transport: 'exec',
   })
 
-  const child = spawn(nodeHostPath, args, {
-    cwd: workspace,
-    detached: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      CODEX_HOME: codexHome,
-      OPENAI_API_KEY: config.apiKey ?? process.env.AI_API_KEY ?? '',
-      RUST_LOG: process.env.CODEX_RUST_LOG ?? 'warn',
-    },
-  })
+  const childEnv = childProcessOptions(workspace, codexHome, config.apiKey ?? process.env.AI_API_KEY ?? '', ['ignore', 'pipe', 'pipe'])
+  const child = spawn(nodeHostPath, args, childEnv)
   logTask(record, 'codex.exec.spawned', { nodeHostPath, pid: child.pid })
   record.cancel = (reason = '已停止本次任务。') => {
     if (record.cancelRequested) return
@@ -1000,7 +1011,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
     pendingUsageReports.push(reportCodexUsage(taskId, payload, options).catch((error) => app.log.warn({ error }, 'failed to report codex usage')))
   }
 
-  child.stdout.on('data', (chunk: Buffer) => {
+  child.stdout?.on('data', (chunk: Buffer) => {
     buffer += chunk.toString('utf8')
     const lines = buffer.split(/\r?\n/)
     buffer = lines.pop() ?? ''
@@ -1040,7 +1051,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
     }
   })
 
-  child.stderr.on('data', (chunk: Buffer) => {
+  child.stderr?.on('data', (chunk: Buffer) => {
     const text = chunk.toString('utf8').trim()
     if (!text) return
     if (mutedStderrPatterns.some((pattern) => text.includes(pattern))) return

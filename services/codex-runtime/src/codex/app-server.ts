@@ -65,7 +65,7 @@ export async function connectAppServer(url: string, onNotification: (message: Re
           // Ignore close errors while retrying startup.
         }
         settle(() => reject(new Error('Codex app-server 连接超时')))
-      }, 1200)
+      }, 3500)
 
       ws.onopen = () => settle(() => resolve(ws))
       ws.onerror = () => settle(() => reject(new Error('Codex app-server 连接失败')))
@@ -74,7 +74,7 @@ export async function connectAppServer(url: string, onNotification: (message: Re
 
   let socket: WebSocketInstance | undefined
   let lastConnectError: unknown
-  const connectDeadline = Date.now() + 10000
+  const connectDeadline = Date.now() + 45000
   while (!socket && Date.now() < connectDeadline) {
     try {
       socket = await openSocket()

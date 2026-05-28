@@ -41,7 +41,7 @@ export function normalizeTask(task: CodexTask): CodexTask {
   if (status === 'failed' && !hasFailureDiagnostic && latestTurnCompletedWithoutAssistant(task.status, rawTranscript)) {
     transcript.push({
       role: 'system',
-      content: '失败诊断：Codex 已结束本轮工具执行，但没有返回最终回复。任务已停止，可以重新发送；如果连续出现，需要检查 app-server 的 turn.completed 与 assistant message 事件。',
+      content: '本轮没有收到最终回复，已停止。可以重新发送；详细原因已写入本地日志。',
       timestamp: task.updatedAt ?? nowIso(),
     })
   } else if (status === 'failed' && !hasFailureDiagnostic && latestTurnHasRuntimeFailure(rawTranscript)) {
@@ -238,7 +238,17 @@ export function shouldShowMessage(item: TranscriptItem) {
 }
 
 function failureSummary(items: TranscriptItem[]) {
-  return runtimeFailureDiagnostic(latestTurnItems(items))
+  const diagnostic = runtimeFailureDiagnostic(latestTurnItems(items))
+  if (/本地 Codex|Codex app-server|Codex Runtime|ECONNREFUSED|连接中断|没有正常收口/i.test(diagnostic)) {
+    return '本地 Codex 连接中断，已停止。可以重新发送；详细原因已写入本地日志。'
+  }
+  if (/模型通道鉴权失败|OPENAI_API_KEY|invalid api key|403 Forbidden|401 Unauthorized/i.test(diagnostic)) {
+    return '模型服务暂时不可用，已停止。请检查后台模型配置后重试。'
+  }
+  if (/超时|timeout|timed out/i.test(diagnostic)) {
+    return '模型响应超时，已停止。可以缩小任务范围或稍后重试。'
+  }
+  return diagnostic.replace(/^失败诊断：/, '')
 }
 
 function latestTurnItems(items: TranscriptItem[]) {

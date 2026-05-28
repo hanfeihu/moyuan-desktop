@@ -121,6 +121,15 @@ export function runtimeFailureDiagnostic(items: CodexTranscriptItem[] | string) 
 }
 
 export function friendlyRuntimeMessage(content: string) {
+  if (content.startsWith('失败诊断：') && /本地 Codex|Codex app-server|Codex Runtime|ECONNREFUSED|连接中断|没有正常收口/i.test(content)) {
+    return '本地 Codex 连接中断，已停止。可以重新发送；详细原因已写入本地日志。'
+  }
+  if (content.startsWith('失败诊断：') && /模型通道鉴权失败|OPENAI_API_KEY|invalid api key|403 Forbidden|401 Unauthorized/i.test(content)) {
+    return '模型服务暂时不可用，已停止。请检查后台模型配置后重试。'
+  }
+  if (content.startsWith('失败诊断：') && /超时|timeout|timed out/i.test(content)) {
+    return '模型响应超时，已停止。可以缩小任务范围或稍后重试。'
+  }
   if (/本地 Codex 内核暂时没有启动成功/.test(content)) {
     return '本轮执行连接中断，已结束，可以重新发送。'
   }

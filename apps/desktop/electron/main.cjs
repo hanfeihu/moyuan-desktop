@@ -185,6 +185,7 @@ async function startRuntime() {
   runtimeProcess = spawn(process.execPath, [runtimeEntry], {
     cwd: appRoot,
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     env: {
       ...runtimeEnv,
       ...process.env,

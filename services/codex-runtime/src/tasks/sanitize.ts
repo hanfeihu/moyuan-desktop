@@ -100,19 +100,19 @@ export function sanitizeTask(task: CodexTask): CodexTask {
   if ((task.status === 'failed' || hasEmptyCompletion) && hasEmptyCompletion && !transcript.some((item) => item.content.startsWith('失败诊断：'))) {
     transcript.push({
       role: 'system',
-      content: '失败诊断：Codex 已结束本轮工具执行，但没有返回最终回复。任务已停止，可以重新发送；如果连续出现，需要检查 app-server 的 turn.completed 与 assistant message 事件。',
+      content: '本轮没有收到最终回复，已停止。可以重新发送；详细原因已写入本地日志。',
       timestamp: task.updatedAt ?? transcript.at(-1)?.timestamp ?? new Date().toISOString(),
     })
   } else if (task.status === 'failed' && hasRuntimeFailure && !transcript.some((item) => item.content.startsWith('失败诊断：'))) {
     transcript.push({
       role: 'system',
-      content: runtimeFailureDiagnostic(task.transcript),
+      content: friendlyRuntimeMessage(runtimeFailureDiagnostic(task.transcript)),
       timestamp: task.updatedAt ?? transcript.at(-1)?.timestamp ?? new Date().toISOString(),
     })
   } else if (task.status === 'failed' && transcript.length === 1 && transcript[0]?.role === 'user') {
     transcript.push({
       role: 'system',
-      content: runtimeFailureDiagnostic(task.transcript),
+      content: friendlyRuntimeMessage(runtimeFailureDiagnostic(task.transcript)),
       timestamp: task.updatedAt ?? transcript[0].timestamp,
     })
   }
