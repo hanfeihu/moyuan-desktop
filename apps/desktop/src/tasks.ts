@@ -428,7 +428,7 @@ export function hasCodexActivity(task: CodexTask) {
 }
 
 export function canResumeTask(task: CodexTask) {
-  return task.status === 'completed' && Boolean(task.sessionId) && !latestTurnHasFailure(task.transcript)
+  return (task.status === 'completed' || task.status === 'failed') && Boolean(task.sessionId)
 }
 
 export function buildPendingTask(promptText: string, workspacePath: string): CodexTask {

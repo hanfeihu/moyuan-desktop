@@ -1,6 +1,6 @@
 {
   "name": "@eaw/desktop",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "description": "Moyuan Desktop, an enterprise local AI workbench with bundled Codex-style runtime.",
   "author": "Han Feihu",
   "license": "MIT",

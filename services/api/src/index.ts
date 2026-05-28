@@ -64,6 +64,7 @@ const imageSkillConfigSchema = z.object({
 })
 
 const imageGenerationSchema = z.object({
+  async: z.boolean().optional(),
   model: z.string().optional(),
   n: z.coerce.number().int().min(1).max(4).default(1),
   prompt: z.string().min(1),
@@ -167,6 +168,27 @@ type VideoTaskCharge = {
   updatedAt: string
 }
 
+type ImageGenerationJob = {
+  body: {
+    model: string
+    n: number
+    prompt: string
+    size: '1024x1024' | '1024x1536' | '1536x1024'
+  }
+  createdAt: string
+  error?: string
+  id: string
+  result?: {
+    raw: unknown
+    storageUrl?: string
+    usageTokens: number
+    user: AccountUser
+  }
+  status: 'running' | 'succeeded' | 'failed'
+  updatedAt: string
+  userId: string
+}
+
 const employees: Employee[] = [
   { id: 'u-1001', name: '韩飞虎', department: '销售一组', title: '客户经理', source: 'wecom', manager: '王敏' },
   { id: 'u-1002', name: '林青', department: '交付中心', title: '实施顾问', source: 'lark', manager: '赵远' },
@@ -195,6 +217,8 @@ let usageReportIds = new Set(storedConfig.usageReportIds ?? [])
 let adminAuth: AdminAuthConfig | undefined = storedConfig.adminAuth ?? buildAdminAuthFromEnv()
 let adminSessions: AdminSession[] = storedConfig.adminSessions ?? []
 const verificationCodes = new Map<string, { code: string; expiresAt: number; createdAt: number }>()
+const imageGenerationJobs = new Map<string, ImageGenerationJob>()
+const maxImageGenerationJobs = 200
 
 if (needsStoredConfigMigration(storedConfig)) {
   await persistStoredConfig()
@@ -902,6 +926,136 @@ async function callImageSkillApi(init: RequestInit) {
   return { ok: response.ok, status: response.status, payload }
 }
 
+async function completeImageGeneration(user: AccountUser, body: ImageGenerationJob['body']) {
+  const upstream = await callImageSkillApi({
+    body: JSON.stringify(body),
+    method: 'POST',
+  })
+
+  if (!upstream.ok) {
+    const message = findFirstString(upstream.payload, ['message', 'error', 'msg']) ?? `图片生成接口返回 ${upstream.status}`
+    throw new Error(message)
+  }
+
+  const usageTokens = usageTotalTokens(upstream.payload)
+  if (!usageTokens) {
+    throw new Error('图片生成接口没有返回 usage.total_tokens，无法计费')
+  }
+
+  chargeSkillTokens(user, usageTokens)
+
+  const firstImage = firstImageFromPayload(upstream.payload)
+  const upstreamUrl = typeof firstImage?.url === 'string' ? firstImage.url : undefined
+  let storageUrl: string | undefined
+  let storageError: string | undefined
+  if (typeof firstImage?.b64_json === 'string' && firstImage.b64_json) {
+    try {
+      storageUrl = await uploadToMinio(`moyuan/images/${randomUUID()}.png`, Buffer.from(firstImage.b64_json, 'base64'), 'image/png')
+    } catch (error) {
+      storageError = error instanceof Error ? error.message : 'MinIO 归档失败'
+    }
+  }
+
+  upsertGeneratedAsset({
+    user,
+    type: 'image',
+    prompt: body.prompt,
+    model: body.model,
+    provider: imageSkill.provider,
+    status: 'succeeded',
+    tokenUsage: usageTokens,
+    url: storageUrl ?? upstreamUrl ?? '',
+    storageUrl,
+    metadata: {
+      size: body.size,
+      storageError,
+      upstreamId: findFirstString(upstream.payload, ['id']),
+    },
+  })
+
+  await persistStoredConfig()
+  return {
+    raw: upstream.payload,
+    storageUrl,
+    usageTokens,
+    user: sanitizeUser(user),
+  }
+}
+
+function startImageGenerationJob(user: AccountUser, body: ImageGenerationJob['body']) {
+  const now = new Date().toISOString()
+  const job: ImageGenerationJob = {
+    id: randomUUID(),
+    userId: user.id,
+    body,
+    status: 'running',
+    createdAt: now,
+    updatedAt: now,
+  }
+  imageGenerationJobs.set(job.id, job)
+  pruneImageGenerationJobs()
+
+  void completeImageGeneration(user, body)
+    .then((result) => {
+      job.status = 'succeeded'
+      job.result = result
+      job.updatedAt = new Date().toISOString()
+    })
+    .catch(async (error) => {
+      job.status = 'failed'
+      job.error = error instanceof Error ? error.message : String(error)
+      job.updatedAt = new Date().toISOString()
+      upsertGeneratedAsset({
+        user,
+        type: 'image',
+        prompt: body.prompt,
+        model: body.model,
+        provider: imageSkill.provider,
+        status: 'failed',
+        tokenUsage: 0,
+        metadata: {
+          error: job.error,
+          size: body.size,
+        },
+      })
+      await persistStoredConfig()
+    })
+
+  return job
+}
+
+function pruneImageGenerationJobs() {
+  if (imageGenerationJobs.size <= maxImageGenerationJobs) return
+  const jobs = Array.from(imageGenerationJobs.values()).sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+  for (const job of jobs.slice(0, imageGenerationJobs.size - maxImageGenerationJobs)) {
+    imageGenerationJobs.delete(job.id)
+  }
+}
+
+function serializeImageGenerationJob(job: ImageGenerationJob) {
+  if (job.status === 'succeeded' && job.result) {
+    return {
+      jobId: job.id,
+      status: job.status,
+      raw: job.result.raw,
+      storageUrl: job.result.storageUrl,
+      usageTokens: job.result.usageTokens,
+      user: sanitizeUser(job.result.user),
+    }
+  }
+  if (job.status === 'failed') {
+    return {
+      jobId: job.id,
+      status: job.status,
+      error: job.error ?? '图片生成失败',
+    }
+  }
+  return {
+    jobId: job.id,
+    status: job.status,
+  }
+}
+
 async function callVideoSkillApi(url: string, init: RequestInit) {
   if (!videoSkill.enabled || !videoSkillApiKey) {
     return { ok: false as const, status: 400, payload: { error: '视频生成技能未启用，请管理员在后台配置并启用火山方舟 KEY' } }
@@ -1228,65 +1382,43 @@ app.post('/api/admin/skills/image/generations', async (request, reply) => {
     prompt: parsed.data.prompt,
     size: parsed.data.size ?? imageSkill.defaultSize,
   }
-  const upstream = await callImageSkillApi({
-    body: JSON.stringify(body),
-    method: 'POST',
-  })
 
-  if (!upstream.ok) {
-    const message = findFirstString(upstream.payload, ['message', 'error', 'msg']) ?? `图片生成接口返回 ${upstream.status}`
-    return reply.status(upstream.status).send({ error: message, upstream: upstream.payload })
+  if (parsed.data.async) {
+    const job = startImageGenerationJob(user, body)
+    return reply.status(202).send({ data: serializeImageGenerationJob(job) })
   }
 
-  const usageTokens = usageTotalTokens(upstream.payload)
-  if (!usageTokens) {
-    return reply.status(502).send({ error: '图片生成接口没有返回 usage.total_tokens，无法计费', upstream: upstream.payload })
-  }
-
+  let result: Awaited<ReturnType<typeof completeImageGeneration>>
   try {
-    chargeSkillTokens(user, usageTokens)
+    result = await completeImageGeneration(user, body)
   } catch (error) {
-    return reply.status(402).send({ error: error instanceof Error ? error.message : 'Token 额度不足，请联系管理员派发额度', data: { user: sanitizeUser(user) } })
+    const message = error instanceof Error ? error.message : '图片生成失败'
+    const status = message.includes('Token 额度不足') ? 402 : message.includes('没有返回 usage.total_tokens') ? 502 : 502
+    return reply.status(status).send({ error: message })
   }
 
-  const firstImage = firstImageFromPayload(upstream.payload)
-  const upstreamUrl = typeof firstImage?.url === 'string' ? firstImage.url : undefined
-  let storageUrl: string | undefined
-  let storageError: string | undefined
-  if (typeof firstImage?.b64_json === 'string' && firstImage.b64_json) {
-    try {
-      storageUrl = await uploadToMinio(`moyuan/images/${randomUUID()}.png`, Buffer.from(firstImage.b64_json, 'base64'), 'image/png')
-    } catch (error) {
-      storageError = error instanceof Error ? error.message : 'MinIO 归档失败'
-    }
-  }
-
-  upsertGeneratedAsset({
-    user,
-    type: 'image',
-    prompt: body.prompt,
-    model: body.model,
-    provider: imageSkill.provider,
-    status: 'succeeded',
-    tokenUsage: usageTokens,
-    url: storageUrl ?? upstreamUrl ?? '',
-    storageUrl,
-    metadata: {
-      size: body.size,
-      storageError,
-      upstreamId: findFirstString(upstream.payload, ['id']),
-    },
-  })
-
-  await persistStoredConfig()
   return {
     data: {
-      raw: upstream.payload,
-      storageUrl,
-      usageTokens,
-      user: sanitizeUser(user),
+      raw: result.raw,
+      storageUrl: result.storageUrl,
+      usageTokens: result.usageTokens,
+      user: sanitizeUser(result.user),
     },
   }
+})
+
+app.get('/api/admin/skills/image/generations/:jobId', async (request, reply) => {
+  const user = getRequestUser(request)
+  if (!user) return unauthorized(reply)
+  normalizeUser(user)
+
+  const params = z.object({ jobId: z.string().min(1) }).parse(request.params)
+  const job = imageGenerationJobs.get(params.jobId)
+  if (!job || job.userId !== user.id) {
+    return reply.status(404).send({ error: '图片生成任务不存在或已过期' })
+  }
+
+  return { data: serializeImageGenerationJob(job) }
 })
 
 app.post('/api/admin/skills/video/generations', async (request, reply) => {

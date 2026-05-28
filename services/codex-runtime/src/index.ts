@@ -267,7 +267,8 @@ async function waitForFinalAssistantAfterTurn(record: TaskRecord, timeoutMs = 15
 }
 
 function canReuseParentTask(record: TaskRecord) {
-  return canReuseLifecycleSession(record, isRuntimeFailureContent) && !latestTurnHasFailure(record.task)
+  if (record.task.status === 'queued' || record.task.status === 'running' || record.cancel) return false
+  return Boolean(record.task.sessionId) || canReuseLifecycleSession(record, isRuntimeFailureContent)
 }
 
 function safeVisibleToolContent(content: string) {
