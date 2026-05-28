@@ -4,9 +4,11 @@ import '@fontsource-variable/geist'
 import '@fontsource-variable/noto-sans-sc'
 import { AppErrorBoundary, installGlobalErrorHandlers, renderFatalError } from './app/errors'
 import { DesktopApp } from './app/DesktopApp'
+import { desktopPlatform } from './config'
 import './styles.css'
 
 installGlobalErrorHandlers()
+document.documentElement.dataset.platform = desktopPlatform
 
 const rootElement = document.getElementById('root')!
 const windowWithRoot = window as typeof window & { __moyuanRoot?: ReactDOM.Root }

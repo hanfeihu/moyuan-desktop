@@ -307,6 +307,17 @@ button:disabled {
   -webkit-app-region: drag;
 }
 
+:root[data-platform='win32'] .sidebar,
+:root[data-platform='linux'] .sidebar {
+  padding-top: 28px;
+}
+
+:root[data-platform='win32'] .brand,
+:root[data-platform='linux'] .brand {
+  height: 34px;
+  padding-left: 10px;
+}
+
 .brand {
   height: 30px;
   display: flex;

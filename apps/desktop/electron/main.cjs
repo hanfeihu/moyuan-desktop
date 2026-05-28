@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require('electron')
+const { app, BrowserWindow, Menu } = require('electron')
 const { spawn } = require('node:child_process')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
@@ -92,6 +92,14 @@ function loadRuntimeEnv(appRoot, userData) {
   ].filter(Boolean)
 
   return candidates.reduce((merged, filePath) => ({ ...merged, ...parseEnvFile(filePath) }), {})
+}
+
+function appendLaunchParams(rawUrl, params) {
+  const url = new URL(rawUrl)
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) url.searchParams.set(key, String(value))
+  })
+  return url.toString()
 }
 
 function canUsePort(port) {
@@ -209,6 +217,8 @@ async function createWindow() {
   logStartup(`createWindow runtime url=${runtime.url}`)
   const iconPath = getIconPath()
   if (iconPath && app.dock) app.dock.setIcon(iconPath)
+  const isMac = process.platform === 'darwin'
+  if (!isMac) Menu.setApplicationMenu(null)
   const win = new BrowserWindow({
     width: 1480,
     height: 940,
@@ -216,8 +226,13 @@ async function createWindow() {
     minHeight: 760,
     title: '墨渊',
     backgroundColor: '#f7f7f5',
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 18, y: 18 },
+    autoHideMenuBar: !isMac,
+    ...(isMac
+      ? {
+          titleBarStyle: 'hiddenInset',
+          trafficLightPosition: { x: 18, y: 18 },
+        }
+      : {}),
     icon: iconPath,
     webPreferences: {
       contextIsolation: true,
@@ -243,14 +258,21 @@ async function createWindow() {
     win.loadFile(path.join(__dirname, '../dist/index.html'), {
       query: {
         enterpriseApiBase,
+        platform: process.platform,
         runtimeUrl: runtime.url,
         runtimeToken: runtime.token,
       },
     })
     logStartup('loadFile requested')
   } else {
-    win.loadURL(devUrl)
-    logStartup(`loadURL requested ${devUrl}`)
+    const url = appendLaunchParams(devUrl, {
+      enterpriseApiBase,
+      platform: process.platform,
+      runtimeUrl: runtime.url,
+      runtimeToken: runtime.token,
+    })
+    win.loadURL(url)
+    logStartup(`loadURL requested ${url}`)
   }
 }
 
