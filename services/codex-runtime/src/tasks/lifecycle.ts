@@ -1,6 +1,6 @@
 import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
 
-export type TaskLifecyclePhase = 'queued' | 'starting' | 'running' | 'tool_running' | 'waiting_final' | 'completed' | 'failed' | 'cancelled'
+export type TaskLifecyclePhase = 'queued' | 'starting' | 'running' | 'tool_running' | 'waiting_final' | 'waiting_input' | 'completed' | 'failed' | 'cancelled'
 
 export type TaskLifecycle = {
   phase: TaskLifecyclePhase
@@ -29,6 +29,7 @@ function nowIso() {
 
 function taskStatusForPhase(phase: TaskLifecyclePhase): CodexTask['status'] {
   if (phase === 'queued') return 'queued'
+  if (phase === 'waiting_input') return 'needs_approval'
   if (phase === 'completed') return 'completed'
   if (phase === 'failed' || phase === 'cancelled') return 'failed'
   return 'running'
@@ -68,6 +69,7 @@ export function hydrateTaskLifecycle(task: CodexTask, isRuntimeFailure: FailureP
   const lastActivityAt = task.updatedAt ?? task.createdAt ?? nowIso()
   if (task.status === 'failed') return { ...counters, lastActivityAt, phase: 'failed' }
   if (task.status === 'completed') return { ...counters, lastActivityAt, phase: 'completed' }
+  if (task.status === 'needs_approval') return { ...counters, lastActivityAt, phase: 'waiting_input' }
   if (task.status === 'queued') return { ...counters, lastActivityAt, phase: 'queued' }
   return { ...counters, lastActivityAt, phase: counters.toolEvents > counters.finalAssistantEvents ? 'tool_running' : 'running' }
 }
@@ -103,7 +105,7 @@ export function setTaskLifecyclePhase(
   if (isTerminalPhase(lifecycle.phase) && !isTerminalPhase(phase)) return lifecycle
   lifecycle.phase = phase
   lifecycle.lastActivityAt = nowIso()
-  if (phase === 'running' || phase === 'starting' || phase === 'tool_running') lifecycle.startedAt ??= lifecycle.lastActivityAt
+  if (phase === 'running' || phase === 'starting' || phase === 'tool_running' || phase === 'waiting_input') lifecycle.startedAt ??= lifecycle.lastActivityAt
   if (phase === 'waiting_final') lifecycle.turnCompletedAt = lifecycle.lastActivityAt
   if (reason) lifecycle.reason = reason
   record.task.status = taskStatusForPhase(phase)
@@ -129,6 +131,14 @@ export function applyTaskLifecycleEvent(record: LifecycleRecord, event: CodexTas
   if (event.type === 'thread.started' || event.type === 'turn.started') {
     lifecycle.phase = 'running'
     lifecycle.startedAt ??= event.timestamp
+  }
+
+  if (event.type === 'plugin.inputRequested' || event.type === 'approval.requested') {
+    lifecycle.phase = 'waiting_input'
+  }
+
+  if (event.type === 'plugin.inputSubmitted' || event.type === 'approval.resolved') {
+    lifecycle.phase = 'running'
   }
 
   if (event.role === 'tool' && content) {
@@ -174,6 +184,8 @@ export function finishTaskLifecycle(record: LifecycleRecord, code: number | null
   if (record.cancelRequested) {
     lifecycle.phase = 'cancelled'
     lifecycle.reason = '用户停止任务'
+  } else if (lifecycle.phase === 'waiting_input') {
+    lifecycle.phase = 'waiting_input'
   } else if (code !== 0 || lifecycle.phase === 'failed') {
     lifecycle.phase = 'failed'
   } else if (hasFinalAssistantReply(record, isRuntimeFailure)) {

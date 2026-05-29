@@ -1024,6 +1024,78 @@ button:disabled {
   animation: spin 1s linear infinite;
 }
 
+.plugin-request-form {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.plugin-request-head {
+  display: grid;
+  gap: 4px;
+  color: #3f4348;
+  font-family: var(--font-chat);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.plugin-request-head span {
+  color: #8d9297;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.plugin-request-fields {
+  display: grid;
+  gap: 10px;
+}
+
+.plugin-request-field {
+  display: grid;
+  gap: 6px;
+  color: #767778;
+  font-family: var(--font-chat);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.plugin-request-field input:not([type='checkbox']),
+.plugin-request-field select,
+.plugin-request-field textarea {
+  width: 100%;
+  border: 1px solid #dedfe2;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #292c31;
+  font-family: var(--font-chat);
+  font-size: 14px;
+  line-height: 1.4;
+  padding: 8px 10px;
+  outline: none;
+}
+
+.plugin-request-field textarea {
+  min-height: 82px;
+  resize: vertical;
+}
+
+.plugin-request-submit {
+  justify-self: start;
+  border: 1px solid #2d3035;
+  border-radius: 8px;
+  background: #2d3035;
+  color: #ffffff;
+  font-family: var(--font-chat);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 9px 12px;
+}
+
+.plugin-request-submit:disabled {
+  opacity: 0.55;
+}
+
 .message.tool {
   width: min(800px, 100%);
 }

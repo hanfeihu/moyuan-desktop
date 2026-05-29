@@ -14,11 +14,13 @@ import {
   runtimeFailureDiagnostic,
   type CodexTask,
   type CodexTaskEvent,
+  type PluginDefinition,
+  type RuntimePluginInputRequest,
 } from '@eaw/shared'
 import { defaultEnterpriseApiBase as enterpriseApiBase, getModelConfig } from './config.js'
 import { enterpriseJson, loadEnterpriseRuntimeConfig, validateEnterpriseQuota } from './enterprise/client.js'
-import { buildSkillInstructionBlock, isLikelyToolCallFragment, parseMoyuanToolCall } from './skills/contracts.js'
-import type { RuntimeRunOptions } from './skills/contracts.js'
+import { buildSkillInstructionBlock, isLikelyToolCallFragment, parseMoyuanPluginInputCall, parseMoyuanToolCall } from './skills/contracts.js'
+import type { MoyuanPluginInputCall, RuntimeRunOptions } from './skills/contracts.js'
 import { runImageGenerationTool, runMoyuanToolCall } from './skills/executor.js'
 import { createRuntimeLogger } from './observability/logger.js'
 import {
@@ -30,7 +32,7 @@ import {
   setTaskLifecyclePhase,
 } from './tasks/lifecycle.js'
 import { sanitizeTask } from './tasks/sanitize.js'
-import { approvalSchema, forkSchema, imageGenerationSchema, taskSchema } from './tasks/schemas.js'
+import { approvalSchema, forkSchema, imageGenerationSchema, pluginInputSubmissionSchema, taskSchema } from './tasks/schemas.js'
 import { appServerRaw, createTaskEventBus, rawItemId } from './tasks/events.js'
 import { registerDiagnosticsRoutes } from './routes/diagnostics.js'
 import { appServerSandboxPolicy, appServerThreadId, appServerTurnId, connectAppServer, findOpenPort } from './codex/app-server.js'
@@ -278,6 +280,76 @@ async function waitForFinalAssistantAfterTurn(record: TaskRecord, timeoutMs = 15
   return hasFinalAssistantReply(record, isRuntimeFailureContent)
 }
 
+function findRuntimePlugin(plugins: PluginDefinition[] | undefined, call: MoyuanPluginInputCall) {
+  const id = call.pluginId.toLowerCase()
+  return plugins?.find((plugin) => {
+    if (!plugin.enabled || plugin.status !== 'ready') return false
+    return plugin.id.toLowerCase() === id || plugin.name.toLowerCase() === id || plugin.triggerHints.some((hint) => hint.toLowerCase() === id)
+  })
+}
+
+function requestPluginInput(record: TaskRecord, plugin: PluginDefinition, call: MoyuanPluginInputCall) {
+  const now = new Date().toISOString()
+  const request: RuntimePluginInputRequest = {
+    id: `plugin-${record.task.id}-${Date.now()}`,
+    pluginId: plugin.id,
+    title: call.title?.trim() || `${plugin.name}需要补充信息`,
+    status: 'pending',
+    turnId: record.currentTurnId,
+    fields: plugin.inputFields,
+    values: call.values,
+    createdAt: now,
+  }
+
+  pushEvent(record, {
+    taskId: record.task.id,
+    type: 'plugin.inputRequested',
+    role: 'system',
+    content: call.reason?.trim() || request.title,
+    pluginRequest: request,
+    item: {
+      id: `item-${request.id}`,
+      type: 'plugin',
+      title: request.title,
+      status: 'pending',
+      turnId: record.currentTurnId,
+      metadata: {
+        pluginId: plugin.id,
+        pluginName: plugin.name,
+      },
+      startedAt: now,
+    },
+    source: {
+      id: `source-${request.id}`,
+      type: 'plugin',
+      title: plugin.name,
+      metadata: { pluginId: plugin.id },
+      createdAt: now,
+    },
+  })
+  record.awaitingPluginInput = true
+}
+
+function pluginSubmissionPrompt(pluginRequest: RuntimePluginInputRequest, values: Record<string, unknown>) {
+  const lines = pluginRequest.fields.map((field) => {
+    const value = values[field.id]
+    if (value && typeof value === 'object' && 'name' in value) {
+      const file = value as { name?: unknown; type?: unknown; size?: unknown }
+      return `- ${field.label}: ${String(file.name ?? '已上传文件')}${file.type ? ` (${String(file.type)})` : ''}${typeof file.size === 'number' ? `, ${file.size} bytes` : ''}`
+    }
+    return `- ${field.label}: ${value === undefined || value === '' ? '未填写' : JSON.stringify(value)}`
+  })
+
+  return [
+    `员工已经提交插件表单：${pluginRequest.title}`,
+    `插件 ID：${pluginRequest.pluginId}`,
+    '表单内容：',
+    ...lines,
+    '',
+    '请基于这些输入继续完成原任务；如果需要调用技能或继续执行，请直接编排下一步。',
+  ].join('\n')
+}
+
 function canReuseParentTask(record: TaskRecord) {
   if (record.task.status === 'queued' || record.task.status === 'running' || record.cancel) return false
   return Boolean(record.task.sessionId) || canReuseLifecycleSession(record, isRuntimeFailureContent)
@@ -341,6 +413,7 @@ function startTaskTurn(record: TaskRecord, now: string) {
   const nextTurnIndex = record.task.transcript.filter((item) => item.role === 'user').length + 1
   record.currentTurnId = `${record.task.id}-turn-${nextTurnIndex}`
   record.activeAssistantItemId = undefined
+  record.awaitingPluginInput = false
   record.streamItemIndexes.clear()
   resetTaskLifecycleForNewTurn(record, now)
 }
@@ -565,7 +638,7 @@ async function finishCodexTask(record: TaskRecord, taskId: string, code: number 
     taskId,
     type: 'process.exit',
     role: 'system',
-    content: record.task.status === 'completed' ? 'Codex 任务已完成' : `Codex 任务退出，代码 ${code ?? 'unknown'}`,
+    content: record.task.status === 'needs_approval' ? '等待插件表单提交' : record.task.status === 'completed' ? 'Codex 任务已完成' : `Codex 任务退出，代码 ${code ?? 'unknown'}`,
   })
 }
 
@@ -652,11 +725,20 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
     return true
   }
 
+  const startPluginInputRequest = (pluginCall: ReturnType<typeof parseMoyuanPluginInputCall>) => {
+    if (!pluginCall) return false
+    const plugin = findRuntimePlugin(skills.plugins, pluginCall)
+    if (!plugin) return false
+    requestPluginInput(record, plugin, pluginCall)
+    return true
+  }
+
   const flushBufferedAssistantItems = () => {
     for (const [itemId, content] of Array.from(assistantDeltaBuffers.entries())) {
       const toolCall = parseMoyuanToolCall(content)
       assistantDeltaBuffers.delete(itemId)
       if (startToolRun(toolCall)) continue
+      if (startPluginInputRequest(parseMoyuanPluginInputCall(content))) continue
       if (!content.trim()) continue
       pushEvent(record, {
         taskId,
@@ -973,7 +1055,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
     await Promise.allSettled(pendingUsageReports)
     await Promise.allSettled(pendingToolRuns)
     flushBufferedAssistantItems()
-    if (requiredSkill && !hasGeneratedAssetForSkill(record, requiredSkill)) {
+    if (requiredSkill && !record.awaitingPluginInput && !hasGeneratedAssetForSkill(record, requiredSkill)) {
       await failMissingSkillResult(record, taskId, requiredSkill)
       return
     }
@@ -1073,6 +1155,14 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
   const pendingUsageReports: Promise<void>[] = []
   let usageReported = false
 
+  const startPluginInputRequest = (pluginCall: ReturnType<typeof parseMoyuanPluginInputCall>) => {
+    if (!pluginCall) return false
+    const plugin = findRuntimePlugin(skills.plugins, pluginCall)
+    if (!plugin) return false
+    requestPluginInput(record, plugin, pluginCall)
+    return true
+  }
+
   const queueUsageReport = (payload: unknown) => {
     if (usageReported) return
     if (!codexUsageFromPayload(payload)) return
@@ -1101,6 +1191,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
             void toolRun
             continue
           }
+          if (startPluginInputRequest(parseMoyuanPluginInputCall(event.content))) continue
           pendingAssistantStreams.push(streamAssistantMessage(record, event))
           continue
         }
@@ -1152,7 +1243,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
       await Promise.allSettled(pendingAssistantStreams)
       await Promise.allSettled(pendingToolRuns)
       await Promise.allSettled(pendingUsageReports)
-      if (requiredSkill && !hasGeneratedAssetForSkill(record, requiredSkill)) {
+      if (requiredSkill && !record.awaitingPluginInput && !hasGeneratedAssetForSkill(record, requiredSkill)) {
         await failMissingSkillResult(record, taskId, requiredSkill)
         return
       }
@@ -1179,7 +1270,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
         taskId,
         type: 'process.exit',
         role: 'system',
-        content: record.task.status === 'completed' ? 'Codex 任务已完成' : `Codex 任务退出，代码 ${code ?? 'unknown'}`,
+        content: record.task.status === 'needs_approval' ? '等待插件表单提交' : record.task.status === 'completed' ? 'Codex 任务已完成' : `Codex 任务退出，代码 ${code ?? 'unknown'}`,
       })
     })()
   })
@@ -1411,6 +1502,72 @@ app.post('/api/codex/tasks/:taskId/cancel', async (request, reply) => {
   record.cancel?.(message)
   record.cancelRequested = true
   await failCodexTask(record, params.taskId, message)
+
+  return { data: sanitizeTask(record.task) }
+})
+
+app.post('/api/codex/tasks/:taskId/plugin-requests/:requestId/submit', async (request, reply) => {
+  const params = z.object({ requestId: z.string(), taskId: z.string() }).parse(request.params)
+  const parsed = pluginInputSubmissionSchema.safeParse(request.body ?? {})
+  if (!parsed.success) {
+    return reply.status(400).send({ error: '插件表单参数不完整', detail: parsed.error.flatten() })
+  }
+
+  const record = records.get(params.taskId)
+  if (!record) return reply.status(404).send({ error: '任务不存在' })
+
+  const pluginRequest = record.task.pluginRequests?.find((item) => item.id === params.requestId)
+  if (!pluginRequest) return reply.status(404).send({ error: '插件请求不存在' })
+  if (pluginRequest.status !== 'pending') return { data: sanitizeTask(record.task) }
+
+  const now = new Date().toISOString()
+  const submittedRequest: RuntimePluginInputRequest = {
+    ...pluginRequest,
+    status: 'submitted',
+    values: parsed.data.values,
+    resolvedAt: now,
+  }
+  pushEvent(record, {
+    taskId: params.taskId,
+    type: 'plugin.inputSubmitted',
+    role: 'system',
+    content: '员工已提交插件表单。',
+    pluginRequest: submittedRequest,
+    item: {
+      id: pluginRequest.itemId ?? `item-${pluginRequest.id}`,
+      type: 'plugin',
+      title: pluginRequest.title,
+      status: 'completed',
+      turnId: pluginRequest.turnId ?? record.currentTurnId,
+      metadata: { pluginId: pluginRequest.pluginId },
+      completedAt: now,
+    },
+  })
+
+  record.awaitingPluginInput = false
+  startTaskTurn(record, now)
+  const continuationPrompt = pluginSubmissionPrompt(submittedRequest, parsed.data.values)
+  appendTranscriptItem(record, {
+    role: 'user',
+    content: continuationPrompt,
+    timestamp: now,
+  })
+  await saveStore()
+
+  void runCodex(record, continuationPrompt, record.task.workspace, record.task.sessionId, {
+    enterpriseApiBase: parsed.data.enterpriseApiBase,
+    enterpriseAuthToken: parsed.data.enterpriseAuthToken,
+  }).catch((error: unknown) => {
+    if (record.cancelRequested) return
+    logTask(record, 'plugin.continue.unhandled_error', error, 'error')
+    setTaskLifecyclePhase(record, 'failed', isRuntimeFailureContent, error instanceof Error ? error.message : String(error))
+    pushEvent(record, {
+      taskId: params.taskId,
+      type: 'turn.failed',
+      role: 'system',
+      content: friendlyRuntimeMessage(error instanceof Error ? error.message : String(error)),
+    })
+  })
 
   return { data: sanitizeTask(record.task) }
 })

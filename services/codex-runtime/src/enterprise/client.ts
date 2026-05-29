@@ -57,16 +57,21 @@ export async function loadEnterpriseRuntimeConfig(
             imageGeneration?: EnterpriseSkillSet['imageGeneration']
             videoGeneration?: EnterpriseSkillSet['videoGeneration']
           }
+          plugins?: EnterpriseSkillSet['plugins']
         }
       }
     }
     const imageGeneration = payload.data?.runtime?.skills?.imageGeneration
     const videoGeneration = payload.data?.runtime?.skills?.videoGeneration
+    const plugins = payload.data?.runtime?.plugins
     if (response.ok && imageGeneration) {
       skills.imageGeneration = imageGeneration
     }
     if (response.ok && videoGeneration) {
       skills.videoGeneration = videoGeneration
+    }
+    if (response.ok && plugins) {
+      skills.plugins = plugins
     }
     const modelProvider = payload.data?.runtime?.modelProvider
     if (response.ok && modelProvider?.enabled !== false && modelProvider?.defaultModel) {

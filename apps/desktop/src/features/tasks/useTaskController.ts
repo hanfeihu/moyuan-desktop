@@ -4,7 +4,7 @@ import { defaultWorkspace, enterpriseApiBase, localEmployeeId, runtimeUrl, type 
 import { errorLogDetails, logClientEvent } from '../../logger'
 import { loadSignedInUser } from '../auth/useAuth'
 import type { RuntimeState } from '../runtime/types'
-import { cancelRuntimeTask, createRuntimeTask } from '../runtime/client'
+import { cancelRuntimeTask, createRuntimeTask, submitRuntimePluginInput } from '../runtime/client'
 import { useLiveTaskPolling } from '../runtime/useLiveTaskPolling'
 import { useRuntimeBootstrap } from '../runtime/useRuntimeBootstrap'
 import { useTaskEventStream } from '../runtime/useTaskEventStream'
@@ -225,6 +225,42 @@ export function useTaskController({
     }
   }
 
+  async function submitPluginRequest(requestId: string, values: Record<string, unknown>) {
+    if (activeTask.id === 'welcome' || !authToken) return
+    logClientEvent('plugin_request.submit.start', { requestId, task: taskLogSummary(activeTask) })
+    try {
+      const updatedTask = await submitRuntimePluginInput({
+        enterpriseApiBase,
+        enterpriseAuthToken: authToken,
+        requestId,
+        taskId: activeTask.id,
+        values,
+      })
+      logClientEvent('plugin_request.submit.success', { requestId, task: taskLogSummary(updatedTask) })
+      setRuntimeState('online')
+      setWatchedTaskIds((current) => Array.from(new Set([...current, updatedTask.id])).sort())
+      setTasks((current) => mergeTask(current, updatedTask))
+    } catch (error) {
+      logClientEvent('plugin_request.submit.failed', errorLogDetails(error, { requestId, task: taskLogSummary(activeTask) }), 'error')
+      const message = error instanceof Error ? error.message : '插件表单提交失败'
+      setTasks((current) =>
+        current.map((task) =>
+          task.id === activeTask.id
+            ? {
+                ...task,
+                transcript: [
+                  ...task.transcript,
+                  { role: 'system', content: `插件表单提交失败：${message}`, timestamp: nowIso() },
+                ],
+              }
+            : task,
+        ),
+      )
+    } finally {
+      window.requestAnimationFrame(onFocusComposer)
+    }
+  }
+
   async function submitTask() {
     const promptText = prompt.trim()
     const workspacePath = workspace.trim() || defaultWorkspace
@@ -333,6 +369,7 @@ export function useTaskController({
     showStatusBadge,
     startNewConversation,
     stopActiveTask,
+    submitPluginRequest,
     submitTask,
     tasks,
     visibleTranscript,

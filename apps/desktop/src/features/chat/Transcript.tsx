@@ -11,6 +11,7 @@ export function Transcript({
   busyElapsed,
   isCancelling,
   isWelcome,
+  onPluginSubmit,
   onStop,
   shouldShowThinking,
   transcriptBottomRef,
@@ -21,6 +22,7 @@ export function Transcript({
   busyElapsed: number
   isCancelling: boolean
   isWelcome: boolean
+  onPluginSubmit: (requestId: string, values: Record<string, unknown>) => void | Promise<void>
   onStop: () => void
   shouldShowThinking: boolean
   transcriptBottomRef: RefObject<HTMLDivElement>
@@ -33,7 +35,7 @@ export function Transcript({
         const isLatestAssistant = item.role === 'assistant' && index === visibleTranscript.length - 1 && activeTask.status === 'running'
         return <TranscriptMessage item={item} key={`${activeTask.id}-${item.itemId ?? `${index}-${item.role}`}`} label={messageLabel(item.role)} streaming={isLatestAssistant} />
       })}
-      <TaskProgressCard task={activeTask} />
+      <TaskProgressCard onPluginSubmit={onPluginSubmit} task={activeTask} />
       {shouldShowThinking && (
         <article className="message assistant pending">
           <div className="message-label">

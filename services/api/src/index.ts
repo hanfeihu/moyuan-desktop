@@ -912,6 +912,7 @@ function buildDesktopBootstrap() {
           provider: videoSkill.provider,
         },
       },
+      plugins: plugins.filter((plugin) => plugin.enabled && plugin.status === 'ready'),
     },
   }
 }

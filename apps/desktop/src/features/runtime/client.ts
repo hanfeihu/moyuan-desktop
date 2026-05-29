@@ -19,6 +19,14 @@ export type CreateRuntimeTaskInput = {
   workspace: string
 }
 
+export type SubmitRuntimePluginInput = {
+  enterpriseApiBase: string
+  enterpriseAuthToken: string
+  requestId: string
+  taskId: string
+  values: Record<string, unknown>
+}
+
 async function readRuntimePayload<T>(response: Response) {
   const payload = (await response.json()) as RuntimePayload<T>
   if (!response.ok) throw new Error(payload.error ?? `Runtime 返回 ${response.status}`)
@@ -58,6 +66,16 @@ export async function cancelRuntimeTask(taskId: string) {
   })
   const payload = await readRuntimePayload<CodexTask>(response)
   if (!payload.data) throw new Error(payload.error ?? '停止失败')
+  return payload.data
+}
+
+export async function submitRuntimePluginInput({ enterpriseApiBase, enterpriseAuthToken, requestId, taskId, values }: SubmitRuntimePluginInput) {
+  const response = await runtimeFetch(`/api/codex/tasks/${encodeURIComponent(taskId)}/plugin-requests/${encodeURIComponent(requestId)}/submit`, {
+    method: 'POST',
+    body: JSON.stringify({ enterpriseApiBase, enterpriseAuthToken, values }),
+  })
+  const payload = await readRuntimePayload<CodexTask>(response)
+  if (!payload.data) throw new Error(payload.error ?? '插件表单提交失败')
   return payload.data
 }
 

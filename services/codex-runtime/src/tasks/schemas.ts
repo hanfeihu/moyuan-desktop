@@ -29,6 +29,12 @@ export const approvalSchema = z.object({
   reason: z.string().optional(),
 })
 
+export const pluginInputSubmissionSchema = z.object({
+  enterpriseApiBase: z.string().url().optional(),
+  enterpriseAuthToken: z.string().optional(),
+  values: z.record(z.string(), z.unknown()).default({}),
+})
+
 export const forkSchema = z.object({
   prompt: z.string().optional(),
 })

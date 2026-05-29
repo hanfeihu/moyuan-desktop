@@ -8,6 +8,7 @@ export type TaskRecord = {
   streamItemIndexes: Map<string, number>
   lifecycle?: TaskLifecycle
   activeAssistantItemId?: string
+  awaitingPluginInput?: boolean
   currentTurnId?: string
   nextTranscriptSeq?: number
   cancel?: (reason?: string) => void

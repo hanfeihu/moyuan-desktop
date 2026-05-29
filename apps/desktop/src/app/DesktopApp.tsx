@@ -143,6 +143,7 @@ export function DesktopApp() {
           busyElapsed={taskController.busyElapsed}
           isCancelling={taskController.isCancelling}
           isWelcome={taskController.isWelcome}
+          onPluginSubmit={taskController.submitPluginRequest}
           onStop={taskController.stopActiveTask}
           shouldShowThinking={taskController.shouldShowThinking}
           transcriptBottomRef={transcriptBottomRef}
