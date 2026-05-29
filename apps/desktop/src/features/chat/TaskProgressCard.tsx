@@ -150,7 +150,8 @@ export function TaskProgressCard({
   const approvals = (task.approvals ?? []).filter((approval) => approval.status === 'pending')
   const pluginRequests = (task.pluginRequests ?? []).filter((request) => request.status === 'pending')
   const sources = task.sources ?? []
-  const hasContent = plan.length || items.length || outputs.length || approvals.length || pluginRequests.length || sources.length
+  const isLive = task.status === 'queued' || task.status === 'running'
+  const hasContent = isLive || plan.length || items.length || outputs.length || approvals.length || pluginRequests.length || sources.length
   if (!hasContent) return null
 
   return (
@@ -237,10 +238,10 @@ export function TaskProgressCard({
         </div>
       ) : null}
 
-      {!plan.length && task.status === 'running' ? (
+      {!plan.length && isLive ? (
         <div className="task-progress-row task-progress-live">
           <span className="task-progress-mark in_progress"><Play size={13} /></span>
-          <span>任务正在执行</span>
+          <span>{task.status === 'queued' ? '任务排队中' : '任务正在执行'}</span>
         </div>
       ) : null}
     </section>
