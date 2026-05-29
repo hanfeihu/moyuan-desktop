@@ -157,12 +157,12 @@ export function applyTaskStructureEvent(task: CodexTask, event: StructuredTaskEv
   const rawItem = rawParams?.item && typeof rawParams.item === 'object' ? (rawParams.item as Record<string, unknown>) : undefined
   const turnId = event.turnId ?? firstStructuredString(rawParams?.turnId, rawParams?.turn_id, rawParams?.turn && typeof rawParams.turn === 'object' ? (rawParams.turn as { id?: unknown }).id : undefined)
 
-  if (event.type === 'turn.started' || event.type === 'turn.completed' || event.type === 'turn.failed') {
+  if (event.type === 'turn.started' || event.type === 'turn.completed' || event.type === 'turn.failed' || event.type === 'turn.interrupted') {
     const explicitTurnId = turnId || firstStructuredString(rawParams?.id)
     if (explicitTurnId) {
       upsertTurn(task, {
         id: explicitTurnId,
-        status: event.type === 'turn.started' ? 'in_progress' : event.type === 'turn.failed' ? 'failed' : 'completed',
+        status: event.type === 'turn.started' ? 'in_progress' : event.type === 'turn.failed' ? 'failed' : event.type === 'turn.interrupted' ? 'interrupted' : 'completed',
         startedAt: event.type === 'turn.started' ? timestamp : undefined,
         completedAt: event.type === 'turn.started' ? undefined : timestamp,
         error: event.type === 'turn.failed' ? eventText(event) : undefined,

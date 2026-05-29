@@ -1,6 +1,6 @@
 import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
 
-export type TaskLifecyclePhase = 'queued' | 'starting' | 'running' | 'tool_running' | 'waiting_final' | 'waiting_input' | 'completed' | 'failed' | 'cancelled'
+export type TaskLifecyclePhase = 'queued' | 'starting' | 'running' | 'tool_running' | 'waiting_final' | 'waiting_input' | 'completed' | 'failed' | 'interrupted'
 
 export type TaskLifecycle = {
   phase: TaskLifecyclePhase
@@ -21,7 +21,7 @@ type LifecycleRecord = {
 
 type FailurePredicate = (content: string) => boolean
 
-const terminalPhases = new Set<TaskLifecyclePhase>(['completed', 'failed', 'cancelled'])
+const terminalPhases = new Set<TaskLifecyclePhase>(['completed', 'failed', 'interrupted'])
 
 function nowIso() {
   return new Date().toISOString()
@@ -31,7 +31,8 @@ function taskStatusForPhase(phase: TaskLifecyclePhase): CodexTask['status'] {
   if (phase === 'queued') return 'queued'
   if (phase === 'waiting_input') return 'needs_approval'
   if (phase === 'completed') return 'completed'
-  if (phase === 'failed' || phase === 'cancelled') return 'failed'
+  if (phase === 'failed') return 'failed'
+  if (phase === 'interrupted') return 'interrupted'
   return 'running'
 }
 
@@ -68,6 +69,7 @@ export function hydrateTaskLifecycle(task: CodexTask, isRuntimeFailure: FailureP
   const counters = inferLifecycleCounters(task, isRuntimeFailure)
   const lastActivityAt = task.updatedAt ?? task.createdAt ?? nowIso()
   if (task.status === 'failed') return { ...counters, lastActivityAt, phase: 'failed' }
+  if (task.status === 'interrupted') return { ...counters, lastActivityAt, phase: 'interrupted' }
   if (task.status === 'completed') return { ...counters, lastActivityAt, phase: 'completed' }
   if (task.status === 'needs_approval') return { ...counters, lastActivityAt, phase: 'waiting_input' }
   if (task.status === 'queued') return { ...counters, lastActivityAt, phase: 'queued' }
@@ -118,6 +120,13 @@ export function applyTaskLifecycleEvent(record: LifecycleRecord, event: CodexTas
   lifecycle.lastActivityAt = event.timestamp
 
   const content = event.content.trim()
+  if (event.type === 'turn.interrupted') {
+    lifecycle.phase = 'interrupted'
+    lifecycle.reason = content || '用户停止任务'
+    record.task.status = 'interrupted'
+    return lifecycle
+  }
+
   const isFailure = event.type === 'error' || event.type === 'turn.failed' || (event.role === 'system' && isRuntimeFailure(content))
   if (isFailure) {
     lifecycle.phase = 'failed'
@@ -182,7 +191,7 @@ export function finishTaskLifecycle(record: LifecycleRecord, code: number | null
   record.task.exitCode = code
 
   if (record.cancelRequested) {
-    lifecycle.phase = 'cancelled'
+    lifecycle.phase = 'interrupted'
     lifecycle.reason = '用户停止任务'
   } else if (lifecycle.phase === 'waiting_input') {
     lifecycle.phase = 'waiting_input'
@@ -202,5 +211,7 @@ export function finishTaskLifecycle(record: LifecycleRecord, code: number | null
 
 export function canReuseLifecycleSession(record: LifecycleRecord, isRuntimeFailure: FailurePredicate) {
   const lifecycle = ensureTaskLifecycle(record, isRuntimeFailure)
-  return lifecycle.phase === 'completed' && Boolean(record.task.sessionId) && hasFinalAssistantReply(record, isRuntimeFailure)
+  if (!record.task.sessionId) return false
+  if (lifecycle.phase === 'interrupted') return true
+  return lifecycle.phase === 'completed' && hasFinalAssistantReply(record, isRuntimeFailure)
 }

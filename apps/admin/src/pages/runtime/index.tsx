@@ -62,7 +62,7 @@ export default function RuntimePage() {
             { title: '高风险操作', dataIndex: 'approval' },
           ]}
           dataSource={{
-            approval: '默认需要员工或企业策略确认',
+            approval: '默认自动执行，后台审计留痕',
             files: '限制在员工授权工作区内',
             terminal: '桌面端本机执行，后台审计留痕',
           }}

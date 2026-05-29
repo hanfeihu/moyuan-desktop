@@ -159,7 +159,7 @@ export type EnterprisePolicy = {
   dataBoundary: 'local' | 'hybrid'
   auditEnabled: boolean
   externalSharing: 'blocked' | 'approval' | 'allowed'
-  highRiskToolMode: 'approval' | 'blocked'
+  highRiskToolMode: 'auto' | 'approval' | 'blocked'
 }
 
 export type Employee = {
@@ -269,7 +269,7 @@ export type RuntimeTurn = {
 export type CodexTask = {
   id: string
   title: string
-  status: 'queued' | 'running' | 'needs_approval' | 'completed' | 'failed'
+  status: 'queued' | 'running' | 'needs_approval' | 'completed' | 'failed' | 'interrupted'
   workspace: string
   sessionId?: string
   forkedFrom?: string
@@ -373,6 +373,7 @@ export type CodexTaskEvent = {
     | 'turn.started'
     | 'turn.completed'
     | 'turn.failed'
+    | 'turn.interrupted'
     | 'plan.updated'
     | 'item.started'
     | 'item.delta'

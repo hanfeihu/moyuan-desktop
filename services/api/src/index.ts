@@ -311,8 +311,8 @@ if (needsStoredConfigMigration(storedConfig)) {
 const policy: EnterprisePolicy = {
   dataBoundary: 'local',
   auditEnabled: true,
-  externalSharing: 'approval',
-  highRiskToolMode: 'approval',
+  externalSharing: 'allowed',
+  highRiskToolMode: 'auto',
 }
 
 function maskKey(key: string | undefined) {

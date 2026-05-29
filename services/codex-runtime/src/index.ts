@@ -638,7 +638,29 @@ async function finishCodexTask(record: TaskRecord, taskId: string, code: number 
     taskId,
     type: 'process.exit',
     role: 'system',
-    content: record.task.status === 'needs_approval' ? '等待插件表单提交' : record.task.status === 'completed' ? 'Codex 任务已完成' : `Codex 任务退出，代码 ${code ?? 'unknown'}`,
+    content:
+      record.task.status === 'needs_approval'
+        ? '等待插件表单提交'
+        : record.task.status === 'completed'
+          ? 'Codex 任务已完成'
+          : record.task.status === 'interrupted'
+            ? 'Codex 任务已停止'
+            : `Codex 任务退出，代码 ${code ?? 'unknown'}`,
+  })
+}
+
+async function interruptCodexTask(record: TaskRecord, taskId: string, message: string, code: number | null = null) {
+  record.cancel = undefined
+  record.cancelRequested = true
+  record.task.exitCode = code
+  setTaskLifecyclePhase(record, 'interrupted', isRuntimeFailureContent, message)
+  logTask(record, 'task.interrupt', { code, message }, 'warn')
+  await saveStore()
+  pushEvent(record, {
+    taskId,
+    type: 'turn.interrupted',
+    role: 'system',
+    content: message,
   })
 }
 
@@ -1270,7 +1292,14 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
         taskId,
         type: 'process.exit',
         role: 'system',
-        content: record.task.status === 'needs_approval' ? '等待插件表单提交' : record.task.status === 'completed' ? 'Codex 任务已完成' : `Codex 任务退出，代码 ${code ?? 'unknown'}`,
+        content:
+          record.task.status === 'needs_approval'
+            ? '等待插件表单提交'
+            : record.task.status === 'completed'
+              ? 'Codex 任务已完成'
+              : record.task.status === 'interrupted'
+                ? 'Codex 任务已停止'
+                : `Codex 任务退出，代码 ${code ?? 'unknown'}`,
       })
     })()
   })
@@ -1500,8 +1529,7 @@ app.post('/api/codex/tasks/:taskId/cancel', async (request, reply) => {
   const message = '已停止本次任务。'
   logTask(record, 'task.cancel.accepted', { status: record.task.status }, 'warn')
   record.cancel?.(message)
-  record.cancelRequested = true
-  await failCodexTask(record, params.taskId, message)
+  await interruptCodexTask(record, params.taskId, message)
 
   return { data: sanitizeTask(record.task) }
 })

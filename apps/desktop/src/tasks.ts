@@ -22,6 +22,7 @@ export function statusText(status: CodexTask['status']) {
     needs_approval: '待确认',
     completed: '完成',
     failed: '失败',
+    interrupted: '已停止',
   }[status]
 }
 
@@ -32,7 +33,7 @@ export function taskSortValue(task: CodexTask) {
 export function normalizeTask(task: CodexTask): CodexTask {
   const normalizedTask = ensureTranscriptModel(task)
   const rawTranscript = normalizedTask.transcript ?? []
-  const inferredFailed = latestTurnHasFailure(rawTranscript) || latestTurnCompletedWithoutAssistant(task.status, rawTranscript)
+  const inferredFailed = task.status !== 'interrupted' && (latestTurnHasFailure(rawTranscript) || latestTurnCompletedWithoutAssistant(task.status, rawTranscript))
   const status = inferredFailed ? 'failed' : task.status
   const transcript = compactTranscript(filterDisplayTranscript(rawTranscript))
   const title = task.title?.trim().replace(/^生成图片[:：]\s*/, '')
@@ -346,17 +347,22 @@ export function taskMeta(task: CodexTask) {
 
 function eventIndicatesFailure(event: CodexTaskEvent) {
   const content = event.content.trim()
+  if (event.type === 'turn.interrupted') return false
   return event.type === 'turn.failed' || event.type === 'error' || content.startsWith('失败诊断：') || (event.role !== 'assistant' && isRuntimeFailureNotice(content))
 }
 
 function eventStatus(event: CodexTaskEvent, fallback: CodexTask['status']): CodexTask['status'] {
+  if (event.type === 'turn.interrupted') return 'interrupted'
   if (eventIndicatesFailure(event)) return 'failed'
-  if (fallback === 'completed' || fallback === 'failed') {
+  if (fallback === 'completed' || fallback === 'failed' || fallback === 'interrupted') {
     return fallback
   }
   if (event.type === 'approval.requested' || event.type === 'plugin.inputRequested') return 'needs_approval'
   if (event.type === 'approval.resolved' || event.type === 'plugin.inputSubmitted') return 'running'
-  if (event.type === 'process.exit') return event.content.includes('完成') ? 'completed' : 'failed'
+  if (event.type === 'process.exit') {
+    if (event.content.includes('停止') || event.content.includes('中断')) return 'interrupted'
+    return event.content.includes('完成') ? 'completed' : 'failed'
+  }
   if (event.type === 'turn.completed') return 'completed'
   if (
     event.type === 'item.completed' ||
@@ -465,7 +471,7 @@ export function hasCodexActivity(task: CodexTask) {
 }
 
 export function canResumeTask(task: CodexTask) {
-  return (task.status === 'completed' || task.status === 'failed') && Boolean(task.sessionId)
+  return (task.status === 'completed' || task.status === 'failed' || task.status === 'interrupted') && Boolean(task.sessionId)
 }
 
 export function buildPendingTask(promptText: string, workspacePath: string): CodexTask {

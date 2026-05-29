@@ -428,7 +428,8 @@ button:disabled {
 .task-item.active small,
 .task-item.running small,
 .task-item.queued small,
-.task-item.failed small {
+.task-item.failed small,
+.task-item.interrupted small {
   opacity: 1;
 }
 
@@ -787,6 +788,11 @@ button:disabled {
 
 .status-badge.failed {
   color: var(--danger);
+  border-color: transparent;
+}
+
+.status-badge.interrupted {
+  color: var(--muted);
   border-color: transparent;
 }
 
@@ -2061,7 +2067,8 @@ button:disabled {
 
   .status-badge,
   .status-badge.running,
-  .status-badge.failed {
+  .status-badge.failed,
+  .status-badge.interrupted {
     width: 26px;
     height: 26px;
     padding: 0;

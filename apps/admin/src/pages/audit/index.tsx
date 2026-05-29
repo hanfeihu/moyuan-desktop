@@ -2,7 +2,7 @@ import { PageContainer, ProCard, ProTable } from '@ant-design/pro-components'
 import { Button, Tag } from 'antd'
 
 const rows = [
-  { id: 'a1', actor: '韩飞虎', action: '执行本地命令', result: '已确认', time: '2026-05-27 13:20' },
+  { id: 'a1', actor: '韩飞虎', action: '执行本地命令', result: '已自动执行', time: '2026-05-27 13:20' },
   { id: 'a2', actor: '林青', action: '生成日报摘要', result: '自动通过', time: '2026-05-27 12:44' },
   { id: 'a3', actor: '周然', action: '读取工作区文件', result: '已记录', time: '2026-05-27 11:58' },
 ]

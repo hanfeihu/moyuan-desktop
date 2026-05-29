@@ -120,7 +120,7 @@ export const defaultTokenPlans: TokenPlan[] = [
 
 export const defaultPolicy: PolicyView = {
   dataBoundary: '企业内网',
-  externalSharing: '外发需审批',
-  highRiskTool: '默认人工确认',
+  externalSharing: '允许外发',
+  highRiskTool: '自动执行',
   retention: '审计保留 180 天',
 }

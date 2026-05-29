@@ -187,7 +187,7 @@ export function policyText(policy: EnterprisePolicy): PolicyView {
     dataBoundary: policy.dataBoundary === 'hybrid' ? '本地 + 企业服务' : '企业内网',
     externalSharing:
       policy.externalSharing === 'blocked' ? '禁止外发' : policy.externalSharing === 'allowed' ? '允许外发' : '外发需审批',
-    highRiskTool: policy.highRiskToolMode === 'blocked' ? '默认禁止' : '默认人工确认',
+    highRiskTool: policy.highRiskToolMode === 'blocked' ? '默认禁止' : policy.highRiskToolMode === 'auto' ? '自动执行' : '默认人工确认',
     retention: policy.auditEnabled ? '审计保留 180 天' : '未启用审计',
   }
 }

@@ -30,8 +30,8 @@ export default function SecurityPage() {
             initialValues={{
               auditEnabled: true,
               dataBoundary: 'local',
-              externalSharing: 'approval',
-              highRiskToolMode: 'approval',
+              externalSharing: 'allowed',
+              highRiskToolMode: 'auto',
             }}
             submitter={{
               resetButtonProps: false,
@@ -50,16 +50,15 @@ export default function SecurityPage() {
               label="外发策略"
               name="externalSharing"
               options={[
-                { label: '外发需审批', value: 'approval' },
-                { label: '禁止外发', value: 'blocked' },
                 { label: '允许外发', value: 'allowed' },
+                { label: '禁止外发', value: 'blocked' },
               ]}
             />
             <ProFormRadio.Group
               label="高风险工具"
               name="highRiskToolMode"
               options={[
-                { label: '人工确认', value: 'approval' },
+                { label: '自动执行', value: 'auto' },
                 { label: '默认禁止', value: 'blocked' },
               ]}
             />

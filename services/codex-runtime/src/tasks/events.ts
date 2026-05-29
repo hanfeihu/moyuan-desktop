@@ -95,6 +95,8 @@ export function createTaskEventBus({
       'plugin.inputSubmitted',
       'thread.started',
       'turn.completed',
+      'turn.failed',
+      'turn.interrupted',
       'turn.started',
     ])
     if (!next.content && !structuralEventTypes.has(next.type)) return
