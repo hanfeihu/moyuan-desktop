@@ -1,10 +1,10 @@
-import { Check, Circle, FileText, Globe2, Loader2, Play, ShieldQuestion } from 'lucide-react'
+import { Check, Circle, FileText, Globe2, Image, Loader2, Package, Play, ShieldQuestion, Video } from 'lucide-react'
 import type { CodexTask, RuntimeTaskItem } from '@eaw/shared'
 
 function visibleItems(task: CodexTask) {
-  const items = task.items ?? []
-  if (items.length) return items.slice(-6)
-  return []
+  return (task.items ?? [])
+    .filter((item) => !['assistant_message', 'reasoning', 'system', 'user_message'].includes(item.type))
+    .slice(-6)
 }
 
 function itemLabel(item: RuntimeTaskItem) {
@@ -25,7 +25,23 @@ function statusIcon(status: RuntimeTaskItem['status']) {
 
 function outputIcon(type: NonNullable<CodexTask['outputs']>[number]['type']) {
   if (type === 'link') return <Globe2 size={15} />
+  if (type === 'image') return <Image size={15} />
+  if (type === 'video') return <Video size={15} />
+  if (type === 'asset' || type === 'plugin_result') return <Package size={15} />
   return <FileText size={15} />
+}
+
+function sourceIcon(type: NonNullable<CodexTask['sources']>[number]['type']) {
+  if (type === 'web') return <Globe2 size={15} />
+  if (type === 'file') return <FileText size={15} />
+  if (type === 'skill' || type === 'plugin') return <Package size={15} />
+  return <Circle size={13} />
+}
+
+function sourceTitle(source: NonNullable<CodexTask['sources']>[number]) {
+  if (source.query) return source.title
+  if (source.path) return source.path
+  return source.title
 }
 
 export function TaskProgressCard({ task }: { task: CodexTask }) {
@@ -33,11 +49,13 @@ export function TaskProgressCard({ task }: { task: CodexTask }) {
   const plan = task.plan ?? task.turns?.findLast((turn) => turn.plan?.length)?.plan ?? []
   const outputs = task.outputs ?? []
   const approvals = (task.approvals ?? []).filter((approval) => approval.status === 'pending')
-  const hasContent = plan.length || items.length || outputs.length || approvals.length
+  const sources = task.sources ?? []
+  const hasContent = plan.length || items.length || outputs.length || approvals.length || sources.length
   if (!hasContent) return null
 
   return (
     <section className="task-progress-card" aria-label="任务过程">
+      <div className="task-progress-heading">任务过程</div>
       {plan.length ? (
         <div className="task-progress-section">
           <div className="task-progress-title">进度</div>
@@ -74,6 +92,20 @@ export function TaskProgressCard({ task }: { task: CodexTask }) {
               <div className="task-progress-row" key={output.id}>
                 <span className="task-progress-output-icon">{outputIcon(output.type)}</span>
                 <span>{output.title}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {sources.length ? (
+        <div className="task-progress-section">
+          <div className="task-progress-title">来源</div>
+          <div className="task-progress-list">
+            {sources.slice(0, 5).map((source) => (
+              <div className="task-progress-row" key={source.id}>
+                <span className="task-progress-output-icon">{sourceIcon(source.type)}</span>
+                <span>{sourceTitle(source)}</span>
               </div>
             ))}
           </div>

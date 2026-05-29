@@ -928,10 +928,10 @@ button:disabled {
 }
 
 .task-progress-card {
-  width: min(560px, calc(100% - 43px));
+  width: min(600px, calc(100% - 43px));
   margin-left: 43px;
   border: 1px solid rgba(226, 228, 231, 0.92);
-  border-radius: 18px;
+  border-radius: 16px;
   padding: 18px 22px 20px;
   background: #ffffff;
   box-shadow: 0 10px 28px rgba(21, 25, 31, 0.06);
@@ -939,6 +939,13 @@ button:disabled {
   display: grid;
   gap: 16px;
   animation: message-in 180ms ease both;
+}
+
+.task-progress-heading {
+  color: #8f9398;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.2;
 }
 
 .task-progress-section {
@@ -953,7 +960,7 @@ button:disabled {
 
 .task-progress-title {
   color: #9a9da1;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 650;
   line-height: 1.2;
 }
@@ -970,7 +977,7 @@ button:disabled {
   align-items: center;
   gap: 8px;
   color: #65696e;
-  font-size: var(--chat-message-size);
+  font-size: 14px;
   font-family: var(--font-chat);
   font-weight: 500;
   line-height: 1.35;

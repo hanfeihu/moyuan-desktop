@@ -219,6 +219,18 @@ export type RuntimeTaskOutput = {
   createdAt: string
 }
 
+export type RuntimeTaskSource = {
+  id: string
+  type: 'web' | 'file' | 'plugin' | 'skill' | 'tool' | 'knowledge'
+  title: string
+  url?: string
+  path?: string
+  query?: string
+  taskItemId?: string
+  metadata?: Record<string, unknown>
+  createdAt: string
+}
+
 export type RuntimeApprovalRequest = {
   id: string
   type: 'command' | 'file_change' | 'permissions' | 'plugin' | 'tool'
@@ -274,6 +286,7 @@ export type CodexTask = {
   outputs?: RuntimeTaskOutput[]
   plan?: RuntimePlanStep[]
   pluginRequests?: RuntimePluginInputRequest[]
+  sources?: RuntimeTaskSource[]
   turns?: RuntimeTurn[]
   transcript: Array<{
     role: 'user' | 'assistant' | 'tool' | 'system'
@@ -385,6 +398,7 @@ export type CodexTaskEvent = {
   output?: RuntimeTaskOutput
   plan?: RuntimePlanStep[]
   pluginRequest?: RuntimePluginInputRequest
+  source?: RuntimeTaskSource
   raw?: unknown
 }
 

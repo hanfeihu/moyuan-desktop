@@ -66,6 +66,7 @@ export function normalizeTask(task: CodexTask): CodexTask {
     outputs: normalizedTask.outputs ?? [],
     plan: normalizedTask.plan ?? [],
     pluginRequests: normalizedTask.pluginRequests ?? [],
+    sources: normalizedTask.sources ?? [],
     status,
     title: title || transcript.find((item) => item.role === 'user')?.content.slice(0, 36) || '新任务',
     transcript,
@@ -452,6 +453,7 @@ function structuredTaskFromEvent(task: CodexTask, event: CodexTaskEvent) {
     outputs: [...(task.outputs ?? [])],
     plan: task.plan ? [...task.plan] : [],
     pluginRequests: [...(task.pluginRequests ?? [])],
+    sources: [...(task.sources ?? [])],
     turns: [...(task.turns ?? [])],
   }
   applyTaskStructureEvent(next, event)

@@ -1,7 +1,7 @@
-import type { CodexTask, CodexTaskEvent, RuntimeTaskItem, RuntimeTaskOutput, RuntimeTurn } from './index.js'
+import type { CodexTask, CodexTaskEvent, RuntimeTaskItem, RuntimeTaskOutput, RuntimeTaskSource, RuntimeTurn } from './index.js'
 
 export type CodexTranscriptItem = CodexTask['transcript'][number]
-export type StructuredTaskEvent = Pick<CodexTaskEvent, 'approval' | 'item' | 'output' | 'plan' | 'pluginRequest' | 'raw' | 'timestamp' | 'turnId' | 'type'>
+export type StructuredTaskEvent = Pick<CodexTaskEvent, 'approval' | 'item' | 'output' | 'plan' | 'pluginRequest' | 'raw' | 'source' | 'timestamp' | 'turnId' | 'type'>
 
 function sharedPrefixSuffixLength(left: string, right: string) {
   const maxLength = Math.min(left.length, right.length)
@@ -196,6 +196,11 @@ export function applyTaskStructureEvent(task: CodexTask, event: StructuredTaskEv
     task.pluginRequests = upsertById(task.pluginRequests ?? [], event.pluginRequest)
   }
 
+  const source = event.source ?? sourceFromStructuredItem(item, timestamp)
+  if (source) {
+    task.sources = upsertById(task.sources ?? [], source)
+  }
+
   const output = event.output ?? outputFromStructuredItem(item, timestamp)
   if (output) {
     task.outputs = upsertById(task.outputs ?? [], output)
@@ -207,6 +212,7 @@ function ensureStructuredTask(task: CodexTask) {
   task.outputs ??= []
   task.approvals ??= []
   task.pluginRequests ??= []
+  task.sources ??= []
   task.turns ??= []
 }
 
@@ -335,6 +341,47 @@ function outputFromStructuredItem(item: RuntimeTaskItem | undefined, timestamp: 
   }
   if (item.type === 'file_change') {
     return { id: `output-${item.id}`, type: 'file', title: item.title, taskItemId: item.id, metadata, createdAt: timestamp }
+  }
+  return undefined
+}
+
+function sourceFromStructuredItem(item: RuntimeTaskItem | undefined, timestamp: string): RuntimeTaskSource | undefined {
+  if (!item) return undefined
+  const metadata = item.metadata ?? {}
+  if (item.type === 'web_search') {
+    const query = firstStructuredString(metadata.query, item.summary, item.content)
+    const action = metadata.action && typeof metadata.action === 'object' ? (metadata.action as Record<string, unknown>) : undefined
+    const url = firstStructuredString(action?.url, metadata.url)
+    return {
+      id: `source-${item.id}`,
+      type: 'web',
+      title: query ? `网页搜索：${query}` : '网页搜索',
+      query,
+      url,
+      taskItemId: item.id,
+      metadata,
+      createdAt: timestamp,
+    }
+  }
+  if (item.type === 'tool_call' || item.type === 'command') {
+    return {
+      id: `source-${item.id}`,
+      type: item.type === 'command' ? 'tool' : 'plugin',
+      title: item.title,
+      taskItemId: item.id,
+      metadata,
+      createdAt: timestamp,
+    }
+  }
+  if (item.type === 'plugin' || item.type === 'image_generation' || item.type === 'video_generation') {
+    return {
+      id: `source-${item.id}`,
+      type: item.type === 'plugin' ? 'plugin' : 'skill',
+      title: item.title,
+      taskItemId: item.id,
+      metadata,
+      createdAt: timestamp,
+    }
   }
   return undefined
 }

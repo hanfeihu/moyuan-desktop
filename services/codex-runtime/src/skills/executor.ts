@@ -40,6 +40,27 @@ export async function runImageGenerationTool({ record, prompt, runtimeRoot, size
     record.task.generatedImages = [...(record.task.generatedImages ?? []), image]
     pushEvent(record, {
       taskId: record.task.id,
+      type: 'output.added',
+      role: 'system',
+      content: '',
+      output: {
+        id: `image-${image.id}`,
+        type: 'image',
+        title: '生成图片',
+        url: image.url,
+        metadata: { model: image.model, prompt: image.prompt, size: image.size, usageTokens: image.usageTokens },
+        createdAt: image.createdAt,
+      },
+      source: {
+        id: `skill-image-${image.id}`,
+        type: 'skill',
+        title: '图片生成技能',
+        metadata: { model: image.model },
+        createdAt: image.createdAt,
+      },
+    })
+    pushEvent(record, {
+      taskId: record.task.id,
       type: 'message',
       role: 'assistant',
       content: `![${prompt}](${image.url})`,
@@ -83,6 +104,27 @@ async function runVideoGenerationTool({ record, prompt, toolCall, options, skill
     record.task.status = 'completed'
     record.task.updatedAt = new Date().toISOString()
     record.task.generatedVideos = [...(record.task.generatedVideos ?? []), video]
+    pushEvent(record, {
+      taskId: record.task.id,
+      type: 'output.added',
+      role: 'system',
+      content: '',
+      output: {
+        id: `video-${video.id}`,
+        type: 'video',
+        title: '生成视频',
+        url: video.url,
+        metadata: { duration: video.duration, model: video.model, prompt: video.prompt, ratio: video.ratio, resolution: video.resolution, usageTokens: video.usageTokens },
+        createdAt: video.createdAt,
+      },
+      source: {
+        id: `skill-video-${video.id}`,
+        type: 'skill',
+        title: '视频生成技能',
+        metadata: { model: video.model },
+        createdAt: video.createdAt,
+      },
+    })
     pushEvent(record, {
       taskId: record.task.id,
       type: 'message',
