@@ -88,6 +88,7 @@ export function createTaskEventBus({
       'approval.requested',
       'approval.resolved',
       'item.completed',
+      'item.delta',
       'item.started',
       'output.added',
       'plan.updated',

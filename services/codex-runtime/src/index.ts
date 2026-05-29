@@ -22,6 +22,7 @@ import { enterpriseJson, loadEnterpriseRuntimeConfig, validateEnterpriseQuota } 
 import { buildSkillInstructionBlock, isLikelyToolCallFragment, parseMoyuanPluginInputCall, parseMoyuanToolCall } from './skills/contracts.js'
 import type { MoyuanPluginInputCall, RuntimeRunOptions } from './skills/contracts.js'
 import { runImageGenerationTool, runMoyuanToolCall } from './skills/executor.js'
+import { queryVideoGeneration } from './skills/video.js'
 import { createRuntimeLogger } from './observability/logger.js'
 import {
   canReuseLifecycleSession,
@@ -411,6 +412,124 @@ function persistedTask(task: CodexTask): CodexTask {
   }
 }
 
+function metadataString(metadata: Record<string, unknown> | undefined, key: string) {
+  const value = metadata?.[key]
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function metadataNumber(metadata: Record<string, unknown> | undefined, key: string) {
+  const value = metadata?.[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function videoResourceContext(task: CodexTask) {
+  const videoItems = (task.items ?? []).filter((item) => item.type === 'video_generation').slice(-4)
+  const outputs = (task.outputs ?? []).filter((output) => output.type === 'video').slice(-3)
+  const lines = [
+    ...videoItems.map((item) => {
+      const metadata = item.metadata
+      const providerTaskId = metadataString(metadata, 'providerTaskId')
+      const rawStatus = metadataString(metadata, 'rawStatus')
+      const lastCheckedAt = metadataString(metadata, 'lastCheckedAt')
+      const detail = [providerTaskId ? `平台任务 ID：${providerTaskId}` : '', rawStatus ? `平台状态：${rawStatus}` : '', lastCheckedAt ? `最近查询：${lastCheckedAt}` : '']
+        .filter(Boolean)
+        .join('，')
+      return `- ${item.title}：${item.status}${item.content ? `，${item.content}` : ''}${detail ? `（${detail}）` : ''}`
+    }),
+    ...outputs.map((output) => `- 已有视频结果：${output.title}${output.url ? ` ${output.url}` : ''}`),
+  ]
+  return lines.join('\n')
+}
+
+async function recoverPendingVideoJobs(record: TaskRecord, options: RuntimeRunOptions) {
+  const pendingItems = (record.task.items ?? []).filter((item) => {
+    if (item.type !== 'video_generation' || item.status !== 'in_progress') return false
+    return Boolean(metadataString(item.metadata, 'providerTaskId'))
+  })
+  if (!pendingItems.length || !options.enterpriseAuthToken) return videoResourceContext(record.task)
+
+  for (const item of pendingItems) {
+    const metadata = item.metadata
+    const providerTaskId = metadataString(metadata, 'providerTaskId')
+    if (!providerTaskId) continue
+    const existingOutput = (record.task.outputs ?? []).some((output) => output.type === 'video' && (output.taskItemId === item.id || output.id === `video-${providerTaskId}`))
+    if (existingOutput) continue
+
+    try {
+      const result = await queryVideoGeneration(providerTaskId, options, {
+        createdAt: item.startedAt,
+        duration: metadataNumber(metadata, 'duration'),
+        model: metadataString(metadata, 'model'),
+        prompt: metadataString(metadata, 'prompt') ?? record.task.title,
+        ratio: metadataString(metadata, 'ratio'),
+        resolution: metadataString(metadata, 'resolution'),
+      })
+      const now = new Date().toISOString()
+      if (result.video) {
+        record.task.generatedVideos = [...(record.task.generatedVideos ?? []).filter((video) => video.id !== result.video!.id), result.video]
+        pushEvent(record, {
+          taskId: record.task.id,
+          type: 'item.completed',
+          role: 'system',
+          content: '',
+          itemId: item.id,
+          item: {
+            ...item,
+            status: 'completed',
+            content: '视频生成完成',
+            completedAt: now,
+            metadata: { ...(item.metadata ?? {}), lastCheckedAt: now, providerTaskId, rawStatus: result.status, url: result.video.url },
+          },
+        })
+        pushEvent(record, {
+          taskId: record.task.id,
+          type: 'output.added',
+          role: 'system',
+          content: '',
+          output: {
+            id: `video-${result.video.id}`,
+            type: 'video',
+            title: '生成视频',
+            url: result.video.url,
+            taskItemId: item.id,
+            metadata: { duration: result.video.duration, model: result.video.model, prompt: result.video.prompt, ratio: result.video.ratio, resolution: result.video.resolution, usageTokens: result.video.usageTokens },
+            createdAt: result.video.createdAt,
+          },
+          source: {
+            id: `skill-video-${result.video.id}`,
+            type: 'skill',
+            title: '视频生成技能',
+            metadata: { model: result.video.model },
+            createdAt: result.video.createdAt,
+          },
+        })
+        continue
+      }
+
+      const failed = result.status === 'failed'
+      pushEvent(record, {
+        taskId: record.task.id,
+        type: failed ? 'item.completed' : 'item.delta',
+        role: 'system',
+        content: '',
+        itemId: item.id,
+        item: {
+          ...item,
+          status: failed ? 'failed' : 'in_progress',
+          content: failed ? result.error ?? '视频生成失败' : `视频仍在生成中${result.status ? `：${result.status}` : ''}`,
+          completedAt: failed ? now : undefined,
+          metadata: { ...(item.metadata ?? {}), lastCheckedAt: now, providerTaskId, rawStatus: result.status, usageTokens: result.usageTokens },
+        },
+      })
+    } catch (error) {
+      logTask(record, 'video.recover.failed', { itemId: item.id, providerTaskId, error: error instanceof Error ? error.message : String(error) }, 'warn')
+    }
+  }
+
+  await saveStore()
+  return videoResourceContext(record.task)
+}
+
 function ensureTaskTranscriptModel(task: CodexTask) {
   let turnIndex = 0
   let currentTurnId = `${task.id}-turn-1`
@@ -727,11 +846,13 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
   const appServerUrl = `ws://127.0.0.1:${port}`
   const memory = workspaceMemory.get(workspace)
   const diffSummary = await getGitDiff(workspace)
+  const resourceContext = await recoverPendingVideoJobs(record, options)
   const baseInstructions = buildBaseInstructions(skillInstructions)
   const promptWithContext = buildPromptWithContext(prompt, {
     commandHistory: record.task.commandHistory,
     diffSummary,
     memory,
+    resourceContext,
     skillInstructions,
   })
 
@@ -1174,10 +1295,12 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
   ]
   const memory = workspaceMemory.get(workspace)
   const diffSummary = await getGitDiff(workspace)
+  const resourceContext = await recoverPendingVideoJobs(record, options)
   const promptWithContext = buildPromptWithContext(prompt, {
     commandHistory: record.task.commandHistory,
     diffSummary,
     memory,
+    resourceContext,
     skillInstructions,
   })
   const args = sessionId

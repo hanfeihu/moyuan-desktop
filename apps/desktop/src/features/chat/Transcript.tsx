@@ -5,6 +5,17 @@ import { messageLabel, type TranscriptItem } from '../../tasks'
 import { formatElapsed } from '../../utils/format'
 import { TranscriptMessage } from './TranscriptMessage'
 
+function pendingStatusLabel(task: CodexTask, visibleTranscript: TranscriptItem[], busyElapsed: number) {
+  const elapsed = formatElapsed(busyElapsed)
+  const latestVisible = visibleTranscript.at(-1)
+  if (task.status === 'queued') return `已发送，等待本地 Runtime 接手 ${elapsed}`
+  if (latestVisible?.role === 'tool') return `正在执行工具 ${elapsed}`
+  if (latestVisible?.role === 'system') return `正在推进任务 ${elapsed}`
+  if (busyElapsed < 2500) return `已发送，正在启动本轮任务 ${elapsed}`
+  if (busyElapsed < 9000) return `Codex 正在理解并编排 ${elapsed}`
+  return `仍在编排，可能正在准备工具调用 ${elapsed}`
+}
+
 export function Transcript({
   activeTask,
   busyElapsed,
@@ -39,7 +50,7 @@ export function Transcript({
           </div>
           <div className="message-body">
             <span className="typing-dot" />
-            <span className="thinking-copy">思考中 {formatElapsed(busyElapsed)}</span>
+            <span className="thinking-copy">{pendingStatusLabel(activeTask, visibleTranscript, busyElapsed)}</span>
             <button className="inline-stop-button" disabled={isCancelling} onClick={onStop} type="button">
               {isCancelling ? '停止中' : '停止'}
             </button>

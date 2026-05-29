@@ -5,6 +5,15 @@ import { defaultVideoRatioForModel, type EnterpriseSkillSet, type MoyuanToolCall
 
 type VideoToolCall = Extract<MoyuanToolCall, { tool: 'video_generation' }>
 
+export type VideoStatusUpdate = {
+  content: string
+  raw?: unknown
+  status?: string
+  taskId?: string
+  usageTokens?: number
+  videoUrl?: string
+}
+
 export function findFirstString(payload: unknown, keys: string[]): string | undefined {
   if (!payload || typeof payload !== 'object') return undefined
   if (Array.isArray(payload)) {
@@ -64,7 +73,7 @@ function findVideoErrorMessage(payload: unknown): string | undefined {
   return message
 }
 
-function toFriendlyVideoError(message: string) {
+export function toFriendlyVideoError(message: string) {
   const requestId = message.match(/请求\s*ID[:：]\s*([A-Za-z0-9_-]+)/i)?.[1]
   const requestSuffix = requestId ? ` 排障请求 ID：${requestId}` : ''
   if (/敏感信息|敏感内容|sensitive|safety|安全审核|content policy|policy violation/i.test(message)) {
@@ -99,7 +108,7 @@ export async function generateVideo(
   toolCall: VideoToolCall,
   options: RuntimeRunOptions,
   skills: EnterpriseSkillSet,
-  onStatus: (content: string) => void,
+  onStatus: (update: VideoStatusUpdate) => void,
 ): Promise<VideoGenerationResult> {
   const authToken = options.enterpriseAuthToken
   const baseUrl = options.enterpriseApiBase ?? defaultEnterpriseApiBase
@@ -107,7 +116,7 @@ export async function generateVideo(
   if (!authToken) throw new Error('请先登录墨渊账号')
   if (!video?.enabled || !video.apiKeyConfigured) throw new Error('视频生成技能未启用，请管理员在后台配置火山方舟 KEY')
 
-  onStatus('正在调用视频生成技能...')
+  onStatus({ content: '正在调用视频生成技能...' })
   const created = (await enterpriseJson('/skills/video/generations', authToken, baseUrl, {
     body: JSON.stringify(buildVideoRequest(toolCall, prompt, skills)),
     method: 'POST',
@@ -120,10 +129,10 @@ export async function generateVideo(
   }
   if (!taskId) throw new Error('视频生成任务没有返回任务 ID')
 
-  onStatus('视频任务已创建，正在生成...')
   let lastStatus = created.status ?? findFirstString(created.raw, ['status'])
   let usageTokens = created.usageTokens
   let videoUrl = created.videoUrl ?? findFirstVideoUrl(created.raw)
+  onStatus({ content: '视频任务已创建，正在生成...', raw: created.raw, status: lastStatus, taskId, usageTokens, videoUrl })
   const deadline = Date.now() + Number(process.env.VIDEO_TIMEOUT_MS ?? 900000)
 
   while (!videoUrl && normalizedVideoStatus(lastStatus) === 'running' && Date.now() < deadline) {
@@ -139,7 +148,7 @@ export async function generateVideo(
     usageTokens = queried.usageTokens ?? usageTokens
     videoUrl = queried.videoUrl ?? findFirstVideoUrl(queried.raw)
     const statusLabel = lastStatus ? `当前状态：${lastStatus}` : '视频仍在生成中'
-    onStatus(statusLabel)
+    onStatus({ content: statusLabel, raw: queried.raw, status: lastStatus, taskId, usageTokens, videoUrl })
     const errorMessage = findVideoErrorMessage(queried.raw)
     if (errorMessage) throw new Error(toFriendlyVideoError(errorMessage))
     if (normalizedVideoStatus(lastStatus) === 'failed') {
@@ -160,5 +169,78 @@ export async function generateVideo(
     resolution: video.defaultResolution,
     usageTokens,
     createdAt: new Date().toISOString(),
+  }
+}
+
+export async function queryVideoGeneration(
+  taskId: string,
+  options: RuntimeRunOptions,
+  defaults: {
+    createdAt?: string
+    duration?: number
+    model?: string
+    prompt: string
+    ratio?: string
+    resolution?: string
+  },
+) {
+  const authToken = options.enterpriseAuthToken
+  const baseUrl = options.enterpriseApiBase ?? defaultEnterpriseApiBase
+  if (!authToken) throw new Error('请先登录墨渊账号')
+
+  const queried = (await enterpriseJson(`/skills/video/generations/${encodeURIComponent(taskId)}`, authToken, baseUrl)) as {
+    chargeStatus?: string
+    raw?: unknown
+    status?: string
+    usageTokens?: number
+    videoUrl?: string
+  }
+  const status = queried.status ?? findFirstString(queried.raw, ['status'])
+  const videoUrl = queried.videoUrl ?? findFirstVideoUrl(queried.raw)
+  const errorMessage = findVideoErrorMessage(queried.raw)
+  if (errorMessage) {
+    return {
+      error: toFriendlyVideoError(errorMessage),
+      raw: queried.raw,
+      status: 'failed',
+      taskId,
+    }
+  }
+
+  if (normalizedVideoStatus(status) === 'failed') {
+    const message = findFirstString(queried.raw, ['message', 'error', 'msg']) ?? '视频生成失败'
+    return {
+      error: toFriendlyVideoError(message),
+      raw: queried.raw,
+      status: 'failed',
+      taskId,
+    }
+  }
+
+  if (!videoUrl) {
+    return {
+      raw: queried.raw,
+      status: status ?? 'running',
+      taskId,
+      usageTokens: queried.usageTokens,
+    }
+  }
+
+  return {
+    raw: queried.raw,
+    status: 'completed',
+    taskId,
+    usageTokens: queried.usageTokens,
+    video: {
+      id: taskId,
+      prompt: defaults.prompt,
+      model: defaults.model ?? findFirstString(queried.raw, ['model']) ?? 'video',
+      url: videoUrl,
+      duration: defaults.duration,
+      ratio: defaults.ratio,
+      resolution: defaults.resolution,
+      usageTokens: queried.usageTokens,
+      createdAt: defaults.createdAt ?? new Date().toISOString(),
+    } satisfies VideoGenerationResult,
   }
 }

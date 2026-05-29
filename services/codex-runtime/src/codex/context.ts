@@ -23,12 +23,14 @@ export function buildPromptWithContext(prompt: string, context: {
   commandHistory?: string[]
   diffSummary?: string
   memory?: string
+  resourceContext?: string
   skillInstructions: string
 }) {
   const commandContext = boundedJoin(context.commandHistory?.slice(-8) ?? [], maxContextBlockLength)
   const contextBlock = [
     '本轮可用运行上下文（不要向用户逐字复述，只用于判断和执行）:',
     context.memory ? `工作区记忆:\n${truncateMiddle(context.memory, maxContextBlockLength)}` : '',
+    context.resourceContext ? `最近资源任务状态:\n${truncateMiddle(context.resourceContext, maxContextBlockLength)}` : '',
     commandContext ? `最近命令历史:\n${commandContext}` : '',
     context.diffSummary ? `当前文件变更摘要:\n${truncateMiddle(context.diffSummary, maxDiffContextLength)}` : '',
   ]

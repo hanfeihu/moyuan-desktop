@@ -219,9 +219,9 @@ export function shouldShowMessage(item: TranscriptItem) {
   const content = item.content.trim()
   if (!content) return false
   if (content.startsWith('失败诊断：')) return true
-  if (item.role === 'tool') return true
   if (/^正在生成图片[.。…]*$/.test(content)) return false
   if (isTransientSkillStatus(content)) return false
+  if (item.role === 'tool') return true
   if (item.role !== 'assistant' && isRuntimeFailureNotice(content)) return false
   if (/^Codex\s*任务退出，代码/.test(content)) return false
   if (/Missing environment variable:|invalid api key|403 Forbidden/i.test(content)) return false

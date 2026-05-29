@@ -2,7 +2,7 @@ import type { CodexTaskEvent } from '@eaw/shared'
 import type { TaskRecord } from '../tasks/types.js'
 import type { EnterpriseSkillSet, MoyuanToolCall, RuntimeRunOptions } from './contracts.js'
 import { generateImage, inferImageSize } from './image.js'
-import { generateVideo } from './video.js'
+import { generateVideo, type VideoStatusUpdate } from './video.js'
 
 type PushEvent = (record: TaskRecord, event: Omit<CodexTaskEvent, 'id' | 'timestamp'>) => void
 
@@ -88,48 +88,112 @@ export async function runImageGenerationTool({ record, prompt, runtimeRoot, size
 async function runVideoGenerationTool({ record, prompt, toolCall, options, skills, saveStore, pushEvent }: ToolCallExecutionOptions) {
   if (toolCall.tool !== 'video_generation') return
 
+  const itemId = `skill-video-${Date.now()}`
+  const video = skills.videoGeneration
+  const initialMetadata = {
+    duration: toolCall.duration ?? video?.defaultDuration,
+    model: toolCall.model ?? video?.defaultModel,
+    prompt,
+    ratio: toolCall.ratio ?? video?.defaultRatio,
+    resolution: video?.defaultResolution,
+  }
+
+  const pushVideoStatus = (update: VideoStatusUpdate) => {
+    pushEvent(record, {
+      taskId: record.task.id,
+      type: 'tool',
+      role: 'tool',
+      content: update.content,
+    })
+    pushEvent(record, {
+      taskId: record.task.id,
+      type: 'item.delta',
+      role: 'system',
+      content: '',
+      itemId,
+      item: {
+        id: itemId,
+        type: 'video_generation',
+        title: '生成视频',
+        status: 'in_progress',
+        content: update.content,
+        metadata: {
+          ...initialMetadata,
+          lastCheckedAt: new Date().toISOString(),
+          providerTaskId: update.taskId,
+          rawStatus: update.status,
+          usageTokens: update.usageTokens,
+          videoUrl: update.videoUrl,
+        },
+      },
+    })
+  }
+
   try {
     record.task.status = 'running'
     record.task.updatedAt = new Date().toISOString()
+    pushEvent(record, {
+      taskId: record.task.id,
+      type: 'item.started',
+      role: 'system',
+      content: '',
+      itemId,
+      item: {
+        id: itemId,
+        type: 'video_generation',
+        title: '生成视频',
+        status: 'in_progress',
+        content: '准备调用视频生成服务',
+        metadata: initialMetadata,
+      },
+    })
     await saveStore()
 
-    const video = await generateVideo(prompt, toolCall, options, skills, (content) => {
-      pushEvent(record, {
-        taskId: record.task.id,
-        type: 'tool',
-        role: 'tool',
-        content,
-      })
-    })
+    const generatedVideo = await generateVideo(prompt, toolCall, options, skills, pushVideoStatus)
     record.task.status = 'completed'
     record.task.updatedAt = new Date().toISOString()
-    record.task.generatedVideos = [...(record.task.generatedVideos ?? []), video]
+    record.task.generatedVideos = [...(record.task.generatedVideos ?? []), generatedVideo]
+    pushEvent(record, {
+      taskId: record.task.id,
+      type: 'item.completed',
+      role: 'system',
+      content: '视频生成完成',
+      itemId,
+      item: {
+        id: itemId,
+        type: 'video_generation',
+        title: '生成视频',
+        status: 'completed',
+        content: '视频生成完成',
+        metadata: { ...initialMetadata, providerTaskId: generatedVideo.id, url: generatedVideo.url },
+      },
+    })
     pushEvent(record, {
       taskId: record.task.id,
       type: 'output.added',
       role: 'system',
       content: '',
       output: {
-        id: `video-${video.id}`,
+        id: `video-${generatedVideo.id}`,
         type: 'video',
         title: '生成视频',
-        url: video.url,
-        metadata: { duration: video.duration, model: video.model, prompt: video.prompt, ratio: video.ratio, resolution: video.resolution, usageTokens: video.usageTokens },
-        createdAt: video.createdAt,
+        url: generatedVideo.url,
+        metadata: { duration: generatedVideo.duration, model: generatedVideo.model, prompt: generatedVideo.prompt, ratio: generatedVideo.ratio, resolution: generatedVideo.resolution, usageTokens: generatedVideo.usageTokens },
+        createdAt: generatedVideo.createdAt,
       },
       source: {
-        id: `skill-video-${video.id}`,
+        id: `skill-video-${generatedVideo.id}`,
         type: 'skill',
         title: '视频生成技能',
-        metadata: { model: video.model },
-        createdAt: video.createdAt,
+        metadata: { model: generatedVideo.model },
+        createdAt: generatedVideo.createdAt,
       },
     })
     pushEvent(record, {
       taskId: record.task.id,
       type: 'message',
       role: 'assistant',
-      content: `![${prompt}](${video.url})`,
+      content: `![${prompt}](${generatedVideo.url})`,
     })
     pushEvent(record, {
       taskId: record.task.id,
@@ -140,6 +204,20 @@ async function runVideoGenerationTool({ record, prompt, toolCall, options, skill
   } catch (error) {
     record.task.status = 'failed'
     record.task.updatedAt = new Date().toISOString()
+    pushEvent(record, {
+      taskId: record.task.id,
+      type: 'item.completed',
+      role: 'system',
+      content: `视频生成失败：${error instanceof Error ? error.message : String(error)}`,
+      itemId,
+      item: {
+        id: itemId,
+        type: 'video_generation',
+        title: '生成视频',
+        status: 'failed',
+        content: error instanceof Error ? error.message : String(error),
+      },
+    })
     pushEvent(record, {
       taskId: record.task.id,
       type: 'turn.failed',
