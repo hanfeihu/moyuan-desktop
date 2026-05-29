@@ -65,6 +65,11 @@ function findVideoErrorMessage(payload: unknown): string | undefined {
 }
 
 function toFriendlyVideoError(message: string) {
+  const requestId = message.match(/请求\s*ID[:：]\s*([A-Za-z0-9_-]+)/i)?.[1]
+  const requestSuffix = requestId ? ` 排障请求 ID：${requestId}` : ''
+  if (/敏感信息|敏感内容|sensitive|safety|安全审核|content policy|policy violation/i.test(message)) {
+    return `视频没有生成成功。视频服务的安全审核拦截了这次请求，通常是提示词里包含公众人物、敏感关系、暴力、政治或容易引发误解的描述。可以换成更中性的虚构角色或卡通表达后重试。${requestSuffix}`
+  }
   if (/not activated the model|has not activated the model|activate the model service/i.test(message)) {
     return '火山方舟视频模型还没有开通，请管理员到 Ark 控制台开通当前视频模型后再试。'
   }
