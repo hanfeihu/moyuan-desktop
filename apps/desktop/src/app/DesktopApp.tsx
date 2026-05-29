@@ -3,6 +3,7 @@ import { AuthScreen } from '../features/auth/AuthScreen'
 import { useAuth } from '../features/auth/useAuth'
 import { RechargeDialog } from '../features/billing/RechargeDialog'
 import { Composer } from '../features/chat/Composer'
+import { TaskProgressCard } from '../features/chat/TaskProgressCard'
 import { Transcript } from '../features/chat/Transcript'
 import { useComposerTextarea } from '../features/chat/useComposerTextarea'
 import { useTranscriptAutoScroll } from '../features/chat/useTranscriptAutoScroll'
@@ -138,36 +139,42 @@ export function DesktopApp() {
           runtimeState={taskController.runtimeState}
           showStatusBadge={taskController.showStatusBadge}
         />
-        <Transcript
-          activeTask={taskController.activeTask}
-          busyElapsed={taskController.busyElapsed}
-          isCancelling={taskController.isCancelling}
-          isWelcome={taskController.isWelcome}
-          onPluginSubmit={taskController.submitPluginRequest}
-          onStop={taskController.stopActiveTask}
-          shouldShowThinking={taskController.shouldShowThinking}
-          transcriptBottomRef={transcriptBottomRef}
-          transcriptRef={transcriptRef}
-          visibleTranscript={taskController.visibleTranscript}
-        />
-        <Composer
-          canSubmit={taskController.canSubmit}
-          composerRef={composerRef}
-          executionSettings={executionSettings}
-          isBusy={taskController.isBusy}
-          isCancelling={taskController.isCancelling}
-          isSubmitting={taskController.isSubmitting}
-          onPromptChange={(value) => taskController.setPrompt(value)}
-          onReasoningToggle={cycleReasoningEffort}
-          onSandboxToggle={cycleSandboxMode}
-          onStop={taskController.stopActiveTask}
-          onSubmit={() => void taskController.submitTask()}
-          placeholder={taskController.placeholder}
-          prompt={taskController.prompt}
-          quotaDepleted={taskController.quotaDepleted}
-          quotaNotice={taskController.quotaNotice}
-          textareaRef={textareaRef}
-        />
+        <div className="conversation-layout">
+          <div className="conversation-column">
+            <Transcript
+              activeTask={taskController.activeTask}
+              busyElapsed={taskController.busyElapsed}
+              isCancelling={taskController.isCancelling}
+              isWelcome={taskController.isWelcome}
+              onStop={taskController.stopActiveTask}
+              shouldShowThinking={taskController.shouldShowThinking}
+              transcriptBottomRef={transcriptBottomRef}
+              transcriptRef={transcriptRef}
+              visibleTranscript={taskController.visibleTranscript}
+            />
+            <Composer
+              canSubmit={taskController.canSubmit}
+              composerRef={composerRef}
+              executionSettings={executionSettings}
+              isBusy={taskController.isBusy}
+              isCancelling={taskController.isCancelling}
+              isSubmitting={taskController.isSubmitting}
+              onPromptChange={(value) => taskController.setPrompt(value)}
+              onReasoningToggle={cycleReasoningEffort}
+              onSandboxToggle={cycleSandboxMode}
+              onStop={taskController.stopActiveTask}
+              onSubmit={() => void taskController.submitTask()}
+              placeholder={taskController.placeholder}
+              prompt={taskController.prompt}
+              quotaDepleted={taskController.quotaDepleted}
+              quotaNotice={taskController.quotaNotice}
+              textareaRef={textareaRef}
+            />
+          </div>
+          <aside className="task-side-panel" aria-label="任务详情">
+            <TaskProgressCard onPluginSubmit={taskController.submitPluginRequest} task={taskController.activeTask} />
+          </aside>
+        </div>
         <RechargeDialog authToken={authToken} onClose={() => setRechargeOpen(false)} onRefreshUser={refreshUser} open={rechargeOpen} />
       </section>
     </main>

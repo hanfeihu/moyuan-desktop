@@ -1,5 +1,5 @@
 :root {
-  --bg: #fbfbfa;
+  --bg: #ffffff;
   --panel: #f7f7f5;
   --panel-2: #ffffff;
   --panel-3: #f7f8f8;
@@ -60,9 +60,7 @@
 
 body {
   margin: 0;
-  background:
-    radial-gradient(circle at 50% -16%, rgba(232, 236, 240, 0.52), transparent 34%),
-    var(--bg);
+  background: #ffffff;
 }
 
 html,
@@ -287,9 +285,7 @@ button:disabled {
   display: grid;
   grid-template-columns: 268px minmax(0, 1fr);
   overflow: hidden;
-  background:
-    radial-gradient(circle at 62% -18%, rgba(232, 237, 242, 0.52), transparent 36%),
-    var(--bg);
+  background: #ffffff;
 }
 
 .sidebar {
@@ -475,11 +471,40 @@ button:disabled {
   min-height: 0;
   height: 100dvh;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  background: transparent;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: #ffffff;
   position: relative;
   overflow: hidden;
   --composer-safe-area: 168px;
+}
+
+.conversation-layout {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(460px, 1fr) 300px;
+  gap: 16px;
+  padding: 0 14px 0 18px;
+}
+
+.conversation-column {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.task-side-panel {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 0 24px;
+  scrollbar-width: none;
+  -webkit-app-region: no-drag;
+}
+
+.task-side-panel::-webkit-scrollbar {
+  display: none;
 }
 
 .topbar {
@@ -768,7 +793,7 @@ button:disabled {
 .transcript {
   min-height: 0;
   overflow: auto;
-  width: min(900px, calc(100% - 118px));
+  width: min(760px, calc(100% - 28px));
   margin: 0 auto;
   padding: 22px 0 var(--composer-safe-area);
   display: flex;
@@ -928,13 +953,13 @@ button:disabled {
 }
 
 .task-progress-card {
-  width: min(600px, calc(100% - 43px));
-  margin-left: 43px;
+  width: 100%;
+  margin: 0;
   border: 1px solid rgba(226, 228, 231, 0.92);
-  border-radius: 16px;
-  padding: 18px 22px 20px;
+  border-radius: 14px;
+  padding: 16px 18px 18px;
   background: #ffffff;
-  box-shadow: 0 10px 28px rgba(21, 25, 31, 0.06);
+  box-shadow: 0 8px 22px rgba(21, 25, 31, 0.045);
   color: #6f7378;
   display: grid;
   gap: 16px;
@@ -1219,7 +1244,7 @@ button:disabled {
 }
 
 .composer {
-  width: min(790px, calc(100% - 96px));
+  width: min(760px, calc(100% - 28px));
   margin: 0 auto 16px;
   border: 1px solid rgba(218, 216, 210, 0.78);
   border-radius: 22px;
@@ -1989,6 +2014,14 @@ button:disabled {
   .workspace-field input {
     width: min(520px, 44vw);
   }
+
+  .conversation-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .task-side-panel {
+    display: none;
+  }
 }
 
 @media (max-width: 1040px) {
@@ -2002,12 +2035,9 @@ button:disabled {
     padding-left: 22px;
   }
 
-  .transcript {
-    width: min(940px, calc(100% - 68px));
-  }
-
+  .transcript,
   .composer {
-    width: min(780px, calc(100% - 40px));
+    width: min(760px, calc(100% - 40px));
   }
 }
 
