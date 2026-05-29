@@ -48,6 +48,9 @@ function shouldWatchRuntimeTask(task?: CodexTask | null) {
   return Boolean(task && isRuntimeTaskId(task.id) && isLiveTask(task))
 }
 
+const SUBMIT_AUTH_REFRESH_TIMEOUT_MS = 5000
+const SUBMIT_AUTH_REQUIRED_TIMEOUT_MS = 7000
+
 export function useTaskController({
   authState,
   authToken,
@@ -112,6 +115,12 @@ export function useTaskController({
     selectTask(welcomeTask.id)
   }
 
+  function regenerateResource(resourcePrompt: string) {
+    if (!resourcePrompt.trim()) return
+    setPrompt(`重新生成：${resourcePrompt.trim()}`)
+    window.requestAnimationFrame(onFocusComposer)
+  }
+
   function resetTasks() {
     logClientEvent('task.reset')
     setQuotaNotice('')
@@ -150,6 +159,28 @@ export function useTaskController({
     setWatchedTaskIds((current) => current.filter((id) => id !== taskId))
   }, [])
 
+  const handleTaskMissing = useCallback((taskId: string) => {
+    setTasks((current) =>
+      current.map((task) =>
+        task.id === taskId && isLiveTask(task)
+          ? {
+              ...task,
+              status: 'interrupted',
+              updatedAt: nowIso(),
+              transcript: [
+                ...task.transcript,
+                {
+                  role: 'system',
+                  content: '本地 Runtime 已重启，这个任务状态已丢失。可以在当前对话里重新发送。',
+                  timestamp: nowIso(),
+                },
+              ],
+            }
+          : task,
+      ),
+    )
+  }, [])
+
   const handleTaskEvent = useCallback((event: CodexTaskEvent) => {
     setTasks((current) => current.map((task) => (task.id === event.taskId ? mergeEventIntoTask(task, event) : task)))
   }, [])
@@ -174,6 +205,7 @@ export function useTaskController({
   useLiveTaskPolling({
     authState,
     onRuntimeState: setRuntimeState,
+    onTaskMissing: handleTaskMissing,
     onTaskSnapshot: handleTaskSnapshot,
     onUnwatchTask: handleUnwatchTask,
     watchedTaskIdsKey,
@@ -305,22 +337,46 @@ export function useTaskController({
       setActiveTaskId(failedTask.id)
     }
 
-    try {
-      const freshUser = await loadSignedInUser(authToken)
-      currentUser = freshUser
-      setAuthUser(freshUser)
-      if (freshUser.tokenBudget - freshUser.tokenUsed <= 0) {
-        logClientEvent('task.submit.quota_depleted_after_refresh', { tokenBudget: freshUser.tokenBudget, tokenUsed: freshUser.tokenUsed }, 'warn')
-        setQuotaNotice('当前没有可用 Token，等待管理员在后台派发额度。')
-        window.setTimeout(() => setQuotaNotice(''), 3600)
-        failPendingTask('当前没有可用 Token，等待管理员在后台派发额度。')
+    if (currentUser) {
+      void loadSignedInUser(authToken, { timeoutMs: SUBMIT_AUTH_REFRESH_TIMEOUT_MS })
+        .then((freshUser) => {
+          setAuthUser(freshUser)
+          if (freshUser.tokenBudget - freshUser.tokenUsed <= 0) {
+            logClientEvent('task.submit.quota_depleted_after_background_refresh', { tokenBudget: freshUser.tokenBudget, tokenUsed: freshUser.tokenUsed }, 'warn')
+            setQuotaNotice('当前没有可用 Token，等待管理员在后台派发额度。')
+            window.setTimeout(() => setQuotaNotice(''), 3600)
+          }
+        })
+        .catch((error) => {
+          logClientEvent('task.submit.preflight_refresh_slow', errorLogDetails(error, { runtimeState }), 'warn')
+        })
+    } else {
+      try {
+        const freshUser = await loadSignedInUser(authToken, { timeoutMs: SUBMIT_AUTH_REQUIRED_TIMEOUT_MS })
+        currentUser = freshUser
+        setAuthUser(freshUser)
+        if (freshUser.tokenBudget - freshUser.tokenUsed <= 0) {
+          logClientEvent('task.submit.quota_depleted_after_refresh', { tokenBudget: freshUser.tokenBudget, tokenUsed: freshUser.tokenUsed }, 'warn')
+          setQuotaNotice('当前没有可用 Token，等待管理员在后台派发额度。')
+          window.setTimeout(() => setQuotaNotice(''), 3600)
+          failPendingTask('当前没有可用 Token，等待管理员在后台派发额度。')
+          setIsSubmitting(false)
+          return
+        }
+      } catch (error) {
+        logClientEvent('task.submit.preflight_failed', errorLogDetails(error, { runtimeState }), 'warn')
+        setRuntimeState('offline')
+        failPendingTask(`发送前校验失败：${error instanceof Error ? error.message : '请检查后台连接'}`)
         setIsSubmitting(false)
         return
       }
-    } catch (error) {
-      logClientEvent('task.submit.preflight_failed', errorLogDetails(error, { runtimeState }), 'warn')
-      setRuntimeState('offline')
-      failPendingTask(`发送前校验失败：${error instanceof Error ? error.message : '请检查后台连接'}`)
+    }
+
+    if (currentUser.tokenBudget - currentUser.tokenUsed <= 0) {
+      logClientEvent('task.submit.quota_depleted_from_cached_user', { tokenBudget: currentUser.tokenBudget, tokenUsed: currentUser.tokenUsed }, 'warn')
+      setQuotaNotice('当前没有可用 Token，等待管理员在后台派发额度。')
+      window.setTimeout(() => setQuotaNotice(''), 3600)
+      failPendingTask('当前没有可用 Token，等待管理员在后台派发额度。')
       setIsSubmitting(false)
       return
     }
@@ -382,6 +438,7 @@ export function useTaskController({
     prompt,
     quotaDepleted,
     quotaNotice,
+    regenerateResource,
     resetTasks,
     runtimeState,
     selectTask,

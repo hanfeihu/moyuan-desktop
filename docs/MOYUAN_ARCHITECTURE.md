@@ -24,6 +24,14 @@
 - `image_generation`: 本地 Runtime 直接调用图片生成接口。
 - `video_generation`: Runtime 通过企业 API 代理调用火山方舟 `POST /contents/generations/tasks`，再轮询任务结果。
 
+## 插件编排原则
+
+插件和技能不是一回事。技能负责执行能力，插件负责让员工补充表单、上传素材或配置参数，然后把结果交回 Codex 继续编排。
+
+不要在桌面端或 Runtime 里写死“某个业务关键词必须触发某个插件”的规则。插件触发应该由后台下发的插件定义驱动，包括插件说明、触发词、表单字段、权限和后续要补充的目标技能。Runtime 可以做通用安全桥接，例如识别“Codex 请求插件输入”并生成 `plugin.inputRequested` 事件，但不应该把“生成视频”“写日报”“查知识库”这类业务策略硬编码到代码分支里。
+
+如果某个技能调用前需要员工补充输入，正确做法是在后台插件配置里描述清楚，并在 `services/codex-runtime/src/skills/contracts.ts` 的通用技能契约中告诉 Codex：当用户需求命中插件说明、触发词或表单字段时，先请求插件表单；员工提交后再调用技能。Runtime 的强制拦截也必须由插件 manifest 声明，例如 `targetTools` 和 `triggerPolicy: before_tool`，不能在 Runtime 中写固定插件 ID 或业务关键词。
+
 ## 目录演进
 
 Runtime 已经先拆出第一层技能边界：

@@ -35,7 +35,7 @@ export function normalizeTask(task: CodexTask): CodexTask {
   const rawTranscript = normalizedTask.transcript ?? []
   const inferredFailed = task.status !== 'interrupted' && (latestTurnHasFailure(rawTranscript) || latestTurnCompletedWithoutAssistant(task.status, rawTranscript))
   const status = inferredFailed ? 'failed' : task.status
-  const transcript = compactTranscript(filterDisplayTranscript(rawTranscript))
+  const transcript = compactTranscript(cleanResourceLinkTranscript(filterDisplayTranscript(rawTranscript), normalizedTask))
   const title = task.title?.trim().replace(/^生成图片[:：]\s*/, '')
   const hasVisibleReply = transcript.some((item) => item.role !== 'user')
   const hasFailureDiagnostic = transcript.some((item) => item.content.startsWith('失败诊断：'))
@@ -73,6 +73,49 @@ export function normalizeTask(task: CodexTask): CodexTask {
     transcript,
     turns: normalizedTask.turns ?? [],
   }
+}
+
+function cleanResourceLinkTranscript(items: TranscriptItem[], task: CodexTask) {
+  const hasVideoResource = Boolean(task.generatedVideos?.length || task.outputs?.some((output) => output.type === 'video'))
+  const hasImageResource = Boolean(task.generatedImages?.length || task.outputs?.some((output) => output.type === 'image'))
+  if (!hasVideoResource && !hasImageResource) return items
+
+  const seenResourceNotice = new Set<string>()
+  return items.flatMap((item) => {
+    if (item.role !== 'assistant') return [item]
+    const cleaned = cleanAssistantResourceLinks(item.content, { hasImageResource, hasVideoResource })
+    if (!cleaned) return []
+    const noticeKey = `${item.turnId ?? ''}:${cleaned}`
+    if (cleaned.startsWith('视频已生成完成') || cleaned.startsWith('图片已生成完成')) {
+      if (seenResourceNotice.has(noticeKey)) return []
+      seenResourceNotice.add(noticeKey)
+    }
+    return [{ ...item, content: cleaned }]
+  })
+}
+
+function cleanAssistantResourceLinks(content: string, resources: { hasImageResource: boolean; hasVideoResource: boolean }) {
+  let text = content
+  if (resources.hasVideoResource) {
+    text = text.replace(/!\[[^\]]*]\(https?:\/\/[^)]+\.(?:mp4|mov|webm)(?:\?[^)]*)?\)/gi, '')
+    text = text.replace(/https?:\/\/\S+\.(?:mp4|mov|webm)(?:\?\S*)?/gi, '')
+  }
+  if (resources.hasImageResource) {
+    text = text.replace(/!\[[^\]]*]\(https?:\/\/[^)]+\.(?:png|jpe?g|webp|gif)(?:\?[^)]*)?\)/gi, '')
+    text = text.replace(/https?:\/\/\S+\.(?:png|jpe?g|webp|gif)(?:\?\S*)?/gi, '')
+  }
+  text = text
+    .replace(/给你，?\s*最近生成的这[一1]章视频链接[:：]?/g, '')
+    .replace(/建议尽快下载保存，链接可能会过期。?/g, '')
+    .replace(/视频链接[:：]?/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+
+  if (!text || /^[\s,，。:：-]+$/.test(text)) {
+    if (resources.hasVideoResource) return '视频已生成完成，已整理为资源卡。'
+    if (resources.hasImageResource) return '图片已生成完成，已整理为资源卡。'
+  }
+  return text
 }
 
 function filterDisplayTranscript(items: TranscriptItem[]) {
@@ -218,6 +261,7 @@ export function replaceTask(tasks: CodexTask[], oldTaskId: string, next: CodexTa
 export function shouldShowMessage(item: TranscriptItem) {
   const content = item.content.trim()
   if (!content) return false
+  if (content.startsWith('员工已经提交插件表单：')) return false
   if (content.startsWith('失败诊断：')) return true
   if (/^正在生成图片[.。…]*$/.test(content)) return false
   if (isTransientSkillStatus(content)) return false
@@ -308,7 +352,8 @@ function isInternalCodexJson(content: string) {
   if (!content.startsWith('{') || !content.endsWith('}')) return false
 
   try {
-    const payload = JSON.parse(content) as { moyuan_tool?: unknown; type?: unknown; item?: { type?: unknown } }
+    const payload = JSON.parse(content) as { moyuan_plugin_input?: unknown; moyuan_tool?: unknown; type?: unknown; item?: { type?: unknown } }
+    if (typeof payload.moyuan_plugin_input === 'string') return true
     if (payload.moyuan_tool === 'image_generation' || payload.moyuan_tool === 'video_generation') return true
     const type = typeof payload.type === 'string' ? payload.type : ''
     const itemType = payload.item && typeof payload.item.type === 'string' ? payload.item.type : ''
@@ -322,7 +367,7 @@ function isInternalCodexJson(content: string) {
       itemType === 'command_execution'
     )
   } catch {
-    return content.includes('"type":"item.') || content.includes('"type":"web_search"')
+    return content.includes('"moyuan_plugin_input"') || content.includes('"type":"item.') || content.includes('"type":"web_search"')
   }
 }
 
@@ -471,7 +516,7 @@ export function hasCodexActivity(task: CodexTask) {
 }
 
 export function canResumeTask(task: CodexTask) {
-  return (task.status === 'completed' || task.status === 'failed' || task.status === 'interrupted') && Boolean(task.sessionId)
+  return task.status === 'completed' || task.status === 'failed' || task.status === 'interrupted'
 }
 
 export function buildPendingTask(promptText: string, workspacePath: string): CodexTask {

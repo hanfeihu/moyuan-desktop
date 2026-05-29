@@ -10,6 +10,9 @@ import Fastify from 'fastify'
 import { z } from 'zod'
 import {
   friendlyRuntimeMessage,
+  hasLegacyInteractiveVideoPluginFields,
+  hasSeedanceInteractiveVideoPluginFields,
+  interactiveVideoPluginInputFields,
   isRuntimeFailureNotice,
   runtimeFailureDiagnostic,
   type CodexTask,
@@ -20,12 +23,11 @@ import {
 import { defaultEnterpriseApiBase as enterpriseApiBase, getModelConfig } from './config.js'
 import { enterpriseJson, loadEnterpriseRuntimeConfig, validateEnterpriseQuota } from './enterprise/client.js'
 import { buildSkillInstructionBlock, isLikelyToolCallFragment, parseMoyuanPluginInputCall, parseMoyuanToolCall } from './skills/contracts.js'
-import type { MoyuanPluginInputCall, RuntimeRunOptions } from './skills/contracts.js'
+import type { MoyuanPluginInputCall, MoyuanToolCall, RuntimeRunOptions } from './skills/contracts.js'
 import { runImageGenerationTool, runMoyuanToolCall } from './skills/executor.js'
 import { queryVideoGeneration } from './skills/video.js'
 import { createRuntimeLogger } from './observability/logger.js'
 import {
-  canReuseLifecycleSession,
   finishTaskLifecycle,
   hasFinalAssistantReply,
   hydrateTaskLifecycle,
@@ -81,6 +83,7 @@ function requestLogSerializer(request: {
 }
 
 const app = Fastify({
+  bodyLimit: 80 * 1024 * 1024,
   logger: {
     serializers: {
       req: requestLogSerializer,
@@ -323,6 +326,79 @@ function findRuntimePlugin(plugins: PluginDefinition[] | undefined, call: Moyuan
   })
 }
 
+function textFromVideoToolContent(content: unknown[] | undefined) {
+  if (!Array.isArray(content)) return undefined
+  const text = content
+    .map((item) => {
+      if (!item || typeof item !== 'object') return ''
+      const value = 'text' in item ? (item as { text?: unknown }).text : undefined
+      return typeof value === 'string' ? value : ''
+    })
+    .filter(Boolean)
+    .join('\n')
+    .trim()
+  return text || undefined
+}
+
+function pluginForTool(plugins: PluginDefinition[] | undefined, tool: MoyuanToolCall['tool']) {
+  return plugins?.find((plugin) => {
+    if (!plugin.enabled || plugin.status !== 'ready') return false
+    if (plugin.interactionMode !== 'requires_user_input') return false
+    if (plugin.triggerPolicy !== 'before_tool') return false
+    return plugin.targetTools?.some((targetTool) => targetTool === tool)
+  })
+}
+
+function toolPrefillValues(toolCall: MoyuanToolCall, prompt: string) {
+  const values: Record<string, unknown> = {
+    model: toolCall.model,
+    prompt: toolCall.prompt ?? prompt,
+  }
+  if (toolCall.tool === 'image_generation') {
+    values.size = toolCall.size
+  }
+  if (toolCall.tool === 'video_generation') {
+    values.duration = toolCall.duration
+    values.generateAudio = toolCall.generateAudio ?? true
+    values.prompt = toolCall.prompt ?? textFromVideoToolContent(toolCall.content) ?? prompt
+    values.ratio = toolCall.ratio
+  }
+  for (const key of Object.keys(values)) {
+    if (values[key] === undefined || values[key] === '') delete values[key]
+  }
+  return values
+}
+
+function pluginRequestFromTool(plugin: PluginDefinition, toolCall: MoyuanToolCall, prompt: string): MoyuanPluginInputCall {
+  return {
+    pluginId: plugin.id,
+    title: plugin.name,
+    reason: plugin.description || '继续执行前需要补充表单参数。',
+    values: toolPrefillValues(toolCall, prompt),
+  }
+}
+
+function shouldRequestPluginBeforeTool(record: TaskRecord, prompt: string, skills: { plugins?: PluginDefinition[] }, toolCall: MoyuanToolCall) {
+  if (!pluginForTool(skills.plugins, toolCall.tool)) return false
+  if (record.awaitingPluginInput) return false
+  if (prompt.includes('员工已经提交插件表单')) return false
+  return true
+}
+
+function requestPluginBeforeTool(record: TaskRecord, prompt: string, skills: { plugins?: PluginDefinition[] }, toolCall: MoyuanToolCall) {
+  if (!shouldRequestPluginBeforeTool(record, prompt, skills, toolCall)) return false
+  const plugin = pluginForTool(skills.plugins, toolCall.tool)
+  if (!plugin) return false
+  const pluginCall = pluginRequestFromTool(plugin, toolCall, prompt)
+  logTask(record, 'plugin.before_tool.requested', {
+    pluginId: plugin.id,
+    targetTool: toolCall.tool,
+    triggerPolicy: plugin.triggerPolicy,
+  })
+  requestPluginInput(record, plugin, pluginCall)
+  return true
+}
+
 function requestPluginInput(record: TaskRecord, plugin: PluginDefinition, call: MoyuanPluginInputCall) {
   const now = new Date().toISOString()
   const request: RuntimePluginInputRequest = {
@@ -365,15 +441,192 @@ function requestPluginInput(record: TaskRecord, plugin: PluginDefinition, call: 
   record.awaitingPluginInput = true
 }
 
-function pluginSubmissionPrompt(pluginRequest: RuntimePluginInputRequest, values: Record<string, unknown>) {
-  const lines = pluginRequest.fields.map((field) => {
-    const value = values[field.id]
-    if (value && typeof value === 'object' && 'name' in value) {
-      const file = value as { name?: unknown; type?: unknown; size?: unknown }
-      return `- ${field.label}: ${String(file.name ?? '已上传文件')}${file.type ? ` (${String(file.type)})` : ''}${typeof file.size === 'number' ? `, ${file.size} bytes` : ''}`
+function cloneInteractiveVideoPluginFields() {
+  return interactiveVideoPluginInputFields.map((field) => ({
+    ...field,
+    options: field.options ? [...field.options] : undefined,
+  }))
+}
+
+function valueArray(value: unknown) {
+  if (Array.isArray(value)) return value
+  if (value === undefined || value === '') return []
+  return [value]
+}
+
+function migrateLegacyInteractiveVideoValues(values?: Record<string, unknown>) {
+  const next = { ...(values ?? {}) }
+  if (!next.firstFrame && next.referenceImage) next.firstFrame = next.referenceImage
+
+  const referenceImages = [
+    ...valueArray(next.referenceImages),
+    ...valueArray(next.referenceImage1),
+    ...valueArray(next.referenceImage2),
+  ]
+  if (!next.referenceImages && referenceImages.length) next.referenceImages = referenceImages
+
+  const referenceVideos = [
+    ...valueArray(next.referenceVideos),
+    ...valueArray(next.referenceVideo),
+    ...valueArray(next.referenceVideo1),
+  ]
+  if (!next.referenceVideos && referenceVideos.length) next.referenceVideos = referenceVideos
+
+  const referenceAudios = [
+    ...valueArray(next.referenceAudios),
+    ...valueArray(next.referenceAudio1),
+  ]
+  if (!next.referenceAudios && referenceAudios.length) next.referenceAudios = referenceAudios
+
+  return next
+}
+
+function migratePendingInteractiveVideoPluginRequests(task: CodexTask) {
+  let changed = false
+  const requests = task.pluginRequests?.map((request) => {
+    if (request.pluginId !== 'interactive-video-request' || request.status !== 'pending') return request
+    if (hasSeedanceInteractiveVideoPluginFields(request.fields) && !hasLegacyInteractiveVideoPluginFields(request.fields)) return request
+    changed = true
+    return {
+      ...request,
+      fields: cloneInteractiveVideoPluginFields(),
+      values: migrateLegacyInteractiveVideoValues(request.values),
     }
-    return `- ${field.label}: ${value === undefined || value === '' ? '未填写' : JSON.stringify(value)}`
   })
+  if (!changed || !requests) return false
+  task.pluginRequests = requests
+  task.updatedAt = new Date().toISOString()
+  return true
+}
+
+type PluginAssetValue = {
+  dataUrl?: unknown
+  name?: unknown
+  role?: unknown
+  size?: unknown
+  type?: unknown
+  url?: unknown
+}
+
+function pluginAssetRole(fieldId: string, _index = 0) {
+  if (fieldId === 'firstFrame') return 'first_frame'
+  if (fieldId === 'lastFrame') return 'last_frame'
+  if (fieldId.startsWith('referenceImage')) return 'reference_image'
+  if (fieldId.startsWith('referenceVideo')) return 'reference_video'
+  if (fieldId.startsWith('referenceAudio')) return 'reference_audio'
+  if (/image/i.test(fieldId)) return 'reference_image'
+  if (/video/i.test(fieldId)) return 'reference_video'
+  if (/audio/i.test(fieldId)) return 'reference_audio'
+  return 'reference_asset'
+}
+
+function pluginAssetContentType(role: string) {
+  if (role === 'reference_video') return 'video_url'
+  if (role === 'reference_audio') return 'audio_url'
+  return 'image_url'
+}
+
+function isPluginAssetValue(value: unknown): value is PluginAssetValue {
+  return Boolean(value && typeof value === 'object' && ('dataUrl' in value || 'url' in value || 'name' in value))
+}
+
+async function uploadPluginAsset(value: PluginAssetValue, options: RuntimeRunOptions) {
+  if (typeof value.url === 'string' && value.url) return value.url
+  if (typeof value.dataUrl !== 'string' || !value.dataUrl) return undefined
+  if (!options.enterpriseAuthToken) throw new Error('请先登录墨渊账号')
+  const uploaded = (await enterpriseJson('/plugin-assets', options.enterpriseAuthToken, options.enterpriseApiBase ?? enterpriseApiBase, {
+    body: JSON.stringify({
+      dataUrl: value.dataUrl,
+      name: typeof value.name === 'string' ? value.name : undefined,
+      type: typeof value.type === 'string' ? value.type : undefined,
+    }),
+    method: 'POST',
+    timeoutMs: 60000,
+  })) as { url?: string }
+  return uploaded.url
+}
+
+async function normalizePluginSubmittedValues(pluginRequest: RuntimePluginInputRequest, values: Record<string, unknown>, options: RuntimeRunOptions) {
+  const normalized: Record<string, unknown> = {}
+  for (const field of pluginRequest.fields) {
+    const value = values[field.id]
+    if (Array.isArray(value)) {
+      normalized[field.id] = await Promise.all(value.map(async (item, index) => {
+        if (!isPluginAssetValue(item)) return item
+        const url = await uploadPluginAsset(item, options)
+        return {
+          name: typeof item.name === 'string' ? item.name : undefined,
+          role: pluginAssetRole(field.id, index),
+          size: typeof item.size === 'number' ? item.size : undefined,
+          type: typeof item.type === 'string' ? item.type : undefined,
+          url,
+        }
+      }))
+      continue
+    }
+    if (!isPluginAssetValue(value)) {
+      normalized[field.id] = value
+      continue
+    }
+    const url = await uploadPluginAsset(value, options)
+    normalized[field.id] = {
+      name: typeof value.name === 'string' ? value.name : undefined,
+      role: pluginAssetRole(field.id),
+      size: typeof value.size === 'number' ? value.size : undefined,
+      type: typeof value.type === 'string' ? value.type : undefined,
+      url,
+    }
+  }
+  return normalized
+}
+
+function buildSeedanceContent(values: Record<string, unknown>) {
+  const content: unknown[] = []
+  const textParts = [
+    values.subjectDefinitions ? `主体定义：\n${String(values.subjectDefinitions)}` : '',
+    values.prompt ? `核心创意：\n${String(values.prompt)}` : '',
+    values.shotList ? `分镜时序：\n${String(values.shotList)}` : '',
+    values.visualStyle ? `画质与风格：\n${String(values.visualStyle)}` : '',
+    values.constraints ? `约束条件：\n${String(values.constraints)}` : '',
+  ].filter(Boolean)
+  if (textParts.length) content.push({ type: 'text', text: textParts.join('\n\n') })
+
+  for (const [fieldId, value] of Object.entries(values)) {
+    const items = Array.isArray(value) ? value : [value]
+    items.forEach((item, index) => {
+      if (!isPluginAssetValue(item) || typeof item.url !== 'string' || !item.url) return
+      const role = typeof item.role === 'string' ? item.role : pluginAssetRole(fieldId, index)
+      const contentType = pluginAssetContentType(role)
+      content.push({
+        type: contentType,
+        [contentType]: { url: item.url },
+        role,
+      })
+    })
+  }
+  return content
+}
+
+function pluginValueLabel(value: unknown): string {
+  if (Array.isArray(value)) {
+    if (!value.length) return '未填写'
+    return value.map((item, index) => `${index + 1}. ${pluginValueLabel(item)}`).join('\n')
+  }
+  if (isPluginAssetValue(value)) {
+    const name = typeof value.name === 'string' ? value.name : '已上传素材'
+    const type = typeof value.type === 'string' ? ` (${value.type})` : ''
+    const size = typeof value.size === 'number' ? `, ${value.size} bytes` : ''
+    const url = typeof value.url === 'string' ? `, URL: ${value.url}` : ''
+    const role = typeof value.role === 'string' ? `, role: ${value.role}` : ''
+    return `${name}${type}${size}${role}${url}`
+  }
+  return value === undefined || value === '' ? '未填写' : JSON.stringify(value)
+}
+
+async function pluginSubmissionPrompt(pluginRequest: RuntimePluginInputRequest, values: Record<string, unknown>, options: RuntimeRunOptions) {
+  const normalizedValues = await normalizePluginSubmittedValues(pluginRequest, values, options)
+  const lines = pluginRequest.fields.map((field) => `- ${field.label}: ${pluginValueLabel(normalizedValues[field.id])}`)
+  const seedanceContent = buildSeedanceContent(normalizedValues)
 
   return [
     `员工已经提交插件表单：${pluginRequest.title}`,
@@ -381,13 +634,32 @@ function pluginSubmissionPrompt(pluginRequest: RuntimePluginInputRequest, values
     '表单内容：',
     ...lines,
     '',
+    'Seedance 2.0 编排要求：',
+    '- 你需要根据表单内容组织 video_generation 工具调用；不要把表单当作最终结果。',
+    '- 多模态参考：用“参考图片N/视频N/音频N中的主体、动作、运镜、风格或音色，生成...”表述。',
+    '- 编辑视频：直接说“严格编辑视频N”，不要写“参考视频N”，未提及部分默认保持不变。',
+    '- 延长视频：直接说“向前/向后延长视频N”，保持音视频风格、主体和叙事一致。',
+    '- 主体要明确绑定素材，例如“主角@图片1”；复杂视频优先按镜头1、镜头2、镜头3组织。',
+    '- 避免无意义堆满素材；文本+音频、纯音频输入不支持，音频应与图片或视频素材组合使用。',
+    '- 输出工具 JSON 时，素材数组应使用 image_url/video_url/audio_url，并按需要设置 role 为 first_frame、last_frame、reference_image、reference_video、reference_audio。',
+    seedanceContent.length ? `建议 content：${JSON.stringify(seedanceContent)}` : '',
+    '',
+    `建议参数：${JSON.stringify({
+      duration: normalizedValues.duration,
+      generate_audio: normalizedValues.generateAudio,
+      ratio: normalizedValues.ratio,
+      resolution: normalizedValues.resolution,
+      taskType: normalizedValues.taskType,
+      watermark: normalizedValues.watermark,
+    })}`,
+    '',
     '请基于这些输入继续完成原任务；如果需要调用技能或继续执行，请直接编排下一步。',
-  ].join('\n')
+  ].filter(Boolean).join('\n')
 }
 
 function canReuseParentTask(record: TaskRecord) {
   if (record.task.status === 'queued' || record.task.status === 'running' || record.cancel) return false
-  return Boolean(record.task.sessionId) || canReuseLifecycleSession(record, isRuntimeFailureContent)
+  return true
 }
 
 function safeVisibleToolContent(content: string) {
@@ -619,6 +891,7 @@ async function loadStore() {
     const saved = JSON.parse(raw) as { tasks?: CodexTask[] }
     for (const task of saved.tasks ?? []) {
       const restored = persistedTask(task)
+      migratePendingInteractiveVideoPluginRequests(restored)
       if (restored.status === 'queued' || restored.status === 'running') {
         restored.status = 'failed'
         restored.updatedAt = new Date().toISOString()
@@ -862,6 +1135,12 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
     hasMemory: Boolean(memory),
     model: config.defaultModel,
     port,
+    plugins: (skills.plugins ?? []).map((plugin) => ({
+      id: plugin.id,
+      status: plugin.status,
+      targetTools: plugin.targetTools ?? [],
+      triggerPolicy: plugin.triggerPolicy ?? 'manual',
+    })),
     promptLength: prompt.length,
     providerId: config.providerId,
     reasoningEffort,
@@ -896,6 +1175,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
 
   const startToolRun = (toolCall: ReturnType<typeof parseMoyuanToolCall>) => {
     if (!toolCall) return false
+    if (requestPluginBeforeTool(record, prompt, skills, toolCall)) return true
     const toolRun = runMoyuanToolCall({ record, toolCall, prompt, options, skills, runtimeRoot, saveStore, pushEvent })
     pendingToolRuns.push(toolRun)
     void toolRun
@@ -1310,6 +1590,12 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
   setTaskLifecyclePhase(record, 'running', isRuntimeFailureContent)
   logTask(record, 'codex.exec.start', {
     model: config.defaultModel,
+    plugins: (skills.plugins ?? []).map((plugin) => ({
+      id: plugin.id,
+      status: plugin.status,
+      targetTools: plugin.targetTools ?? [],
+      triggerPolicy: plugin.triggerPolicy ?? 'manual',
+    })),
     promptLength: prompt.length,
     providerId: config.providerId,
     reasoningEffort,
@@ -1366,6 +1652,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
         if (event.type === 'message' && event.role === 'assistant') {
           const toolCall = parseMoyuanToolCall(event.content)
           if (toolCall) {
+            if (requestPluginBeforeTool(record, prompt, skills, toolCall)) continue
             const toolRun = runMoyuanToolCall({ record, toolCall, prompt, options, skills, runtimeRoot, saveStore, pushEvent })
             pendingToolRuns.push(toolRun)
             void toolRun
@@ -1586,7 +1873,12 @@ app.post('/api/codex/tasks', async (request, reply) => {
 
 app.get('/api/codex/tasks', async () => {
   const taskRecords = Array.from(records.values())
-  taskRecords.forEach(reconcileTaskBeforeResponse)
+  let changed = false
+  taskRecords.forEach((record) => {
+    changed = migratePendingInteractiveVideoPluginRequests(record.task) || changed
+    reconcileTaskBeforeResponse(record)
+  })
+  if (changed) await saveStore()
   return {
     data: taskRecords.map((record) => sanitizeTask(record.task)),
   }
@@ -1667,7 +1959,9 @@ app.get('/api/codex/tasks/:taskId', async (request, reply) => {
     return reply.status(404).send({ error: '任务不存在' })
   }
 
+  const changed = migratePendingInteractiveVideoPluginRequests(record.task)
   reconcileTaskBeforeResponse(record)
+  if (changed) await saveStore()
   return { data: sanitizeTask(record.task) }
 })
 
@@ -1703,6 +1997,7 @@ app.post('/api/codex/tasks/:taskId/plugin-requests/:requestId/submit', async (re
   const record = records.get(params.taskId)
   if (!record) return reply.status(404).send({ error: '任务不存在' })
 
+  migratePendingInteractiveVideoPluginRequests(record.task)
   const pluginRequest = record.task.pluginRequests?.find((item) => item.id === params.requestId)
   if (!pluginRequest) return reply.status(404).send({ error: '插件请求不存在' })
   if (pluginRequest.status !== 'pending') return { data: sanitizeTask(record.task) }
@@ -1713,6 +2008,15 @@ app.post('/api/codex/tasks/:taskId/plugin-requests/:requestId/submit', async (re
     status: 'submitted',
     values: parsed.data.values,
     resolvedAt: now,
+  }
+  let continuationPrompt: string
+  try {
+    continuationPrompt = await pluginSubmissionPrompt(submittedRequest, parsed.data.values, {
+      enterpriseApiBase: parsed.data.enterpriseApiBase,
+      enterpriseAuthToken: parsed.data.enterpriseAuthToken,
+    })
+  } catch (error) {
+    return reply.status(400).send({ error: error instanceof Error ? error.message : '插件素材处理失败' })
   }
   pushEvent(record, {
     taskId: params.taskId,
@@ -1733,7 +2037,6 @@ app.post('/api/codex/tasks/:taskId/plugin-requests/:requestId/submit', async (re
 
   record.awaitingPluginInput = false
   startTaskTurn(record, now)
-  const continuationPrompt = pluginSubmissionPrompt(submittedRequest, parsed.data.values)
   appendTranscriptItem(record, {
     role: 'user',
     content: continuationPrompt,

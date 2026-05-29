@@ -104,6 +104,9 @@ export function buildSkillInstructionBlock(skills: EnterpriseSkillSet) {
   const image = skills.imageGeneration
   const video = skills.videoGeneration
   const plugins = (skills.plugins ?? []).filter((plugin) => plugin.enabled && plugin.status === 'ready')
+  // Product rule: plugin orchestration must stay manifest-driven. Do not add
+  // hard-coded business keyword branches here; admin plugin definitions should
+  // describe when Codex asks the user for form input before invoking skills.
   const videoStatus = video?.enabled && video.apiKeyConfigured ? '已启用' : video ? '未启用或未配置 KEY' : '后台未下发'
   const defaultVideoRatio = video?.defaultRatio ?? defaultVideoRatioForModel(video?.defaultModel)
   const pluginLines = plugins.length
@@ -113,11 +116,14 @@ export function buildSkillInstructionBlock(skills: EnterpriseSkillSet) {
         ...plugins.map((plugin, index) => {
           const fields = plugin.inputFields.map((field) => `${field.label}${field.required ? '（必填）' : ''}`).join('、') || '无字段'
           const hints = plugin.triggerHints.length ? `，触发词：${plugin.triggerHints.join('、')}` : ''
-          return `${index + 1}. ${plugin.name} (${plugin.id})：${plugin.description}${hints}。字段：${fields}。`
+          const toolTargets = plugin.targetTools?.length ? `，关联工具：${plugin.targetTools.join('、')}` : ''
+          const policy = plugin.triggerPolicy === 'before_tool' ? '，策略：调用关联工具前先补表单' : ''
+          return `${index + 1}. ${plugin.name} (${plugin.id})：${plugin.description}${hints}${toolTargets}${policy}。字段：${fields}。`
         }),
         '   调用方式：当你需要员工补图、补视频、补参数或填写表单时，只输出一行 JSON，不要解释：{"moyuan_plugin_input":"插件ID","title":"需要员工补充的标题","reason":"为什么需要这些信息","values":{"可预填字段":"值"}}。',
+        '   编排原则：如果用户需求命中了某个插件的说明、触发词或表单字段，并且该插件需要用户补充输入，应先请求插件表单；员工提交表单后，再继续调用对应技能或工具。',
         '   重要：插件请求只是暂停等待员工输入；不要把它当作图片/视频生成结果，也不要自行编造提交结果。',
-      ]
+      ].filter(Boolean)
     : []
 
   return [
@@ -136,7 +142,7 @@ export function buildSkillInstructionBlock(skills: EnterpriseSkillSet) {
     '   ratio 可选 adaptive、16:9、4:3、1:1、3:4、9:16、21:9；Seedance 2.0 优先使用 adaptive，除非用户明确要求横屏、竖屏、方形或超宽屏。',
     `   文生视频调用：{"moyuan_tool":"video_generation","prompt":"视频创意描述","generate_audio":true,"ratio":"${defaultVideoRatio}","duration":8,"watermark":false}`,
     `   多模态参考调用：{"moyuan_tool":"video_generation","content":[{"type":"text","text":"完整视频描述"},{"type":"image_url","image_url":{"url":"https://.../first.jpg"},"role":"reference_image"},{"type":"video_url","video_url":{"url":"https://.../ref.mp4"},"role":"reference_video"},{"type":"audio_url","audio_url":{"url":"https://.../bgm.mp3"},"role":"reference_audio"}],"generate_audio":true,"ratio":"${defaultVideoRatio}","duration":8,"watermark":false}`,
-    '   重要：当用户明确要求生成视频成品时，不能用文字回答“已生成”；必须只返回 video_generation JSON，由 Runtime 执行后展示真实视频资源。',
+    '   重要：当用户明确要求生成视频成品时，如果没有匹配的交互插件需要补充输入，不能用文字回答“已生成”；必须只返回 video_generation JSON，由 Runtime 执行后展示真实视频资源。',
     '- 如果用户是在询问如何接入、开发、调试、配置这些能力，或要求修改相关代码，不要调用技能，直接完成代码/方案任务。',
     '- 如果用户明确要生成图或视频成品，优先调用对应技能；如果技能未启用，直接说明需要管理员在后台启用，不要编造结果。',
     '- 技能成功与否只以 Runtime 执行器返回的图片/视频资源为准；你不能自行宣告外部技能已完成。',

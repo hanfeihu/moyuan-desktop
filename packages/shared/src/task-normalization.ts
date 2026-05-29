@@ -203,7 +203,7 @@ export function applyTaskStructureEvent(task: CodexTask, event: StructuredTaskEv
 
   const output = event.output ?? outputFromStructuredItem(item, timestamp)
   if (output) {
-    task.outputs = upsertById(task.outputs ?? [], output)
+    task.outputs = upsertById(task.outputs ?? [], { ...output, turnId: output.turnId ?? turnId })
   }
 }
 

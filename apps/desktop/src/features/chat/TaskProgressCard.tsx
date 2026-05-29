@@ -1,5 +1,5 @@
-import { Check, Circle, FileText, Globe2, Image, Loader2, Package, Play, ShieldQuestion, Video } from 'lucide-react'
-import { useState } from 'react'
+import { Check, Circle, FileText, Globe2, Image, Loader2, Package, Play, ShieldQuestion, Upload, Video, X } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import type { CodexTask, PluginInputField, RuntimePluginInputRequest, RuntimeTaskItem } from '@eaw/shared'
 
 function visibleItems(task: CodexTask) {
@@ -70,6 +70,39 @@ function fieldValue(values: Record<string, unknown>, field: PluginInputField) {
   return ''
 }
 
+type PluginFileValue = {
+  dataUrl?: string
+  name?: string
+  size?: number
+  type?: string
+  url?: string
+}
+
+function fileValues(values: Record<string, unknown>, field: PluginInputField) {
+  const value = values[field.id]
+  if (Array.isArray(value)) return value.filter(isFileValue)
+  if (isFileValue(value)) return [value]
+  return []
+}
+
+function isFileValue(value: unknown): value is PluginFileValue {
+  return Boolean(value && typeof value === 'object' && ('dataUrl' in value || 'url' in value || 'name' in value))
+}
+
+function fileKindLabel(field: PluginInputField) {
+  if (field.type === 'image') return '图片'
+  if (field.type === 'video') return '视频'
+  if (field.type === 'audio') return '音频'
+  return '文件'
+}
+
+function fileIcon(field: PluginInputField) {
+  if (field.type === 'image') return <Image size={18} />
+  if (field.type === 'video') return <Video size={18} />
+  if (field.type === 'audio') return <Circle size={16} />
+  return <FileText size={18} />
+}
+
 function fileToValue(file: File) {
   return new Promise<Record<string, unknown>>((resolve, reject) => {
     const reader = new FileReader()
@@ -80,9 +113,13 @@ function fileToValue(file: File) {
 }
 
 function PluginRequestForm({
+  onCancel,
+  onSubmitted,
   onSubmit,
   request,
 }: {
+  onCancel?: () => void
+  onSubmitted?: () => void
   onSubmit: (requestId: string, values: Record<string, unknown>) => void | Promise<void>
   request: RuntimePluginInputRequest
 }) {
@@ -97,6 +134,7 @@ function PluginRequestForm({
     setSubmitting(true)
     try {
       await onSubmit(request.id, values)
+      onSubmitted?.()
     } finally {
       setSubmitting(false)
     }
@@ -113,7 +151,7 @@ function PluginRequestForm({
           <label className="plugin-request-field" key={field.id}>
             <span>{field.label}{field.required ? ' *' : ''}</span>
             {field.type === 'textarea' ? (
-              <textarea value={fieldValue(values, field)} onChange={(event) => setFieldValue(field, event.target.value)} />
+              <textarea placeholder={field.placeholder} value={fieldValue(values, field)} onChange={(event) => setFieldValue(field, event.target.value)} />
             ) : field.type === 'select' ? (
               <select value={fieldValue(values, field)} onChange={(event) => setFieldValue(field, event.target.value)}>
                 <option value="">请选择</option>
@@ -121,29 +159,106 @@ function PluginRequestForm({
               </select>
             ) : field.type === 'boolean' ? (
               <input checked={Boolean(values[field.id])} onChange={(event) => setFieldValue(field, event.target.checked)} type="checkbox" />
-            ) : field.type === 'image' || field.type === 'video' || field.type === 'file' ? (
-              <input
-                accept={field.type === 'image' ? 'image/*' : field.type === 'video' ? 'video/*' : undefined}
-                onChange={(event) => {
-                  const file = event.target.files?.[0]
-                  if (!file) return
-                  void fileToValue(file).then((value) => setFieldValue(field, value))
-                }}
-                type="file"
-              />
+            ) : field.type === 'image' || field.type === 'video' || field.type === 'audio' || field.type === 'file' ? (
+              <span className="plugin-file-field">
+                <span className="plugin-file-dropzone">
+                  <span className="plugin-file-icon"><Upload size={18} /></span>
+                  <span>
+                    <strong>添加{fileKindLabel(field)}</strong>
+                    <small>{(field.maxFiles ?? 1) > 1 ? `最多 ${field.maxFiles} 个，已选 ${fileValues(values, field).length} 个` : '选择一个素材'}</small>
+                  </span>
+                  <input
+                    accept={field.type === 'image' ? 'image/*' : field.type === 'video' ? 'video/*' : field.type === 'audio' ? 'audio/*' : undefined}
+                    multiple={(field.maxFiles ?? 1) > 1}
+                    onChange={(event) => {
+                      const files = Array.from(event.target.files ?? [])
+                      if (!files.length) return
+                      void Promise.all(files.map(fileToValue)).then((nextValues) => {
+                        const maxFiles = field.maxFiles ?? 1
+                        if (maxFiles > 1) {
+                          const merged = [...fileValues(values, field), ...nextValues].slice(0, maxFiles)
+                          setFieldValue(field, merged)
+                        } else {
+                          setFieldValue(field, nextValues[0])
+                        }
+                        event.target.value = ''
+                      })
+                    }}
+                    type="file"
+                  />
+                </span>
+                {fileValues(values, field).length ? (
+                  <span className="plugin-file-list">
+                    {fileValues(values, field).map((file, index) => (
+                      <span className="plugin-file-card" key={`${file.name ?? file.url ?? index}-${index}`}>
+                        {field.type === 'image' && (file.dataUrl || file.url) ? (
+                          <img alt="" src={file.dataUrl ?? file.url} />
+                        ) : (
+                          <span className="plugin-file-card-icon">{fileIcon(field)}</span>
+                        )}
+                        <span className="plugin-file-card-main">
+                          <strong>{file.name ?? `${fileKindLabel(field)} ${index + 1}`}</strong>
+                          <small>{field.type === 'image' ? `图片${index + 1}` : field.type === 'video' ? `视频${index + 1}` : field.type === 'audio' ? `音频${index + 1}` : `文件${index + 1}`}</small>
+                        </span>
+                        <button
+                          title="移除"
+                          type="button"
+                          onClick={() => {
+                            const current = fileValues(values, field)
+                            const next = current.filter((_, fileIndex) => fileIndex !== index)
+                            setFieldValue(field, (field.maxFiles ?? 1) > 1 ? next : '')
+                          }}
+                        >
+                          <X size={13} />
+                        </button>
+                      </span>
+                    ))}
+                  </span>
+                ) : null}
+              </span>
             ) : (
               <input
                 type={field.type === 'number' ? 'number' : 'text'}
+                placeholder={field.placeholder}
                 value={fieldValue(values, field)}
-                onChange={(event) => setFieldValue(field, field.type === 'number' ? Number(event.target.value) : event.target.value)}
+                onChange={(event) => setFieldValue(field, field.type === 'number' ? (event.target.value === '' ? '' : Number(event.target.value)) : event.target.value)}
               />
             )}
+            {field.helpText ? <small className="plugin-request-help">{field.helpText}</small> : null}
           </label>
         ))}
       </div>
-      <button className="plugin-request-submit" disabled={submitting} onClick={() => void submit()} type="button">
-        {submitting ? '提交中' : '提交并继续'}
-      </button>
+      <div className="plugin-request-actions">
+        {onCancel ? (
+          <button className="plugin-request-cancel" disabled={submitting} onClick={onCancel} type="button">
+            稍后填写
+          </button>
+        ) : null}
+        <button className="plugin-request-submit" disabled={submitting} onClick={() => void submit()} type="button">
+          {submitting ? '提交中' : '提交并继续'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function PluginRequestModal({
+  onClose,
+  onSubmit,
+  request,
+}: {
+  onClose: () => void
+  onSubmit: (requestId: string, values: Record<string, unknown>) => void | Promise<void>
+  request: RuntimePluginInputRequest
+}) {
+  return (
+    <div className="plugin-modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="plugin-modal" aria-label={request.title} role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="plugin-modal-close" title="关闭" type="button" onClick={onClose}>
+          <X size={16} />
+        </button>
+        <PluginRequestForm onCancel={onClose} onSubmitted={onClose} onSubmit={onSubmit} request={request} />
+      </section>
     </div>
   )
 }
@@ -160,14 +275,38 @@ export function TaskProgressCard({
   const outputs = task.outputs ?? []
   const approvals = (task.approvals ?? []).filter((approval) => approval.status === 'pending')
   const pluginRequests = (task.pluginRequests ?? []).filter((request) => request.status === 'pending')
+  const pluginRequestIds = pluginRequests.map((request) => request.id).join('|')
+  const [activePluginRequestId, setActivePluginRequestId] = useState<string | null | undefined>(undefined)
+  const activePluginRequest = pluginRequests.find((request) => request.id === activePluginRequestId) ?? null
   const sources = task.sources ?? []
   const isLive = task.status === 'queued' || task.status === 'running'
   const hasContent = isLive || plan.length || items.length || outputs.length || approvals.length || pluginRequests.length || sources.length
+
+  useEffect(() => {
+    if (!pluginRequests.length) {
+      setActivePluginRequestId(undefined)
+      return
+    }
+    setActivePluginRequestId((current) => {
+      if (current === null) return null
+      if (current && pluginRequests.some((request) => request.id === current)) return current
+      return pluginRequests[0]?.id ?? undefined
+    })
+  }, [pluginRequestIds])
+
   if (!hasContent) return null
 
   return (
-    <section className="task-progress-card" aria-label="任务过程">
-      <div className="task-progress-heading">任务过程</div>
+    <>
+      {activePluginRequest ? (
+        <PluginRequestModal
+          onClose={() => setActivePluginRequestId(null)}
+          onSubmit={onPluginSubmit}
+          request={activePluginRequest}
+        />
+      ) : null}
+      <section className="task-progress-card" aria-label="任务过程">
+        <div className="task-progress-heading">任务过程</div>
       {plan.length ? (
         <div className="task-progress-section">
           <div className="task-progress-title">进度</div>
@@ -243,7 +382,13 @@ export function TaskProgressCard({
           <div className="task-progress-title">插件输入</div>
           <div className="task-progress-list">
             {pluginRequests.map((request) => (
-              <PluginRequestForm key={request.id} onSubmit={onPluginSubmit} request={request} />
+              <button className="task-progress-plugin-row" key={request.id} onClick={() => setActivePluginRequestId(request.id)} type="button">
+                <span className="task-progress-output-icon"><Package size={15} /></span>
+                <span>
+                  <strong>{request.title}</strong>
+                  <small>等待你补充后继续</small>
+                </span>
+              </button>
             ))}
           </div>
         </div>
@@ -255,6 +400,7 @@ export function TaskProgressCard({
           <span>{task.status === 'queued' ? '任务排队中' : '任务正在执行'}</span>
         </div>
       ) : null}
-    </section>
+      </section>
+    </>
   )
 }

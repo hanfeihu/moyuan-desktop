@@ -18,11 +18,26 @@ function isBenignResizeObserverError(error: unknown) {
   )
 }
 
+function isRecoverableReactQueueError(error: unknown) {
+  return getErrorMessage(error).includes('Should have a queue. This is likely a bug in React.')
+}
+
+function recoverFromReactQueueError(error: unknown) {
+  if (!isRecoverableReactQueueError(error)) return false
+  const storageKey = 'moyuan.react_queue_error_reload'
+  if (window.sessionStorage.getItem(storageKey) === '1') return false
+  window.sessionStorage.setItem(storageKey, '1')
+  logClientEvent('app.react_queue_recover_reload', errorLogDetails(error), 'warn')
+  window.location.reload()
+  return true
+}
+
 export function renderFatalError(error: unknown) {
   if (isBenignResizeObserverError(error)) {
     logClientEvent('app.resize_observer_notice', errorLogDetails(error), 'warn')
     return
   }
+  if (recoverFromReactQueueError(error)) return
   logClientEvent('app.fatal_render_error', errorLogDetails(error), 'error')
   const overlayId = 'moyuan-fatal-error-overlay'
   const existing = document.getElementById(overlayId)
@@ -97,12 +112,20 @@ export function installGlobalErrorHandlers() {
       event.preventDefault()
       return
     }
+    if (recoverFromReactQueueError(error)) {
+      event.preventDefault()
+      return
+    }
     logClientEvent('app.window_error', errorLogDetails(event.error ?? event.message, { filename: event.filename, lineno: event.lineno }), 'error')
     renderFatalError(event.error ?? event.message)
   })
   window.addEventListener('unhandledrejection', (event) => {
     if (isBenignResizeObserverError(event.reason)) {
       logClientEvent('app.resize_observer_notice', errorLogDetails(event.reason), 'warn')
+      event.preventDefault()
+      return
+    }
+    if (recoverFromReactQueueError(event.reason)) {
       event.preventDefault()
       return
     }
@@ -124,6 +147,7 @@ export class AppErrorBoundary extends React.Component<{ children: React.ReactNod
       this.setState({ error: null })
       return
     }
+    if (recoverFromReactQueueError(error)) return
     logClientEvent('app.error_boundary', errorLogDetails(error), 'error')
   }
 

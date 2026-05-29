@@ -71,6 +71,7 @@ export function DesktopApp() {
   useDesktopHotkeys({ focusComposer: textareaRef, onNewConversation: taskController.startNewConversation })
 
   useEffect(() => {
+    window.sessionStorage.removeItem('moyuan.react_queue_error_reload')
     logClientEvent('app.mounted', {
       authState,
       userAgent: window.navigator.userAgent,
@@ -146,6 +147,7 @@ export function DesktopApp() {
               busyElapsed={taskController.busyElapsed}
               isCancelling={taskController.isCancelling}
               isWelcome={taskController.isWelcome}
+              onRegenerateResource={taskController.regenerateResource}
               onStop={taskController.stopActiveTask}
               shouldShowThinking={taskController.shouldShowThinking}
               transcriptBottomRef={transcriptBottomRef}

@@ -379,7 +379,8 @@ function markdownBlocks(content: string): MarkdownBlock[] {
 
   const flushCode = () => {
     if (!codeLines) return
-    blocks.push({ type: 'code', code: codeLines.join('\n'), language: codeLanguage })
+    const code = codeLines.join('\n')
+    if (code.trim()) blocks.push({ type: 'code', code, language: codeLanguage })
     codeLines = null
     codeLanguage = ''
   }

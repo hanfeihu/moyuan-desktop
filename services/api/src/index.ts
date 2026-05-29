@@ -7,6 +7,11 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { Readable } from 'node:stream'
 import { z } from 'zod'
+import {
+  hasLegacyInteractiveVideoPluginFields,
+  hasSeedanceInteractiveVideoPluginFields,
+  interactiveVideoPluginInputFields,
+} from '@eaw/shared'
 import type {
   AccountUser,
   ClientLogRecord,
@@ -25,7 +30,7 @@ import type {
   VideoSkillConfig,
 } from '@eaw/shared'
 
-const app = Fastify({ logger: true })
+const app = Fastify({ bodyLimit: 80 * 1024 * 1024, logger: true })
 
 await app.register(cors, { origin: true })
 app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_request, body, done) => {
@@ -76,9 +81,12 @@ const pluginIdParamSchema = z.object({
 })
 
 const pluginInputFieldSchema = z.object({
+  helpText: z.string().optional(),
   id: z.string().min(1),
   label: z.string().min(1),
-  type: z.enum(['text', 'textarea', 'select', 'number', 'boolean', 'image', 'video', 'file']),
+  maxFiles: z.coerce.number().int().min(1).max(12).optional(),
+  placeholder: z.string().optional(),
+  type: z.enum(['text', 'textarea', 'select', 'number', 'boolean', 'image', 'video', 'audio', 'file']),
   required: z.boolean().optional(),
   options: z.array(z.object({ label: z.string().min(1), value: z.string().min(1) })).optional(),
 })
@@ -89,6 +97,8 @@ const pluginDefinitionSchema = z.object({
   category: z.enum(['media', 'data', 'workflow', 'developer', 'custom']),
   handler: z.enum(['runtime', 'server', 'external']),
   interactionMode: z.enum(['automatic', 'requires_user_input']),
+  targetTools: z.array(z.string().min(1)).default([]),
+  triggerPolicy: z.enum(['manual', 'before_tool']).default('manual'),
   enabled: z.boolean(),
   triggerHints: z.array(z.string().min(1)).default([]),
   inputFields: z.array(pluginInputFieldSchema).default([]),
@@ -133,6 +143,12 @@ const videoGenerationSchema = z
     watermark: z.boolean().optional(),
   })
   .passthrough()
+
+const pluginAssetUploadSchema = z.object({
+  dataUrl: z.string().min(1),
+  name: z.string().min(1).max(240).optional(),
+  type: z.string().min(1).max(120).optional(),
+})
 
 const mailConfigSchema = z.object({
   smtpHost: z.string().min(1),
@@ -303,6 +319,10 @@ let adminSessions: AdminSession[] = storedConfig.adminSessions ?? []
 const verificationCodes = new Map<string, { code: string; expiresAt: number; createdAt: number }>()
 const imageGenerationJobs = new Map<string, ImageGenerationJob>()
 const maxImageGenerationJobs = 200
+const maxStoredClientLogs = 2000
+let persistStoredConfigInFlight: Promise<void> | null = null
+let persistStoredConfigDirty = false
+let scheduledPersistStoredConfig: NodeJS.Timeout | undefined
 
 if (needsStoredConfigMigration(storedConfig)) {
   await persistStoredConfig()
@@ -329,7 +349,7 @@ async function loadStoredConfig(): Promise<StoredAdminConfig> {
   }
 }
 
-async function persistStoredConfig() {
+async function writeStoredConfig() {
   await mkdir(dirname(configFile), { recursive: true })
   await writeFile(
     configFile,
@@ -354,13 +374,39 @@ async function persistStoredConfig() {
         sessions,
         videoTaskCharges,
         generatedAssets,
-        clientLogs,
+        clientLogs: clientLogs.slice(0, maxStoredClientLogs),
         usageReportIds: Array.from(usageReportIds).slice(-5000),
       },
       null,
       2,
     ),
   )
+}
+
+async function persistStoredConfig() {
+  if (persistStoredConfigInFlight) {
+    persistStoredConfigDirty = true
+    return persistStoredConfigInFlight
+  }
+
+  persistStoredConfigInFlight = (async () => {
+    do {
+      persistStoredConfigDirty = false
+      await writeStoredConfig()
+    } while (persistStoredConfigDirty)
+  })().finally(() => {
+    persistStoredConfigInFlight = null
+  })
+
+  return persistStoredConfigInFlight
+}
+
+function schedulePersistStoredConfig(delayMs = 1000) {
+  if (scheduledPersistStoredConfig) return
+  scheduledPersistStoredConfig = setTimeout(() => {
+    scheduledPersistStoredConfig = undefined
+    void persistStoredConfig()
+  }, delayMs)
 }
 
 function needsStoredConfigMigration(config: StoredAdminConfig) {
@@ -565,6 +611,8 @@ function normalizePlugin(plugin: Partial<PluginDefinition> & Pick<PluginDefiniti
     category: plugin.category ?? 'custom',
     handler: plugin.handler ?? 'runtime',
     interactionMode: plugin.interactionMode ?? 'requires_user_input',
+    targetTools: plugin.targetTools ?? [],
+    triggerPolicy: plugin.triggerPolicy ?? (plugin.targetTools?.length ? 'before_tool' : 'manual'),
     enabled,
     ready,
     status: !ready ? 'needs_config' : enabled ? 'ready' : 'disabled',
@@ -581,31 +629,15 @@ function defaultPlugins(): PluginDefinition[] {
     normalizePlugin({
       id: 'interactive-video-request',
       name: '视频生成表单',
-      description: 'Codex 需要用户补充垫图、比例、时长、清晰度等参数时，弹出可提交的交互表单。',
+      description: 'Codex 需要用户补充文本、首尾帧、参考图/视频/音频和生成参数时，弹出多模态视频表单。',
       category: 'media',
       handler: 'runtime',
       interactionMode: 'requires_user_input',
-      enabled: false,
+      targetTools: ['video_generation'],
+      triggerPolicy: 'before_tool',
+      enabled: true,
       triggerHints: ['生成视频', '图生视频', '文生视频', '做短片'],
-      inputFields: [
-        { id: 'prompt', label: '视频提示词', type: 'textarea', required: true },
-        { id: 'referenceImage', label: '垫图', type: 'image' },
-        { id: 'referenceVideo', label: '参考视频', type: 'video' },
-        {
-          id: 'ratio',
-          label: '画面比例',
-          type: 'select',
-          options: videoRatioOptions.map((value) => ({ label: value, value })),
-        },
-        { id: 'duration', label: '时长', type: 'number' },
-        {
-          id: 'resolution',
-          label: '清晰度',
-          type: 'select',
-          options: videoResolutionOptions.map((value) => ({ label: value, value })),
-        },
-        { id: 'generateAudio', label: '生成音频', type: 'boolean' },
-      ],
+      inputFields: interactiveVideoPluginInputFields,
       permissions: ['请求用户补充参数', '读取用户上传素材', '把表单结果交回 Codex'],
       quotaType: 'task',
     }),
@@ -613,8 +645,40 @@ function defaultPlugins(): PluginDefinition[] {
 }
 
 function normalizePlugins(stored?: PluginDefinition[]): PluginDefinition[] {
-  const source = stored?.length ? stored : defaultPlugins()
-  return source.map((plugin) => normalizePlugin(plugin))
+  const defaults = defaultPlugins()
+  const source = stored?.length ? stored : defaults
+  const normalized = source.map((plugin) => normalizePlugin(plugin))
+
+  return defaults.map((defaultPlugin) => {
+    const existing = normalized.find((plugin) => plugin.id === defaultPlugin.id)
+    if (!existing) return defaultPlugin
+    if (defaultPlugin.id === 'interactive-video-request') {
+      const rawExisting = source.find((plugin) => plugin.id === defaultPlugin.id)
+      const migratedTriggerPolicy = rawExisting?.triggerPolicy
+        ?? (rawExisting?.targetTools?.length ? 'before_tool' : defaultPlugin.triggerPolicy)
+      const hasSeedanceFields = hasSeedanceInteractiveVideoPluginFields(existing.inputFields)
+      const hasLegacyVideoFields = hasLegacyInteractiveVideoPluginFields(existing.inputFields)
+      return normalizePlugin({
+        ...defaultPlugin,
+        ...existing,
+        inputFields: hasSeedanceFields && !hasLegacyVideoFields ? mergePluginFields(defaultPlugin.inputFields, existing.inputFields) : defaultPlugin.inputFields,
+        targetTools: existing.targetTools?.length ? existing.targetTools : defaultPlugin.targetTools,
+        triggerPolicy: migratedTriggerPolicy,
+        enabled: existing.enabled,
+        ready: existing.ready,
+        updatedAt: existing.updatedAt,
+      })
+    }
+    return existing
+  }).concat(normalized.filter((plugin) => !defaults.some((defaultPlugin) => defaultPlugin.id === plugin.id)))
+}
+
+function mergePluginFields(defaultFields: PluginDefinition['inputFields'], storedFields: PluginDefinition['inputFields'] = []) {
+  const fields = [...storedFields]
+  for (const field of defaultFields) {
+    if (!fields.some((item) => item.id === field.id)) fields.push(field)
+  }
+  return fields
 }
 
 function buildMailSettings(stored?: Omit<MailServiceConfig, 'maskedAuthCode' | 'authCodeConfigured'>): MailServiceConfig {
@@ -1119,7 +1183,7 @@ function appendClientLog(user: AccountUser, payload: z.infer<typeof clientLogSch
     createdAt: payload.timestamp ?? now,
     receivedAt: now,
   }
-  clientLogs = [log, ...clientLogs].slice(0, 10000)
+  clientLogs = [log, ...clientLogs].slice(0, maxStoredClientLogs)
   return log
 }
 
@@ -1285,6 +1349,30 @@ async function uploadToMinio(objectKey: string, bytes: Buffer, contentType: stri
   })
   if (!response.ok) throw new Error(`MinIO 归档失败：${response.status}`)
   return `${config.publicBaseUrl}/${objectKey}`
+}
+
+function extensionForContentType(contentType: string, fileName?: string) {
+  const existing = fileName?.match(/\.([a-z0-9]{1,8})$/i)?.[1]
+  if (existing) return existing.toLowerCase()
+  if (contentType.includes('png')) return 'png'
+  if (contentType.includes('jpeg') || contentType.includes('jpg')) return 'jpg'
+  if (contentType.includes('webp')) return 'webp'
+  if (contentType.includes('mp4')) return 'mp4'
+  if (contentType.includes('quicktime')) return 'mov'
+  if (contentType.includes('mpeg')) return 'mp3'
+  if (contentType.includes('wav')) return 'wav'
+  return 'bin'
+}
+
+function parseDataUrl(dataUrl: string) {
+  const matched = dataUrl.match(/^data:([^;,]+)?(;base64)?,(.*)$/s)
+  if (!matched) throw new Error('素材不是有效的 data URL')
+  const contentType = matched[1] || 'application/octet-stream'
+  const isBase64 = Boolean(matched[2])
+  const payload = matched[3] ?? ''
+  const bytes = isBase64 ? Buffer.from(payload, 'base64') : Buffer.from(decodeURIComponent(payload))
+  if (!bytes.length) throw new Error('素材内容为空')
+  return { bytes, contentType }
 }
 
 async function callImageSkillApi(init: RequestInit) {
@@ -1794,6 +1882,31 @@ app.get('/api/admin/generated-assets', async () => ({
   data: generatedAssets,
 }))
 
+app.post('/api/admin/plugin-assets', async (request, reply) => {
+  const user = getRequestUser(request)
+  if (!user) return unauthorized(reply)
+
+  const parsed = pluginAssetUploadSchema.safeParse(request.body)
+  if (!parsed.success) return reply.status(400).send({ error: '插件素材参数不完整', detail: parsed.error.flatten() })
+
+  try {
+    const { bytes, contentType } = parseDataUrl(parsed.data.dataUrl)
+    const ext = extensionForContentType(parsed.data.type ?? contentType, parsed.data.name)
+    const url = await uploadToMinio(`moyuan/plugin-assets/${user.id}/${randomUUID()}.${ext}`, bytes, parsed.data.type ?? contentType)
+    if (!url) return reply.status(503).send({ error: '素材归档服务未配置，请管理员配置 MinIO' })
+    return {
+      data: {
+        name: parsed.data.name,
+        size: bytes.byteLength,
+        type: parsed.data.type ?? contentType,
+        url,
+      },
+    }
+  } catch (error) {
+    return reply.status(400).send({ error: error instanceof Error ? error.message : '插件素材上传失败' })
+  }
+})
+
 app.get('/api/admin/client-logs', async (request) => {
   const query = z
     .object({
@@ -1823,7 +1936,7 @@ app.post('/api/admin/client-logs', async (request, reply) => {
   if (!parsed.success) return reply.status(400).send({ error: '客户端日志参数不完整', detail: parsed.error.flatten() })
 
   const log = appendClientLog(user, parsed.data, request)
-  await persistStoredConfig()
+  schedulePersistStoredConfig()
   return { data: { id: log.id } }
 })
 
@@ -1922,7 +2035,6 @@ app.post('/api/admin/auth/login', async (request, reply) => {
 app.get('/api/admin/me', async (request, reply) => {
   const user = getRequestUser(request)
   if (!user) return unauthorized(reply)
-  await persistStoredConfig()
   return { data: { user: sanitizeUser(user) } }
 })
 

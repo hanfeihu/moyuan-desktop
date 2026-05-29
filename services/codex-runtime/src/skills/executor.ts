@@ -178,6 +178,7 @@ async function runVideoGenerationTool({ record, prompt, toolCall, options, skill
         type: 'video',
         title: '生成视频',
         url: generatedVideo.url,
+        taskItemId: itemId,
         metadata: { duration: generatedVideo.duration, model: generatedVideo.model, prompt: generatedVideo.prompt, ratio: generatedVideo.ratio, resolution: generatedVideo.resolution, usageTokens: generatedVideo.usageTokens },
         createdAt: generatedVideo.createdAt,
       },

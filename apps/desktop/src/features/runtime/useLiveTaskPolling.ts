@@ -21,12 +21,14 @@ function isLiveTask(task: CodexTask) {
 
 export function useLiveTaskPolling({
   authState,
+  onTaskMissing,
   onRuntimeState,
   onTaskSnapshot,
   onUnwatchTask,
   watchedTaskIdsKey,
 }: {
   authState: string
+  onTaskMissing: (taskId: string) => void
   onRuntimeState: (state: RuntimeState) => void
   onTaskSnapshot: (task: CodexTask) => void
   onUnwatchTask: (taskId: string) => void
@@ -57,6 +59,12 @@ export function useLiveTaskPolling({
       } catch (error) {
         if (cancelled) return
         logClientEvent('task.poll.failed', errorLogDetails(error, { reason, taskId }), 'warn')
+        const message = error instanceof Error ? error.message : ''
+        if (message.includes('任务不存在') || message.includes('Runtime 返回 404')) {
+          onTaskMissing(taskId)
+          onUnwatchTask(taskId)
+          return
+        }
         try {
           await checkRuntimeHealth()
           if (cancelled) return
@@ -91,5 +99,5 @@ export function useLiveTaskPolling({
       window.clearInterval(pollTimer)
       logClientEvent('task.poll.live.stop', { taskIds }, 'debug')
     }
-  }, [authState, onRuntimeState, onTaskSnapshot, onUnwatchTask, watchedTaskIdsKey])
+  }, [authState, onRuntimeState, onTaskMissing, onTaskSnapshot, onUnwatchTask, watchedTaskIdsKey])
 }

@@ -4,6 +4,7 @@ import {
   PageContainer,
   ProCard,
   ProForm,
+  ProFormDigit,
   ProFormList,
   ProFormSelect,
   ProFormSwitch,
@@ -33,7 +34,18 @@ const fieldTypeOptions = [
   { label: '开关', value: 'boolean' },
   { label: '图片上传', value: 'image' },
   { label: '视频上传', value: 'video' },
+  { label: '音频上传', value: 'audio' },
   { label: '文件上传', value: 'file' },
+]
+
+const toolOptions = [
+  { label: '图片生成', value: 'image_generation' },
+  { label: '视频生成', value: 'video_generation' },
+]
+
+const triggerPolicyOptions = [
+  { label: '由 Codex 判断', value: 'manual' },
+  { label: '工具调用前拦截', value: 'before_tool' },
 ]
 
 function statusTag(plugin: PluginDefinition) {
@@ -68,6 +80,8 @@ function formValues(plugin?: PluginDefinition) {
     name: plugin?.name ?? '',
     permissions: listText(plugin?.permissions ?? []),
     quotaType: plugin?.quotaType ?? 'task',
+    targetTools: plugin?.targetTools ?? [],
+    triggerPolicy: plugin?.triggerPolicy ?? (plugin?.targetTools?.length ? 'before_tool' : 'manual'),
     triggerHints: listText(plugin?.triggerHints ?? []),
   }
 }
@@ -138,6 +152,17 @@ export default function PluginsPage() {
             },
             { title: '状态', dataIndex: 'status', width: 100, render: (_, row) => statusTag(row) },
             { title: '交互', dataIndex: 'interactionMode', width: 120, renderText: (value) => modeText(value as PluginDefinition['interactionMode']) },
+            {
+              title: '关联工具',
+              dataIndex: 'targetTools',
+              render: (_, row) => (
+                <Space wrap>
+                  {(row.targetTools ?? []).slice(0, 4).map((tool) => (
+                    <Tag color={row.triggerPolicy === 'before_tool' ? 'geekblue' : undefined} key={tool}>{tool}</Tag>
+                  ))}
+                </Space>
+              ),
+            },
             {
               title: '表单字段',
               dataIndex: 'inputFields',
@@ -236,6 +261,22 @@ export default function PluginsPage() {
           />
           <ProFormSwitch colProps={{ md: 8, xs: 24 }} label="启用插件" name="enabled" />
         </ProForm.Group>
+        <ProForm.Group>
+          <ProFormSelect
+            colProps={{ md: 12, xs: 24 }}
+            label="关联工具"
+            mode="tags"
+            name="targetTools"
+            options={toolOptions}
+            placeholder="选择或输入工具名，例如 video_generation"
+          />
+          <ProFormSelect
+            colProps={{ md: 12, xs: 24 }}
+            label="触发策略"
+            name="triggerPolicy"
+            options={triggerPolicyOptions}
+          />
+        </ProForm.Group>
         <ProFormTextArea label="触发词" name="triggerHints" placeholder="一行一个，例如：生成视频" />
         <ProFormTextArea label="权限说明" name="permissions" placeholder="一行一个，例如：读取用户上传素材" />
         <ProFormList
@@ -249,6 +290,7 @@ export default function PluginsPage() {
             <ProFormText colProps={{ md: 6, xs: 12 }} label="显示名称" name="label" rules={[{ required: true }]} />
             <ProFormSelect colProps={{ md: 6, xs: 12 }} label="类型" name="type" options={fieldTypeOptions} />
             <ProFormSwitch colProps={{ md: 6, xs: 12 }} label="必填" name="required" />
+            <ProFormDigit colProps={{ md: 6, xs: 12 }} fieldProps={{ precision: 0 }} label="最大文件数" max={12} min={1} name="maxFiles" />
             <ProFormTextArea colProps={{ span: 24 }} label="选项" name="optionsText" placeholder="下拉选择可填写，一行一个" />
           </ProForm.Group>
         </ProFormList>

@@ -1,12 +1,15 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { AccountUser } from '@eaw/shared'
 import { enterpriseFetch } from '../../api'
 import { authTokenStorageKey } from '../../config'
 import { errorLogDetails, logClientEvent } from '../../logger'
 import type { AuthMessageTone, AuthMode, AuthState, AuthValues } from './types'
 
-export async function loadSignedInUser(token: string) {
-  const response = await enterpriseFetch('/me', token)
+const AUTH_RESTORE_TIMEOUT_MS = 10000
+const AUTH_REFRESH_TIMEOUT_MS = 8000
+
+export async function loadSignedInUser(token: string, options: { timeoutMs?: number } = {}) {
+  const response = await enterpriseFetch('/me', token, { timeoutMs: options.timeoutMs })
   const payload = (await response.json()) as { data?: { user: AccountUser }; error?: string }
   if (!response.ok || !payload.data?.user) throw new Error(payload.error ?? '登录状态已失效')
   return payload.data.user
@@ -20,6 +23,7 @@ export function useAuth() {
   const [authBusy, setAuthBusy] = useState(false)
   const [authMessage, setAuthMessage] = useState('')
   const [authMessageTone, setAuthMessageTone] = useState<AuthMessageTone>('info')
+  const refreshUserPromiseRef = useRef<Promise<AccountUser | null> | null>(null)
 
   useEffect(() => {
     if (!authToken) {
@@ -29,7 +33,7 @@ export function useAuth() {
     }
 
     logClientEvent('auth.restore.start')
-    loadSignedInUser(authToken)
+    loadSignedInUser(authToken, { timeoutMs: AUTH_RESTORE_TIMEOUT_MS })
       .then((user) => {
         logClientEvent('auth.restore.success', { userId: user.id, status: user.status })
         setAuthUser(user)
@@ -55,15 +59,24 @@ export function useAuth() {
 
   async function refreshUser() {
     if (!authToken) return null
-    try {
-      const user = await loadSignedInUser(authToken)
-      logClientEvent('auth.refresh.success', { tokenUsed: user.tokenUsed, userId: user.id }, 'debug')
-      setAuthUser(user)
-      return user
-    } catch (error) {
-      logClientEvent('auth.refresh.failed', errorLogDetails(error), 'warn')
-      return null
-    }
+    if (refreshUserPromiseRef.current) return refreshUserPromiseRef.current
+
+    const refreshPromise = loadSignedInUser(authToken, { timeoutMs: AUTH_REFRESH_TIMEOUT_MS })
+      .then((user) => {
+        logClientEvent('auth.refresh.success', { tokenUsed: user.tokenUsed, userId: user.id }, 'debug')
+        setAuthUser(user)
+        return user
+      })
+      .catch((error) => {
+        logClientEvent('auth.refresh.failed', errorLogDetails(error), 'warn')
+        return null
+      })
+      .finally(() => {
+        refreshUserPromiseRef.current = null
+      })
+
+    refreshUserPromiseRef.current = refreshPromise
+    return refreshPromise
   }
 
   async function requestAuthCode(email: string) {

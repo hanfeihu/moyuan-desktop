@@ -3,8 +3,8 @@ import { PageContainer, ProCard, ProDescriptions, ProTable } from '@ant-design/p
 import { Button, Progress, Space, Tag, Typography } from 'antd'
 
 const releaseRows = [
-  { id: 'mac', platform: 'macOS', version: '0.1.3', status: '已发布', channel: 'GitHub Release' },
-  { id: 'win', platform: 'Windows', version: '0.1.3', status: '已发布', channel: 'GitHub Actions' },
+  { id: 'mac', platform: 'macOS', version: '0.1.25', status: '已发布', channel: '官网 / GitHub Release' },
+  { id: 'win', platform: 'Windows', version: '0.1.25', status: '已发布', channel: '官网 / GitHub Actions' },
 ]
 
 export default function RuntimePage() {
