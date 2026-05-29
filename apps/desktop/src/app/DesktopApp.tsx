@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { AuthScreen } from '../features/auth/AuthScreen'
 import { useAuth } from '../features/auth/useAuth'
+import { RechargeDialog } from '../features/billing/RechargeDialog'
 import { Composer } from '../features/chat/Composer'
 import { Transcript } from '../features/chat/Transcript'
 import { useComposerTextarea } from '../features/chat/useComposerTextarea'
@@ -26,6 +27,7 @@ export function DesktopApp() {
     authUser,
     logout: logoutAuth,
     requestAuthCode,
+    refreshUser,
     setAuthMode,
     setAuthUser,
     submitAuth,
@@ -36,6 +38,7 @@ export function DesktopApp() {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const composerRef = useRef<HTMLElement | null>(null)
   const [executionSettings, setExecutionSettings] = useState(readExecutionSettings)
+  const [rechargeOpen, setRechargeOpen] = useState(false)
   const focusComposer = () => textareaRef.current?.focus()
   const scrollApiRef = useRef({
     pinToBottom: () => {},
@@ -131,6 +134,7 @@ export function DesktopApp() {
           authUser={authUser}
           isWelcome={taskController.isWelcome}
           onLogout={handleLogout}
+          onRecharge={() => setRechargeOpen(true)}
           runtimeState={taskController.runtimeState}
           showStatusBadge={taskController.showStatusBadge}
         />
@@ -163,6 +167,7 @@ export function DesktopApp() {
           quotaNotice={taskController.quotaNotice}
           textareaRef={textareaRef}
         />
+        <RechargeDialog authToken={authToken} onClose={() => setRechargeOpen(false)} onRefreshUser={refreshUser} open={rechargeOpen} />
       </section>
     </main>
   )

@@ -67,6 +67,52 @@ export type MailServiceConfig = {
   enabled: boolean
 }
 
+export type PaymentProvider = 'zpayz'
+
+export type PaymentGatewayConfig = {
+  id: string
+  name: string
+  provider: PaymentProvider
+  gatewayUrl: string
+  pid: string
+  maskedKey: string
+  keyConfigured: boolean
+  enabled: boolean
+  supportedMethods: Array<'alipay' | 'wxpay'>
+}
+
+export type TokenPlan = {
+  id: string
+  name: string
+  description: string
+  price: number
+  tokens: number
+  enabled: boolean
+  sort: number
+  createdAt: string
+  updatedAt: string
+}
+
+export type RechargeOrder = {
+  id: string
+  userEmail: string
+  userId: string
+  userName: string
+  planId: string
+  planName: string
+  tokens: number
+  amount: number
+  provider: PaymentProvider
+  method: 'alipay' | 'wxpay'
+  status: 'pending' | 'paid' | 'failed' | 'closed'
+  outTradeNo: string
+  tradeNo?: string
+  payUrl?: string
+  createdAt: string
+  updatedAt: string
+  paidAt?: string
+}
+
 export type AccountUser = {
   id: string
   email: string

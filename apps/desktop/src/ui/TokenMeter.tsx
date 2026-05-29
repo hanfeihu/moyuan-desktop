@@ -2,7 +2,7 @@ import { Zap } from 'lucide-react'
 import type { AccountUser } from '@eaw/shared'
 import { formatTokenNumber } from '../utils/format'
 
-export function TokenMeter({ user }: { user: AccountUser }) {
+export function TokenMeter({ onClick, user }: { onClick?: () => void; user: AccountUser }) {
   const percent = user.tokenBudget > 0 ? Math.min(100, Math.round((user.tokenUsed / user.tokenBudget) * 100)) : 0
   const remaining = Math.max(0, user.tokenBudget - user.tokenUsed)
   const state = user.tokenBudget <= 0 ? 'unissued' : remaining <= 0 ? 'depleted' : 'normal'
@@ -10,7 +10,7 @@ export function TokenMeter({ user }: { user: AccountUser }) {
   const value = state === 'unissued' ? '尚未派发' : formatTokenNumber(remaining)
 
   return (
-    <div className={`token-meter ${state}`} title={`已用 ${user.tokenUsed} / ${user.tokenBudget} Token`}>
+    <button className={`token-meter ${state}`} onClick={onClick} title={`已用 ${user.tokenUsed} / ${user.tokenBudget} Token，点击充值`} type="button">
       <div className="token-meter-icon">
         <Zap size={14} />
       </div>
@@ -24,6 +24,6 @@ export function TokenMeter({ user }: { user: AccountUser }) {
       <div className="token-meter-bar">
         <i style={{ width: `${percent}%` }} />
       </div>
-    </div>
+    </button>
   )
 }

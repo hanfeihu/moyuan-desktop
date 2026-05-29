@@ -92,7 +92,7 @@ export function useTaskController({
   const shouldShowThinking = isBusy && latestVisibleItem?.role !== 'assistant'
   const remainingTokens = authUser ? authUser.tokenBudget - authUser.tokenUsed : 0
   const quotaDepleted = remainingTokens <= 0
-  const placeholder = quotaDepleted ? '等待管理员派发 Token 额度' : isBusy ? '当前任务运行中，完成后继续发送' : '让墨渊做点什么...'
+  const placeholder = quotaDepleted ? 'Token 额度不足，可先充值或联系管理员' : isBusy ? '当前任务运行中，完成后继续发送' : '让墨渊做点什么...'
   const canSubmit = !isSubmitting && !isBusy && !quotaDepleted && Boolean(prompt.trim())
   const showStatusBadge = !isWelcome && (activeTask.status !== 'completed' || runtimeState === 'offline')
 

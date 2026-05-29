@@ -9,6 +9,7 @@ export function Topbar({
   authUser,
   isWelcome,
   onLogout,
+  onRecharge,
   runtimeState,
   showStatusBadge,
 }: {
@@ -16,6 +17,7 @@ export function Topbar({
   authUser: AccountUser
   isWelcome: boolean
   onLogout: () => void
+  onRecharge: () => void
   runtimeState: RuntimeState
   showStatusBadge: boolean
 }) {
@@ -23,7 +25,7 @@ export function Topbar({
     <header className={`topbar ${isWelcome ? 'welcome' : ''}`}>
       <div className="topbar-title">{!isWelcome && <h1>{activeTask.title}</h1>}</div>
       <div className="topbar-actions">
-        <TokenMeter user={authUser} />
+        <TokenMeter onClick={onRecharge} user={authUser} />
         <div
           className={`runtime-dot ${runtimeState}`}
           title={runtimeState === 'online' ? '本地 Runtime 正常运行' : runtimeState === 'checking' ? '正在连接本地 Runtime' : '本地 Runtime 未连接'}

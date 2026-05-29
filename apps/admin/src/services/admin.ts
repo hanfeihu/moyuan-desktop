@@ -1,5 +1,5 @@
-import type { AccountUser, ClientLogRecord, Employee, EnterprisePolicy, GeneratedAssetRecord, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, VideoSkillConfig } from '@eaw/shared'
-import { defaultEmployees, defaultImageSkill, defaultMailSettings, defaultPolicy, defaultProviders, defaultVideoSkill } from '@/data/defaults'
+import type { AccountUser, ClientLogRecord, Employee, EnterprisePolicy, GeneratedAssetRecord, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, PaymentGatewayConfig, RechargeOrder, TokenPlan, VideoSkillConfig } from '@eaw/shared'
+import { defaultEmployees, defaultImageSkill, defaultMailSettings, defaultPaymentGateway, defaultPolicy, defaultProviders, defaultTokenPlans, defaultVideoSkill } from '@/data/defaults'
 
 const apiBase = '/admin-api'
 const adminTokenStorageKey = 'moyuan.admin.token'
@@ -20,6 +20,8 @@ export type AdminSnapshot = {
   policy: PolicyView
   providers: ModelProviderConfig[]
   imageSkill: ImageSkillConfig
+  paymentGateway: PaymentGatewayConfig
+  tokenPlans: TokenPlan[]
   videoSkill: VideoSkillConfig
 }
 
@@ -60,6 +62,20 @@ function normalizeProvider(provider: Partial<ModelProviderConfig>): ModelProvide
     enabled: provider.enabled ?? false,
     monthlyLimit: provider.monthlyLimit ?? 5000000,
   }
+}
+
+function normalizePaymentGateway(gateway?: Partial<PaymentGatewayConfig> | null): PaymentGatewayConfig {
+  return {
+    ...defaultPaymentGateway,
+    ...gateway,
+    keyConfigured: gateway?.keyConfigured ?? defaultPaymentGateway.keyConfigured,
+    maskedKey: gateway?.maskedKey ?? defaultPaymentGateway.maskedKey,
+    supportedMethods: gateway?.supportedMethods?.length ? gateway.supportedMethods : defaultPaymentGateway.supportedMethods,
+  }
+}
+
+function normalizeTokenPlans(plans?: TokenPlan[] | null): TokenPlan[] {
+  return (plans?.length ? plans : defaultTokenPlans).slice().sort((left, right) => left.sort - right.sort || left.price - right.price)
 }
 
 export function getAdminToken() {
@@ -151,13 +167,15 @@ export function policyText(policy: EnterprisePolicy): PolicyView {
 
 export async function loadAdminSnapshot(): Promise<AdminSnapshot> {
   try {
-    const [modelPayload, providersPayload, employeePayload, policyPayload, imageSkillPayload, videoSkillPayload] = await Promise.all([
+    const [modelPayload, providersPayload, employeePayload, policyPayload, imageSkillPayload, videoSkillPayload, paymentGatewayPayload, tokenPlansPayload] = await Promise.all([
       getJson<ModelProviderConfig>('/model-provider'),
       getJson<ModelProviderConfig[]>('/model-providers'),
       getJson<Employee[]>('/employees'),
       getJson<EnterprisePolicy>('/policy'),
       getJson<ImageSkillConfig>('/image-skill'),
       getJson<VideoSkillConfig>('/video-skill'),
+      getJson<PaymentGatewayConfig>('/payment-gateway'),
+      getJson<TokenPlan[]>('/token-plans'),
     ])
     const providers = providersPayload.data.length ? providersPayload.data.map(normalizeProvider) : [normalizeProvider(modelPayload.data)]
     const modelProvider = providers.find((item) => item.enabled) ?? normalizeProvider(modelPayload.data)
@@ -169,6 +187,8 @@ export async function loadAdminSnapshot(): Promise<AdminSnapshot> {
       providers,
       imageSkill: normalizeImageSkill(imageSkillPayload.data),
       videoSkill: normalizeVideoSkill(videoSkillPayload.data),
+      paymentGateway: normalizePaymentGateway(paymentGatewayPayload.data),
+      tokenPlans: normalizeTokenPlans(tokenPlansPayload.data),
     }
   } catch {
     return {
@@ -179,6 +199,8 @@ export async function loadAdminSnapshot(): Promise<AdminSnapshot> {
       providers: defaultProviders,
       imageSkill: defaultImageSkill,
       videoSkill: defaultVideoSkill,
+      paymentGateway: defaultPaymentGateway,
+      tokenPlans: defaultTokenPlans,
     }
   }
 }
@@ -315,6 +337,68 @@ export async function sendTestMail() {
   const payload = (await response.json()) as { data?: { sent: boolean }; error?: string }
   if (!response.ok || !payload.data?.sent) throw new Error(payload.error ?? '测试邮件发送失败')
   return payload.data
+}
+
+export async function savePaymentGateway(values: Record<string, unknown>) {
+  const response = await adminFetch('/payment-gateway', {
+    body: JSON.stringify({
+      enabled: Boolean(values.enabled),
+      gatewayUrl: values.gatewayUrl,
+      key: values.key,
+      pid: values.pid,
+      supportedMethods: values.supportedMethods,
+    }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'PUT',
+  })
+  const payload = (await response.json()) as { data?: PaymentGatewayConfig; error?: string }
+  if (!response.ok || !payload.data) throw new Error(payload.error ?? '支付网关保存失败')
+  return normalizePaymentGateway(payload.data)
+}
+
+export async function loadTokenPlans() {
+  try {
+    const payload = await getJson<TokenPlan[]>('/token-plans')
+    return normalizeTokenPlans(payload.data)
+  } catch {
+    return defaultTokenPlans
+  }
+}
+
+export async function saveTokenPlan(values: Record<string, unknown>, id?: string) {
+  const response = await adminFetch(id ? `/token-plans/${encodeURIComponent(id)}` : '/token-plans', {
+    body: JSON.stringify({
+      description: values.description,
+      enabled: Boolean(values.enabled),
+      name: values.name,
+      price: values.price,
+      sort: values.sort,
+      tokens: values.tokens,
+    }),
+    headers: { 'Content-Type': 'application/json' },
+    method: id ? 'PUT' : 'POST',
+  })
+  const payload = (await response.json()) as { data?: TokenPlan; error?: string }
+  if (!response.ok || !payload.data) throw new Error(payload.error ?? '套餐保存失败')
+  return payload.data
+}
+
+export async function deleteTokenPlan(id: string) {
+  const response = await adminFetch(`/token-plans/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+  const payload = (await response.json()) as { data?: TokenPlan[]; error?: string }
+  if (!response.ok || !payload.data) throw new Error(payload.error ?? '套餐删除失败')
+  return normalizeTokenPlans(payload.data)
+}
+
+export async function loadRechargeOrders() {
+  try {
+    const payload = await getJson<RechargeOrder[]>('/recharge-orders')
+    return payload.data
+  } catch {
+    return []
+  }
 }
 
 export async function loadUsers() {

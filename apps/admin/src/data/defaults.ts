@@ -1,4 +1,4 @@
-import { defaultVideoRatioForModel, type Employee, type ImageSkillConfig, type MailServiceConfig, type ModelProviderConfig, type VideoSkillConfig } from '@eaw/shared'
+import { defaultVideoRatioForModel, type Employee, type ImageSkillConfig, type MailServiceConfig, type ModelProviderConfig, type PaymentGatewayConfig, type TokenPlan, type VideoSkillConfig } from '@eaw/shared'
 import type { PolicyView } from '@/services/admin'
 
 export const defaultProviders: ModelProviderConfig[] = [
@@ -67,6 +67,56 @@ export const defaultMailSettings: MailServiceConfig = {
   authCodeConfigured: false,
   enabled: false,
 }
+
+export const defaultPaymentGateway: PaymentGatewayConfig = {
+  id: 'zpayz',
+  name: 'ZPAYZ 支付网关',
+  provider: 'zpayz',
+  gatewayUrl: 'https://zpayz.cn',
+  pid: '',
+  maskedKey: '未配置',
+  keyConfigured: false,
+  enabled: false,
+  supportedMethods: ['alipay', 'wxpay'],
+}
+
+const now = new Date().toISOString()
+
+export const defaultTokenPlans: TokenPlan[] = [
+  {
+    id: 'starter',
+    name: '入门包',
+    description: '适合轻量对话和少量图片生成',
+    price: 9.9,
+    tokens: 100000,
+    enabled: true,
+    sort: 10,
+    createdAt: now,
+    updatedAt: now,
+  },
+  {
+    id: 'standard',
+    name: '标准包',
+    description: '适合日常高频办公与技能调用',
+    price: 39.9,
+    tokens: 500000,
+    enabled: true,
+    sort: 20,
+    createdAt: now,
+    updatedAt: now,
+  },
+  {
+    id: 'pro',
+    name: '专业包',
+    description: '适合图片、视频等高消耗任务',
+    price: 99,
+    tokens: 1500000,
+    enabled: true,
+    sort: 30,
+    createdAt: now,
+    updatedAt: now,
+  },
+]
 
 export const defaultPolicy: PolicyView = {
   dataBoundary: '企业内网',

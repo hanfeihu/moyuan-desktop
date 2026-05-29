@@ -42,6 +42,25 @@ body {
   color: #64748b;
 }
 
+.metric-card {
+  display: grid;
+  gap: 7px;
+  min-height: 88px;
+}
+
+.metric-card span,
+.metric-card small,
+.muted-text {
+  color: #64748b;
+}
+
+.metric-card strong {
+  color: #1f2328;
+  font-size: 24px;
+  font-weight: 680;
+  line-height: 1.15;
+}
+
 .hint-tag {
   max-width: 100%;
   white-space: normal;

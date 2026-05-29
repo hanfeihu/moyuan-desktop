@@ -47,18 +47,24 @@ export function useAuth() {
   useEffect(() => {
     if (authState !== 'signed-in' || !authToken) return
 
-    const refreshUser = () => {
-      loadSignedInUser(authToken)
-        .then((user) => {
-          logClientEvent('auth.refresh.success', { tokenUsed: user.tokenUsed, userId: user.id }, 'debug')
-          setAuthUser(user)
-        })
-        .catch((error) => logClientEvent('auth.refresh.failed', errorLogDetails(error), 'warn'))
-    }
-
-    const timer = window.setInterval(refreshUser, 15000)
+    const timer = window.setInterval(() => {
+      void refreshUser()
+    }, 15000)
     return () => window.clearInterval(timer)
   }, [authState, authToken])
+
+  async function refreshUser() {
+    if (!authToken) return null
+    try {
+      const user = await loadSignedInUser(authToken)
+      logClientEvent('auth.refresh.success', { tokenUsed: user.tokenUsed, userId: user.id }, 'debug')
+      setAuthUser(user)
+      return user
+    } catch (error) {
+      logClientEvent('auth.refresh.failed', errorLogDetails(error), 'warn')
+      return null
+    }
+  }
 
   async function requestAuthCode(email: string) {
     if (!email) return false
@@ -135,6 +141,7 @@ export function useAuth() {
     authUser,
     logout,
     requestAuthCode,
+    refreshUser,
     setAuthMode,
     setAuthUser,
     submitAuth,

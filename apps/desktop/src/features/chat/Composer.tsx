@@ -71,7 +71,7 @@ export function Composer({
       {quotaDepleted || quotaNotice ? (
         <div className="composer-quota-note">
           <Zap size={13} />
-          <span>{quotaNotice || '当前账号暂无可用 Token，管理员派发额度后会自动刷新。'}</span>
+          <span>{quotaNotice || '当前账号暂无可用 Token，可点击右上角额度入口充值或联系管理员增加额度。'}</span>
         </div>
       ) : null}
       <div className="composer-toolbar">
@@ -99,7 +99,7 @@ export function Composer({
             className={`send-button ${isBusy ? 'stop' : ''}`}
             disabled={isBusy ? isCancelling : !canSubmit}
             onClick={isBusy ? onStop : onSubmit}
-            title={isBusy ? '停止本次任务' : quotaDepleted ? '等待后台派发 Token 额度' : '发送'}
+            title={isBusy ? '停止本次任务' : quotaDepleted ? 'Token 额度不足' : '发送'}
             type="button"
           >
             {isBusy ? (isCancelling ? <Loader2 size={16} className="spin" /> : <Square size={13} />) : isSubmitting ? <Loader2 size={16} className="spin" /> : <Send size={16} />}

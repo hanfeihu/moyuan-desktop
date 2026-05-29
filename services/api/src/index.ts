@@ -16,14 +16,20 @@ import type {
   ImageSkillConfig,
   MailServiceConfig,
   ModelProviderConfig,
+  PaymentGatewayConfig,
   VideoRatio,
   VideoResolution,
+  RechargeOrder,
+  TokenPlan,
   VideoSkillConfig,
 } from '@eaw/shared'
 
 const app = Fastify({ logger: true })
 
 await app.register(cors, { origin: true })
+app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_request, body, done) => {
+  done(null, Object.fromEntries(new URLSearchParams(String(body))))
+})
 
 const videoRatioOptions = ['adaptive', '16:9', '4:3', '1:1', '3:4', '9:16', '21:9'] as const satisfies readonly VideoRatio[]
 const videoResolutionOptions = ['480p', '720p', '1080p'] as const satisfies readonly VideoResolution[]
@@ -112,6 +118,28 @@ const mailConfigSchema = z.object({
   enabled: z.boolean(),
 })
 
+const paymentGatewayConfigSchema = z.object({
+  enabled: z.boolean(),
+  gatewayUrl: z.string().url(),
+  key: z.string().optional(),
+  pid: z.string().min(1),
+  supportedMethods: z.array(z.enum(['alipay', 'wxpay'])).min(1),
+})
+
+const tokenPlanSchema = z.object({
+  description: z.string().max(300).optional().default(''),
+  enabled: z.boolean(),
+  name: z.string().min(1).max(80),
+  price: z.coerce.number().positive(),
+  sort: z.coerce.number().int().min(0).default(100),
+  tokens: z.coerce.number().int().positive(),
+})
+
+const rechargeOrderSchema = z.object({
+  method: z.enum(['alipay', 'wxpay']).default('alipay'),
+  planId: z.string().min(1),
+})
+
 const sendCodeSchema = z.object({
   email: z.string().email(),
 })
@@ -157,6 +185,10 @@ type StoredAdminConfig = {
   videoSkill?: Partial<Omit<VideoSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>> & Partial<Pick<VideoSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>>
   mailAuthCode?: string
   mailSettings?: Omit<MailServiceConfig, 'maskedAuthCode' | 'authCodeConfigured'>
+  paymentGateway?: Omit<PaymentGatewayConfig, 'maskedKey' | 'keyConfigured'>
+  paymentGatewayKey?: string
+  rechargeOrders?: RechargeOrder[]
+  tokenPlans?: TokenPlan[]
   users?: AccountUser[]
   sessions?: Array<{ tokenHash: string; userId: string; createdAt: string; lastSeenAt: string }>
   videoTaskCharges?: VideoTaskCharge[]
@@ -228,6 +260,10 @@ let videoSkillApiKey = storedConfig.videoSkillApiKey ?? process.env.VOLCENGINE_A
 let videoSkill: VideoSkillConfig = buildVideoSkillConfig(storedConfig.videoSkill)
 let mailAuthCode = storedConfig.mailAuthCode ?? process.env.QQ_MAIL_AUTH_CODE ?? ''
 let mailSettings: MailServiceConfig = buildMailSettings(storedConfig.mailSettings)
+let paymentGatewayKey = storedConfig.paymentGatewayKey ?? process.env.ZPAYZ_KEY ?? ''
+let paymentGateway: PaymentGatewayConfig = buildPaymentGateway(storedConfig.paymentGateway)
+let tokenPlans: TokenPlan[] = normalizeTokenPlans(storedConfig.tokenPlans)
+let rechargeOrders: RechargeOrder[] = storedConfig.rechargeOrders ?? []
 let users: AccountUser[] = storedConfig.users ?? []
 let sessions = storedConfig.sessions ?? []
 let videoTaskCharges: VideoTaskCharge[] = storedConfig.videoTaskCharges ?? []
@@ -281,6 +317,10 @@ async function persistStoredConfig() {
         adminSessions,
         mailSettings,
         mailAuthCode,
+        paymentGateway: toStoredPaymentGateway(paymentGateway),
+        paymentGatewayKey,
+        tokenPlans,
+        rechargeOrders,
         users,
         sessions,
         videoTaskCharges,
@@ -418,6 +458,18 @@ function toStoredVideoSkillConfig(skill: VideoSkillConfig): Omit<VideoSkillConfi
   }
 }
 
+function toStoredPaymentGateway(gateway: PaymentGatewayConfig): Omit<PaymentGatewayConfig, 'maskedKey' | 'keyConfigured'> {
+  return {
+    id: gateway.id,
+    name: gateway.name,
+    provider: gateway.provider,
+    gatewayUrl: gateway.gatewayUrl,
+    pid: gateway.pid,
+    enabled: gateway.enabled,
+    supportedMethods: gateway.supportedMethods,
+  }
+}
+
 function normalizeVideoRatio(value: unknown, model?: string): VideoRatio {
   if (typeof value === 'string' && videoRatioOptions.includes(value as VideoRatio)) return value as VideoRatio
   return defaultVideoRatioForModel(model)
@@ -476,6 +528,73 @@ function buildMailSettings(stored?: Omit<MailServiceConfig, 'maskedAuthCode' | '
     authCodeConfigured,
     enabled: stored?.enabled ?? Boolean(authCodeConfigured && (stored?.username ?? process.env.MAIL_USERNAME)),
   }
+}
+
+function buildPaymentGateway(stored?: StoredAdminConfig['paymentGateway']): PaymentGatewayConfig {
+  const keyConfigured = Boolean(paymentGatewayKey)
+  return {
+    id: stored?.id ?? 'zpayz',
+    name: stored?.name ?? 'ZPAYZ 支付网关',
+    provider: 'zpayz',
+    gatewayUrl: stored?.gatewayUrl ?? process.env.ZPAYZ_GATEWAY_URL ?? 'https://zpayz.cn',
+    pid: stored?.pid ?? process.env.ZPAYZ_PID ?? '',
+    maskedKey: maskKey(paymentGatewayKey),
+    keyConfigured,
+    enabled: stored?.enabled ?? Boolean(keyConfigured && (stored?.pid ?? process.env.ZPAYZ_PID)),
+    supportedMethods: stored?.supportedMethods?.length ? stored.supportedMethods : ['alipay', 'wxpay'],
+  }
+}
+
+function defaultTokenPlans(): TokenPlan[] {
+  const now = new Date().toISOString()
+  return [
+    {
+      id: 'starter',
+      name: '入门包',
+      description: '适合轻量对话和少量图片生成',
+      price: 9.9,
+      tokens: 100000,
+      enabled: true,
+      sort: 10,
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'standard',
+      name: '标准包',
+      description: '适合日常高频办公与技能调用',
+      price: 39.9,
+      tokens: 500000,
+      enabled: true,
+      sort: 20,
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'pro',
+      name: '专业包',
+      description: '适合图片、视频等高消耗任务',
+      price: 99,
+      tokens: 1500000,
+      enabled: true,
+      sort: 30,
+      createdAt: now,
+      updatedAt: now,
+    },
+  ]
+}
+
+function normalizeTokenPlans(plans?: TokenPlan[]) {
+  const source = plans?.length ? plans : defaultTokenPlans()
+  return source
+    .map((plan, index) => ({
+      ...plan,
+      description: plan.description ?? '',
+      enabled: plan.enabled ?? true,
+      sort: typeof plan.sort === 'number' ? plan.sort : (index + 1) * 10,
+      updatedAt: plan.updatedAt ?? plan.createdAt ?? new Date().toISOString(),
+    }))
+    .sort((left, right) => left.sort - right.sort || left.price - right.price)
 }
 
 function tokenHash(token: string) {
@@ -583,6 +702,8 @@ app.addHook('preHandler', async (request, reply) => {
   if (!pathname.startsWith('/api/admin/')) return
   if (pathname.startsWith('/api/admin/admin-auth/')) return
   if (pathname.startsWith('/api/admin/auth/')) return
+  if (pathname.startsWith('/api/admin/payments/zpayz/notify')) return
+  if (pathname.startsWith('/api/admin/me/recharge')) return
   if (pathname.startsWith('/api/admin/skills/')) return
   if (pathname === '/api/admin/desktop/bootstrap') return
   if (pathname.startsWith('/api/admin/model-proxy/')) return
@@ -898,6 +1019,106 @@ function appendClientLog(user: AccountUser, payload: z.infer<typeof clientLogSch
   }
   clientLogs = [log, ...clientLogs].slice(0, 10000)
   return log
+}
+
+function md5Hex(data: string) {
+  return createHash('md5').update(data).digest('hex')
+}
+
+function paymentPublicBaseUrl(request?: { headers: Record<string, unknown> }) {
+  const configured = process.env.PUBLIC_BASE_URL || process.env.APP_PUBLIC_BASE_URL
+  if (configured) return configured.replace(/\/$/, '')
+  const host = request?.headers.host ? String(request.headers.host) : 'codex.tminos.com:18080'
+  const protocol = String(request?.headers['x-forwarded-proto'] ?? 'http')
+  return `${protocol}://${host}`.replace(/\/$/, '')
+}
+
+function zpayzSign(params: Record<string, unknown>, key: string) {
+  const query = Object.entries(params)
+    .filter(([name, value]) => name !== 'sign' && name !== 'sign_type' && value !== undefined && value !== null && String(value) !== '')
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([name, value]) => `${name}=${String(value)}`)
+    .join('&')
+  return md5Hex(`${query}${key}`)
+}
+
+function verifyZpayzPayload(payload: Record<string, unknown>) {
+  const sign = typeof payload.sign === 'string' ? payload.sign.toLowerCase() : ''
+  if (!paymentGatewayKey || !sign) return false
+  return zpayzSign(payload, paymentGatewayKey).toLowerCase() === sign
+}
+
+function zpayzPaymentUrl(params: Record<string, string>) {
+  const gateway = paymentGateway.gatewayUrl.replace(/\/$/, '')
+  return `${gateway}/submit.php?${new URLSearchParams(params).toString()}`
+}
+
+function zpayzNotifySucceeded(payload: Record<string, unknown>) {
+  const tradeStatus = String(payload.trade_status ?? payload.status ?? '').toLowerCase()
+  return tradeStatus === 'trade_success' || tradeStatus === 'success' || tradeStatus === '1'
+}
+
+function createOutTradeNo() {
+  const timestamp = new Date().toISOString().replace(/\D/g, '').slice(0, 14)
+  return `MY${timestamp}${randomInt(100000, 999999)}`
+}
+
+function createRechargeOrder(user: AccountUser, plan: TokenPlan, method: RechargeOrder['method'], request: { headers: Record<string, unknown> }) {
+  if (!paymentGateway.enabled || !paymentGateway.keyConfigured || !paymentGateway.pid || !paymentGatewayKey) {
+    throw new Error('支付网关未启用或未配置商户密钥')
+  }
+  if (!paymentGateway.supportedMethods.includes(method)) throw new Error('当前支付方式未启用')
+
+  const now = new Date().toISOString()
+  const outTradeNo = createOutTradeNo()
+  const publicBase = paymentPublicBaseUrl(request)
+  const params = {
+    money: plan.price.toFixed(2),
+    name: plan.name,
+    notify_url: `${publicBase}/admin-api/payments/zpayz/notify`,
+    out_trade_no: outTradeNo,
+    pid: paymentGateway.pid,
+    return_url: `${publicBase}/admin/`,
+    sign_type: 'MD5',
+    type: method,
+  }
+  const sign = zpayzSign(params, paymentGatewayKey)
+  const payUrl = zpayzPaymentUrl({ ...params, sign })
+  const order: RechargeOrder = {
+    id: randomUUID(),
+    userEmail: user.email,
+    userId: user.id,
+    userName: user.name,
+    planId: plan.id,
+    planName: plan.name,
+    tokens: plan.tokens,
+    amount: plan.price,
+    provider: paymentGateway.provider,
+    method,
+    status: 'pending',
+    outTradeNo,
+    payUrl,
+    createdAt: now,
+    updatedAt: now,
+  }
+  rechargeOrders = [order, ...rechargeOrders].slice(0, 5000)
+  return order
+}
+
+function completeRechargeOrder(order: RechargeOrder, tradeNo?: string) {
+  const user = users.find((item) => item.id === order.userId)
+  if (!user) throw new Error('订单用户不存在')
+  if (order.status === 'paid') return order
+
+  const now = new Date().toISOString()
+  normalizeUser(user)
+  user.tokenBudget += order.tokens
+  user.quotaUpdatedAt = now
+  order.status = 'paid'
+  order.tradeNo = tradeNo || order.tradeNo
+  order.paidAt = now
+  order.updatedAt = now
+  return order
 }
 
 function hmac(key: Buffer | string, data: string) {
@@ -1236,6 +1457,12 @@ app.get('/api/admin/video-skill', async () => ({ data: videoSkill }))
 
 app.get('/api/admin/mail-settings', async () => ({ data: mailSettings }))
 
+app.get('/api/admin/payment-gateway', async () => ({ data: paymentGateway }))
+
+app.get('/api/admin/token-plans', async () => ({ data: tokenPlans }))
+
+app.get('/api/admin/recharge-orders', async () => ({ data: rechargeOrders }))
+
 app.get('/api/admin/desktop/bootstrap', async (request, reply) => {
   const user = getRequestUser(request)
   if (!user) return unauthorized(reply)
@@ -1279,6 +1506,145 @@ app.post('/api/admin/mail-settings/test', async (_request, reply) => {
   } catch (error) {
     return reply.status(500).send({ error: error instanceof Error ? error.message : '测试邮件发送失败' })
   }
+})
+
+app.put('/api/admin/payment-gateway', async (request, reply) => {
+  const parsed = paymentGatewayConfigSchema.safeParse(request.body)
+  if (!parsed.success) {
+    return reply.status(400).send({ error: '支付网关配置不完整', detail: parsed.error.flatten() })
+  }
+
+  if (parsed.data.key?.trim()) {
+    paymentGatewayKey = parsed.data.key.trim()
+  }
+
+  if (parsed.data.enabled && !paymentGatewayKey) {
+    return reply.status(400).send({ error: '启用支付网关前，请先配置商户密钥' })
+  }
+
+  paymentGateway = {
+    id: 'zpayz',
+    name: 'ZPAYZ 支付网关',
+    provider: 'zpayz',
+    gatewayUrl: parsed.data.gatewayUrl,
+    pid: parsed.data.pid,
+    maskedKey: maskKey(paymentGatewayKey),
+    keyConfigured: Boolean(paymentGatewayKey),
+    enabled: parsed.data.enabled,
+    supportedMethods: parsed.data.supportedMethods,
+  }
+
+  await persistStoredConfig()
+  return { data: paymentGateway }
+})
+
+app.post('/api/admin/token-plans', async (request, reply) => {
+  const parsed = tokenPlanSchema.safeParse(request.body)
+  if (!parsed.success) return reply.status(400).send({ error: '套餐参数不完整', detail: parsed.error.flatten() })
+
+  const now = new Date().toISOString()
+  const plan: TokenPlan = {
+    id: randomUUID(),
+    name: parsed.data.name,
+    description: parsed.data.description,
+    price: parsed.data.price,
+    tokens: parsed.data.tokens,
+    enabled: parsed.data.enabled,
+    sort: parsed.data.sort,
+    createdAt: now,
+    updatedAt: now,
+  }
+  tokenPlans = normalizeTokenPlans([plan, ...tokenPlans])
+  await persistStoredConfig()
+  return { data: plan }
+})
+
+app.put('/api/admin/token-plans/:id', async (request, reply) => {
+  const params = z.object({ id: z.string().min(1) }).safeParse(request.params)
+  if (!params.success) return reply.status(400).send({ error: '套餐参数不正确' })
+
+  const parsed = tokenPlanSchema.safeParse(request.body)
+  if (!parsed.success) return reply.status(400).send({ error: '套餐参数不完整', detail: parsed.error.flatten() })
+
+  const index = tokenPlans.findIndex((plan) => plan.id === params.data.id)
+  if (index < 0) return reply.status(404).send({ error: '套餐不存在' })
+  const nextPlan = {
+    ...tokenPlans[index],
+    name: parsed.data.name,
+    description: parsed.data.description,
+    price: parsed.data.price,
+    tokens: parsed.data.tokens,
+    enabled: parsed.data.enabled,
+    sort: parsed.data.sort,
+    updatedAt: new Date().toISOString(),
+  }
+  tokenPlans[index] = nextPlan
+  tokenPlans = normalizeTokenPlans(tokenPlans)
+  await persistStoredConfig()
+  return { data: nextPlan }
+})
+
+app.delete('/api/admin/token-plans/:id', async (request, reply) => {
+  const params = z.object({ id: z.string().min(1) }).safeParse(request.params)
+  if (!params.success) return reply.status(400).send({ error: '套餐参数不正确' })
+  tokenPlans = tokenPlans.filter((plan) => plan.id !== params.data.id)
+  await persistStoredConfig()
+  return { data: tokenPlans }
+})
+
+app.get('/api/admin/me/recharge-plans', async (request, reply) => {
+  const user = getRequestUser(request)
+  if (!user) return unauthorized(reply)
+  return { data: tokenPlans.filter((plan) => plan.enabled) }
+})
+
+app.get('/api/admin/me/recharge-orders', async (request, reply) => {
+  const user = getRequestUser(request)
+  if (!user) return unauthorized(reply)
+  return { data: rechargeOrders.filter((order) => order.userId === user.id).slice(0, 100) }
+})
+
+app.post('/api/admin/me/recharge-orders', async (request, reply) => {
+  const user = getRequestUser(request)
+  if (!user) return unauthorized(reply)
+  const parsed = rechargeOrderSchema.safeParse(request.body)
+  if (!parsed.success) return reply.status(400).send({ error: '充值参数不完整', detail: parsed.error.flatten() })
+
+  const plan = tokenPlans.find((item) => item.id === parsed.data.planId && item.enabled)
+  if (!plan) return reply.status(404).send({ error: '套餐不存在或已下架' })
+
+  try {
+    const order = createRechargeOrder(user, plan, parsed.data.method, request)
+    await persistStoredConfig()
+    return { data: order }
+  } catch (error) {
+    return reply.status(400).send({ error: error instanceof Error ? error.message : '创建支付订单失败' })
+  }
+})
+
+app.all('/api/admin/payments/zpayz/notify', async (request, reply) => {
+  const payload = {
+    ...((request.query ?? {}) as Record<string, unknown>),
+    ...((request.body ?? {}) as Record<string, unknown>),
+  }
+  if (!verifyZpayzPayload(payload)) return reply.status(400).send('fail')
+  if (!zpayzNotifySucceeded(payload)) return reply.send('success')
+
+  const outTradeNo = String(payload.out_trade_no ?? '')
+  const order = rechargeOrders.find((item) => item.outTradeNo === outTradeNo)
+  if (!order) return reply.status(404).send('fail')
+
+  const money = Number(payload.money)
+  if (Number.isFinite(money) && Math.abs(money - order.amount) >= 0.01) {
+    order.status = 'failed'
+    order.updatedAt = new Date().toISOString()
+    await persistStoredConfig()
+    return reply.status(400).send('fail')
+  }
+
+  completeRechargeOrder(order, typeof payload.trade_no === 'string' ? payload.trade_no : undefined)
+  await persistStoredConfig()
+  return reply.send('success')
 })
 
 app.get('/api/admin/users', async () => ({ data: users.map(sanitizeUser) }))
