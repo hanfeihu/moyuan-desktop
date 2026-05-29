@@ -80,7 +80,7 @@ QQ_MAIL_AUTH_CODE=replace-with-secret
 # MinIO 资源归档。未配置时不会归档到 MinIO，但接口仍可返回上游资源。
 MINIO_ENDPOINT=http://jia.zhuzhux.com:10900
 MINIO_BUCKET=worldcup-materials
-MINIO_PUBLIC_BASE_URL=http://jia.zhuzhux.com:10900/worldcup-materials
+MINIO_PUBLIC_BASE_URL=http://codex.tminos.com:18080/media/worldcup-materials
 MINIO_ACCESS_KEY=replace-with-secret
 MINIO_SECRET_KEY=replace-with-secret
 MINIO_REGION=us-east-1

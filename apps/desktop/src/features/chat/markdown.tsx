@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useMemo, useState } from 'react'
-import { runtimeEndpoint } from '../../api'
+import { enterpriseEndpoint, runtimeEndpoint } from '../../api'
 import { errorLogDetails, logClientEvent } from '../../logger'
 
 type MarkdownBlock =
@@ -257,7 +257,24 @@ function escapeMermaidLabel(label: string) {
 
 function resolveRuntimeAssetUrl(src: string) {
   if (src.startsWith('/api/')) return runtimeEndpoint(src)
+  const normalizedMinioUrl = normalizeMinioAssetUrl(src)
+  if (normalizedMinioUrl) return normalizedMinioUrl
   return src
+}
+
+function normalizeMinioAssetUrl(src: string) {
+  try {
+    const url = new URL(src)
+    const isLegacyMinioHost =
+      (url.hostname === 'jia.zhuzhux.com' || url.hostname === '127.0.0.1' || url.hostname === 'localhost') &&
+      url.port === '10900'
+    if (!isLegacyMinioHost || !url.pathname.startsWith('/worldcup-materials/')) return undefined
+
+    const publicBase = new URL(enterpriseEndpoint('/'))
+    return `${publicBase.origin}/media${url.pathname}${url.search}${url.hash}`
+  } catch {
+    return undefined
+  }
 }
 
 function repairMarkdownForDisplay(content: string) {
