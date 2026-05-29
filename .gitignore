@@ -9,6 +9,7 @@ release
 **/src/.umi-production
 apps/desktop/.moyuan-runtime
 apps/desktop/build/icon.iconset
+services/api/data/
 src/**/*.js
 src/**/*.d.ts
 .env

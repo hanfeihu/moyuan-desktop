@@ -8,8 +8,19 @@ function visibleItems(task: CodexTask) {
     .slice(-6)
 }
 
+function compactCommandTitle(title: string) {
+  const command = title.replace(/^运行命令[:：]\s*/, '').replace(/^\/bin\/(?:zsh|bash|sh)\s+-lc\s+/, '').trim()
+  if (!command || command === title) return title
+  if (/^rg\s/.test(command)) return '搜索代码'
+  if (/^(sed|cat|nl|head|tail)\s/.test(command)) return '查看文件'
+  if (/^(ls|find|pwd)\b/.test(command)) return '查看目录'
+  if (/^(npm|pnpm|yarn)\s+(run\s+)?(typecheck|build|test)/.test(command)) return '运行验证'
+  if (/^git\s/.test(command)) return '检查代码状态'
+  return '执行命令'
+}
+
 function itemLabel(item: RuntimeTaskItem) {
-  if (item.title) return item.title
+  if (item.title) return item.type === 'command' ? compactCommandTitle(item.title) : item.title
   if (item.type === 'command') return '运行命令'
   if (item.type === 'file_change') return '修改文件'
   if (item.type === 'web_search') return '网页搜索'
@@ -42,7 +53,7 @@ function sourceIcon(type: NonNullable<CodexTask['sources']>[number]['type']) {
 function sourceTitle(source: NonNullable<CodexTask['sources']>[number]) {
   if (source.query) return source.title
   if (source.path) return source.path
-  return source.title
+  return source.type === 'tool' ? compactCommandTitle(source.title) : source.title
 }
 
 function initialPluginValues(request: RuntimePluginInputRequest) {
