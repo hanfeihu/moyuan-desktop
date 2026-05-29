@@ -263,11 +263,45 @@ function hasGeneratedAssetForSkill(record: TaskRecord, skill: ReturnType<typeof 
 
 async function failMissingSkillResult(record: TaskRecord, taskId: string, skill: ReturnType<typeof requestedSkillFromPrompt>) {
   const name = skill === 'image_generation' ? '图片生成' : skill === 'video_generation' ? '视频生成' : '技能'
+  const toolName = skill === 'image_generation' ? 'image_generation' : skill === 'video_generation' ? 'video_generation' : '结构化技能'
   await failCodexTask(
     record,
     taskId,
-    `失败诊断：${name}没有返回真实资源。Codex 大脑没有输出可执行的结构化技能调用，或者技能执行器没有拿到资产结果；本轮不能把文字“已生成”当作成功。`,
+    `失败诊断：${name}没有开始执行。Runtime 没有收到 ${toolName} 调用，所以没有创建资源任务，也没有生成链接。本轮不能把文字回复当作成品。`,
   )
+}
+
+function missingSkillRepairPrompt(skill: ReturnType<typeof requestedSkillFromPrompt>, prompt: string) {
+  const toolName = skill === 'image_generation' ? 'image_generation' : 'video_generation'
+  const assetName = skill === 'image_generation' ? '图片' : '视频'
+  return [
+    `上一轮用户明确要求生成${assetName}成品，但你没有输出可执行的 ${toolName} JSON，Runtime 因此没有创建资源任务。`,
+    `现在请修正编排：只输出一行 ${toolName} JSON，不要解释、不要道歉、不要描述“已生成”。`,
+    `用户原始需求：${prompt}`,
+  ].join('\n')
+}
+
+function queueMissingSkillRepair(record: TaskRecord, taskId: string, skill: ReturnType<typeof requestedSkillFromPrompt>, prompt: string, workspace: string, sessionId: string | undefined, options: RuntimeRunOptions) {
+  if (!skill || options.skillRepairAttempt) return false
+  setTaskLifecyclePhase(record, 'running', isRuntimeFailureContent, '修正技能编排')
+  pushEvent(record, {
+    taskId,
+    type: 'message',
+    role: 'system',
+    content: '正在重新发起资源生成调用...',
+  })
+  void saveStore()
+  setTimeout(() => {
+    void runCodex(record, missingSkillRepairPrompt(skill, prompt), workspace, record.task.sessionId ?? sessionId, {
+      ...options,
+      skillRepairAttempt: true,
+    }).catch((error: unknown) => {
+      if (record.cancelRequested) return
+      logTask(record, 'task.skill_repair.failed', error, 'error')
+      void failCodexTask(record, taskId, error instanceof Error ? error.message : String(error))
+    })
+  }, 0).unref()
+  return true
 }
 
 async function waitForFinalAssistantAfterTurn(record: TaskRecord, timeoutMs = 15000) {
@@ -1078,6 +1112,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
     await Promise.allSettled(pendingToolRuns)
     flushBufferedAssistantItems()
     if (requiredSkill && !record.awaitingPluginInput && !hasGeneratedAssetForSkill(record, requiredSkill)) {
+      if (queueMissingSkillRepair(record, taskId, requiredSkill, prompt, workspace, sessionId, options)) return
       await failMissingSkillResult(record, taskId, requiredSkill)
       return
     }
@@ -1266,6 +1301,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
       await Promise.allSettled(pendingToolRuns)
       await Promise.allSettled(pendingUsageReports)
       if (requiredSkill && !record.awaitingPluginInput && !hasGeneratedAssetForSkill(record, requiredSkill)) {
+        if (queueMissingSkillRepair(record, taskId, requiredSkill, prompt, workspace, sessionId, options)) return
         await failMissingSkillResult(record, taskId, requiredSkill)
         return
       }

@@ -36,6 +36,7 @@ export type RuntimeRunOptions = {
   enterpriseAuthToken?: string
   reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access'
+  skillRepairAttempt?: boolean
 }
 
 export type MoyuanToolCall =
