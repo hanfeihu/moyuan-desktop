@@ -67,6 +67,22 @@ body {
   line-height: 1.7;
 }
 
+.plugin-name-cell {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.plugin-name-cell strong {
+  color: #1f2328;
+  font-weight: 650;
+}
+
+.plugin-name-cell span {
+  color: #64748b;
+  line-height: 1.5;
+}
+
 .secret-input input::placeholder,
 .secret-input .ant-input::placeholder {
   color: #8b95a1;

@@ -17,6 +17,7 @@ import type {
   MailServiceConfig,
   ModelProviderConfig,
   PaymentGatewayConfig,
+  PluginDefinition,
   VideoRatio,
   VideoResolution,
   RechargeOrder,
@@ -68,6 +69,31 @@ const imageSkillConfigSchema = z.object({
   defaultSize: z.enum(['1024x1024', '1024x1536', '1536x1024']),
   enabled: z.boolean(),
   monthlyLimit: z.coerce.number().int().min(0),
+})
+
+const pluginIdParamSchema = z.object({
+  id: z.string().min(1),
+})
+
+const pluginInputFieldSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  type: z.enum(['text', 'textarea', 'select', 'number', 'boolean', 'image', 'video', 'file']),
+  required: z.boolean().optional(),
+  options: z.array(z.object({ label: z.string().min(1), value: z.string().min(1) })).optional(),
+})
+
+const pluginDefinitionSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().min(1),
+  category: z.enum(['media', 'data', 'workflow', 'developer', 'custom']),
+  handler: z.enum(['runtime', 'server', 'external']),
+  interactionMode: z.enum(['automatic', 'requires_user_input']),
+  enabled: z.boolean(),
+  triggerHints: z.array(z.string().min(1)).default([]),
+  inputFields: z.array(pluginInputFieldSchema).default([]),
+  permissions: z.array(z.string().min(1)).default([]),
+  quotaType: z.enum(['token', 'task', 'asset']),
 })
 
 const imageGenerationSchema = z.object({
@@ -183,6 +209,7 @@ type StoredAdminConfig = {
   imageSkill?: Partial<Omit<ImageSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>> & Partial<Pick<ImageSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>>
   videoSkillApiKey?: string
   videoSkill?: Partial<Omit<VideoSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>> & Partial<Pick<VideoSkillConfig, 'maskedApiKey' | 'apiKeyConfigured'>>
+  plugins?: PluginDefinition[]
   mailAuthCode?: string
   mailSettings?: Omit<MailServiceConfig, 'maskedAuthCode' | 'authCodeConfigured'>
   paymentGateway?: Omit<PaymentGatewayConfig, 'maskedKey' | 'keyConfigured'>
@@ -258,6 +285,7 @@ let imageSkillApiKey = storedConfig.imageSkillApiKey ?? process.env.IMAGE_API_KE
 let imageSkill: ImageSkillConfig = buildImageSkillConfig(storedConfig.imageSkill)
 let videoSkillApiKey = storedConfig.videoSkillApiKey ?? process.env.VOLCENGINE_ARK_API_KEY ?? ''
 let videoSkill: VideoSkillConfig = buildVideoSkillConfig(storedConfig.videoSkill)
+let plugins: PluginDefinition[] = normalizePlugins(storedConfig.plugins)
 let mailAuthCode = storedConfig.mailAuthCode ?? process.env.QQ_MAIL_AUTH_CODE ?? ''
 let mailSettings: MailServiceConfig = buildMailSettings(storedConfig.mailSettings)
 let paymentGatewayKey = storedConfig.paymentGatewayKey ?? process.env.ZPAYZ_KEY ?? ''
@@ -313,6 +341,7 @@ async function persistStoredConfig() {
         modelProviders: modelProviders.map(toStoredModelProviderConfig),
         videoSkill: toStoredVideoSkillConfig(videoSkill),
         videoSkillApiKey,
+        plugins,
         adminAuth,
         adminSessions,
         mailSettings,
@@ -339,6 +368,7 @@ function needsStoredConfigMigration(config: StoredAdminConfig) {
     !config.modelProviders ||
     !config.imageSkill ||
     !config.videoSkill ||
+    !config.plugins ||
     'maskedApiKey' in config.imageSkill ||
     'apiKeyConfigured' in config.imageSkill ||
     'maskedApiKey' in config.videoSkill ||
@@ -514,6 +544,77 @@ function buildVideoSkillConfig(stored?: StoredAdminConfig['videoSkill']): VideoS
     defaultResolution: normalizeVideoResolution(stored?.defaultResolution),
     monthlyLimit: stored?.monthlyLimit ?? 100,
   }
+}
+
+function createSlug(value: string) {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return normalized || randomUUID().slice(0, 8)
+}
+
+function normalizePlugin(plugin: Partial<PluginDefinition> & Pick<PluginDefinition, 'name'>): PluginDefinition {
+  const enabled = Boolean(plugin.enabled)
+  const ready = plugin.ready ?? true
+  return {
+    id: plugin.id ?? createSlug(plugin.name),
+    name: plugin.name,
+    description: plugin.description ?? '',
+    category: plugin.category ?? 'custom',
+    handler: plugin.handler ?? 'runtime',
+    interactionMode: plugin.interactionMode ?? 'requires_user_input',
+    enabled,
+    ready,
+    status: !ready ? 'needs_config' : enabled ? 'ready' : 'disabled',
+    triggerHints: plugin.triggerHints ?? [],
+    inputFields: plugin.inputFields ?? [],
+    permissions: plugin.permissions ?? [],
+    quotaType: plugin.quotaType ?? 'task',
+    updatedAt: plugin.updatedAt ?? new Date().toISOString(),
+  }
+}
+
+function defaultPlugins(): PluginDefinition[] {
+  return [
+    normalizePlugin({
+      id: 'interactive-video-request',
+      name: '视频生成表单',
+      description: 'Codex 需要用户补充垫图、比例、时长、清晰度等参数时，弹出可提交的交互表单。',
+      category: 'media',
+      handler: 'runtime',
+      interactionMode: 'requires_user_input',
+      enabled: false,
+      triggerHints: ['生成视频', '图生视频', '文生视频', '做短片'],
+      inputFields: [
+        { id: 'prompt', label: '视频提示词', type: 'textarea', required: true },
+        { id: 'referenceImage', label: '垫图', type: 'image' },
+        { id: 'referenceVideo', label: '参考视频', type: 'video' },
+        {
+          id: 'ratio',
+          label: '画面比例',
+          type: 'select',
+          options: videoRatioOptions.map((value) => ({ label: value, value })),
+        },
+        { id: 'duration', label: '时长', type: 'number' },
+        {
+          id: 'resolution',
+          label: '清晰度',
+          type: 'select',
+          options: videoResolutionOptions.map((value) => ({ label: value, value })),
+        },
+        { id: 'generateAudio', label: '生成音频', type: 'boolean' },
+      ],
+      permissions: ['请求用户补充参数', '读取用户上传素材', '把表单结果交回 Codex'],
+      quotaType: 'task',
+    }),
+  ]
+}
+
+function normalizePlugins(stored?: PluginDefinition[]): PluginDefinition[] {
+  const source = stored?.length ? stored : defaultPlugins()
+  return source.map((plugin) => normalizePlugin(plugin))
 }
 
 function buildMailSettings(stored?: Omit<MailServiceConfig, 'maskedAuthCode' | 'authCodeConfigured'>): MailServiceConfig {
@@ -1454,6 +1555,45 @@ app.all('/api/admin/model-proxy/*', proxyModelProvider)
 app.get('/api/admin/image-skill', async () => ({ data: imageSkill }))
 
 app.get('/api/admin/video-skill', async () => ({ data: videoSkill }))
+
+app.get('/api/admin/plugins', async () => ({ data: plugins }))
+
+app.put('/api/admin/plugins/:id', async (request, reply) => {
+  const params = pluginIdParamSchema.safeParse(request.params)
+  const parsed = pluginDefinitionSchema.safeParse(request.body)
+  if (!params.success || !parsed.success) {
+    return reply.status(400).send({ error: '插件参数不完整' })
+  }
+
+  const existing = plugins.find((item) => item.id === params.data.id)
+  if (!existing) return reply.status(404).send({ error: '插件不存在' })
+  const updated = normalizePlugin({ ...existing, ...parsed.data, id: existing.id, updatedAt: new Date().toISOString() })
+  plugins = plugins.map((item) => (item.id === updated.id ? updated : item))
+  await persistStoredConfig()
+  return { data: updated }
+})
+
+app.post('/api/admin/plugins', async (request, reply) => {
+  const parsed = pluginDefinitionSchema.safeParse(request.body)
+  if (!parsed.success) return reply.status(400).send({ error: '插件参数不完整' })
+  const plugin = normalizePlugin({ ...parsed.data, id: createSlug(parsed.data.name), updatedAt: new Date().toISOString() })
+  if (plugins.some((item) => item.id === plugin.id)) {
+    plugin.id = `${plugin.id}-${randomUUID().slice(0, 8)}`
+  }
+  plugins = [plugin, ...plugins]
+  await persistStoredConfig()
+  return { data: plugin }
+})
+
+app.delete('/api/admin/plugins/:id', async (request, reply) => {
+  const params = pluginIdParamSchema.safeParse(request.params)
+  if (!params.success) return reply.status(400).send({ error: '插件参数不完整' })
+  const nextPlugins = plugins.filter((item) => item.id !== params.data.id)
+  if (nextPlugins.length === plugins.length) return reply.status(404).send({ error: '插件不存在' })
+  plugins = nextPlugins
+  await persistStoredConfig()
+  return { data: plugins }
+})
 
 app.get('/api/admin/mail-settings', async () => ({ data: mailSettings }))
 

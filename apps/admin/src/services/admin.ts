@@ -1,4 +1,4 @@
-import type { AccountUser, ClientLogRecord, Employee, EnterprisePolicy, GeneratedAssetRecord, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, PaymentGatewayConfig, RechargeOrder, TokenPlan, VideoSkillConfig } from '@eaw/shared'
+import type { AccountUser, ClientLogRecord, Employee, EnterprisePolicy, GeneratedAssetRecord, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, PaymentGatewayConfig, PluginDefinition, RechargeOrder, TokenPlan, VideoSkillConfig } from '@eaw/shared'
 import { defaultEmployees, defaultImageSkill, defaultMailSettings, defaultPaymentGateway, defaultPolicy, defaultProviders, defaultTokenPlans, defaultVideoSkill } from '@/data/defaults'
 
 const apiBase = '/admin-api'
@@ -21,6 +21,7 @@ export type AdminSnapshot = {
   providers: ModelProviderConfig[]
   imageSkill: ImageSkillConfig
   paymentGateway: PaymentGatewayConfig
+  plugins: PluginDefinition[]
   tokenPlans: TokenPlan[]
   videoSkill: VideoSkillConfig
 }
@@ -76,6 +77,32 @@ function normalizePaymentGateway(gateway?: Partial<PaymentGatewayConfig> | null)
 
 function normalizeTokenPlans(plans?: TokenPlan[] | null): TokenPlan[] {
   return (plans?.length ? plans : defaultTokenPlans).slice().sort((left, right) => left.sort - right.sort || left.price - right.price)
+}
+
+function defaultPlugins(): PluginDefinition[] {
+  return [
+    {
+      id: 'interactive-video-request',
+      name: '视频生成表单',
+      description: 'Codex 需要用户补充垫图、比例、时长、清晰度等参数时，弹出可提交的交互表单。',
+      category: 'media',
+      handler: 'runtime',
+      interactionMode: 'requires_user_input',
+      enabled: false,
+      ready: true,
+      status: 'disabled',
+      triggerHints: ['生成视频', '图生视频', '文生视频', '做短片'],
+      inputFields: [
+        { id: 'prompt', label: '视频提示词', type: 'textarea', required: true },
+        { id: 'referenceImage', label: '垫图', type: 'image' },
+        { id: 'referenceVideo', label: '参考视频', type: 'video' },
+        { id: 'ratio', label: '画面比例', type: 'select' },
+        { id: 'duration', label: '时长', type: 'number' },
+      ],
+      permissions: ['请求用户补充参数', '读取用户上传素材', '把表单结果交回 Codex'],
+      quotaType: 'task',
+    },
+  ]
 }
 
 export function getAdminToken() {
@@ -179,14 +206,18 @@ export async function loadAdminSnapshot(): Promise<AdminSnapshot> {
     ])
     const providers = providersPayload.data.length ? providersPayload.data.map(normalizeProvider) : [normalizeProvider(modelPayload.data)]
     const modelProvider = providers.find((item) => item.enabled) ?? normalizeProvider(modelPayload.data)
+    const imageSkill = normalizeImageSkill(imageSkillPayload.data)
+    const videoSkill = normalizeVideoSkill(videoSkillPayload.data)
+    const pluginsPayload = await getJson<PluginDefinition[]>('/plugins').catch(() => ({ data: defaultPlugins() }))
     return {
       apiState: 'online',
       employees: employeePayload.data,
       modelProvider,
       policy: policyText(policyPayload.data),
       providers,
-      imageSkill: normalizeImageSkill(imageSkillPayload.data),
-      videoSkill: normalizeVideoSkill(videoSkillPayload.data),
+      imageSkill,
+      videoSkill,
+      plugins: pluginsPayload.data,
       paymentGateway: normalizePaymentGateway(paymentGatewayPayload.data),
       tokenPlans: normalizeTokenPlans(tokenPlansPayload.data),
     }
@@ -199,10 +230,62 @@ export async function loadAdminSnapshot(): Promise<AdminSnapshot> {
       providers: defaultProviders,
       imageSkill: defaultImageSkill,
       videoSkill: defaultVideoSkill,
+      plugins: defaultPlugins(),
       paymentGateway: defaultPaymentGateway,
       tokenPlans: defaultTokenPlans,
     }
   }
+}
+
+function splitLines(value: unknown) {
+  if (Array.isArray(value)) return value.map(String).map((item) => item.trim()).filter(Boolean)
+  return String(value ?? '').split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean)
+}
+
+function pluginBody(values: Record<string, unknown>) {
+  const inputFields = Array.isArray(values.inputFields)
+    ? values.inputFields.map((field) => {
+        const item = field as Record<string, unknown>
+        return {
+          id: item.id,
+          label: item.label,
+          type: item.type,
+          required: Boolean(item.required),
+          options: splitLines(item.optionsText ?? item.options).map((value) => ({ label: value, value })),
+        }
+      })
+    : []
+  return {
+    category: values.category,
+    description: values.description,
+    enabled: Boolean(values.enabled),
+    handler: values.handler,
+    inputFields,
+    interactionMode: values.interactionMode,
+    name: values.name,
+    permissions: splitLines(values.permissions),
+    quotaType: values.quotaType,
+    triggerHints: splitLines(values.triggerHints),
+  }
+}
+
+export async function savePlugin(values: Record<string, unknown>, id?: string) {
+  const response = await adminFetch(id ? `/plugins/${encodeURIComponent(id)}` : '/plugins', {
+    body: JSON.stringify(pluginBody(values)),
+    method: id ? 'PUT' : 'POST',
+  })
+  const payload = (await response.json()) as { data?: PluginDefinition; error?: string }
+  if (!response.ok || !payload.data) throw new Error(payload.error ?? '插件保存失败')
+  return payload.data
+}
+
+export async function deletePlugin(id: string) {
+  const response = await adminFetch(`/plugins/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+  const payload = (await response.json()) as { data?: PluginDefinition[]; error?: string }
+  if (!response.ok || !payload.data) throw new Error(payload.error ?? '插件删除失败')
+  return payload.data
 }
 
 export async function saveModelProvider(values: Record<string, unknown>) {

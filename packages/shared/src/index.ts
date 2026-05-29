@@ -56,6 +56,33 @@ export type ImageSkillConfig = {
   monthlyLimit: number
 }
 
+export type PluginInteractionMode = 'automatic' | 'requires_user_input'
+
+export type PluginInputField = {
+  id: string
+  label: string
+  type: 'text' | 'textarea' | 'select' | 'number' | 'boolean' | 'image' | 'video' | 'file'
+  required?: boolean
+  options?: Array<{ label: string; value: string }>
+}
+
+export type PluginDefinition = {
+  id: string
+  name: string
+  description: string
+  category: 'media' | 'data' | 'workflow' | 'developer' | 'custom'
+  handler: 'runtime' | 'server' | 'external'
+  interactionMode: PluginInteractionMode
+  enabled: boolean
+  ready: boolean
+  status: 'ready' | 'needs_config' | 'disabled'
+  triggerHints: string[]
+  inputFields: PluginInputField[]
+  permissions: string[]
+  quotaType: 'token' | 'task' | 'asset'
+  updatedAt?: string
+}
+
 export type MailServiceConfig = {
   smtpHost: string
   smtpPort: number

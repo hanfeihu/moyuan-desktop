@@ -78,10 +78,11 @@ export default function SkillsPage() {
           测试视频通道
         </Button>
       }
-      subTitle="把火山方舟 Seedance 视频生成作为墨渊大脑可调用的企业技能"
+      subTitle="配置底层图片、视频等能力的密钥、模型和额度"
       title="技能配置"
     >
       <ProCard
+        className="section-card"
         extra={
           <Space wrap>
             <Tag color={imageStatusColor}>{imageStatus}</Tag>

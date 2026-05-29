@@ -24,6 +24,7 @@ export default defineConfig({
     { path: '/dashboard', name: '总览', icon: 'DashboardOutlined', component: './dashboard' },
     { path: '/models', name: '模型与密钥', icon: 'ApiOutlined', component: './models' },
     { path: '/skills', name: '技能配置', icon: 'VideoCameraOutlined', component: './skills' },
+    { path: '/plugins', name: '插件管理', icon: 'AppstoreOutlined', component: './plugins' },
     { path: '/billing', name: '支付与套餐', icon: 'CreditCardOutlined', component: './billing' },
     { path: '/assets', name: '资源记录', icon: 'PictureOutlined', component: './assets' },
     { path: '/logs', name: '日志管理', icon: 'BugOutlined', component: './logs' },

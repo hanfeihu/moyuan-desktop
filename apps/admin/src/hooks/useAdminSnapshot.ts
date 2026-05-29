@@ -10,6 +10,7 @@ const initialSnapshot: AdminSnapshot = {
   providers: defaultProviders,
   imageSkill: defaultImageSkill,
   videoSkill: defaultVideoSkill,
+  plugins: [],
   paymentGateway: defaultPaymentGateway,
   tokenPlans: defaultTokenPlans,
 }
