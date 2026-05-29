@@ -279,7 +279,32 @@ export function useTaskController({
       promptLength: promptText.length,
       workspace: workspacePath,
     })
+    onPinToBottom()
+    const shouldResume = activeTask.id !== 'welcome' && canResumeTask(activeTask)
+    const pendingTask = shouldResume ? appendPendingTurn(activeTask, promptText, workspacePath) : buildPendingTask(promptText, workspacePath)
     setIsSubmitting(true)
+    setTasks((current) => mergeTask(current, pendingTask))
+    setActiveTaskId(pendingTask.id)
+    setPrompt('')
+
+    const failPendingTask = (message: string) => {
+      const failedTask: CodexTask = {
+        ...pendingTask,
+        status: 'failed',
+        updatedAt: nowIso(),
+        transcript: [
+          ...pendingTask.transcript,
+          {
+            role: 'system',
+            content: message,
+            timestamp: nowIso(),
+          },
+        ],
+      }
+      setTasks((current) => (shouldResume ? mergeTask(current, failedTask) : replaceTask(current, pendingTask.id, failedTask)))
+      setActiveTaskId(failedTask.id)
+    }
+
     try {
       const freshUser = await loadSignedInUser(authToken)
       currentUser = freshUser
@@ -288,27 +313,23 @@ export function useTaskController({
         logClientEvent('task.submit.quota_depleted_after_refresh', { tokenBudget: freshUser.tokenBudget, tokenUsed: freshUser.tokenUsed }, 'warn')
         setQuotaNotice('当前没有可用 Token，等待管理员在后台派发额度。')
         window.setTimeout(() => setQuotaNotice(''), 3600)
+        failPendingTask('当前没有可用 Token，等待管理员在后台派发额度。')
         setIsSubmitting(false)
         return
       }
     } catch (error) {
       logClientEvent('task.submit.preflight_failed', errorLogDetails(error, { runtimeState }), 'warn')
       setRuntimeState('offline')
+      failPendingTask(`发送前校验失败：${error instanceof Error ? error.message : '请检查后台连接'}`)
       setIsSubmitting(false)
       return
     }
 
-    onPinToBottom()
-    const shouldResume = activeTask.id !== 'welcome' && canResumeTask(activeTask)
     logClientEvent('task.submit.local_pending', {
       shouldResume,
       sourceTask: taskLogSummary(activeTask),
       workspace: workspacePath,
     })
-    const pendingTask = shouldResume ? appendPendingTurn(activeTask, promptText, workspacePath) : buildPendingTask(promptText, workspacePath)
-    setTasks((current) => mergeTask(current, pendingTask))
-    setActiveTaskId(pendingTask.id)
-    setPrompt('')
 
     try {
       const runtimeTask = await createRuntimeTask({
