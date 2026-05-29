@@ -43,6 +43,8 @@ import {
   firstString,
   isAgentMessageItem,
   isCommandExecutionItem,
+  runtimeItemFromCodexItem,
+  runtimePlanFromPayload,
   textFromContent,
   usageReportId,
 } from './codex/protocol.js'
@@ -742,6 +744,31 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
       const itemId = explicitItemId || (isAssistantNotification ? fallbackAssistantItemId || `app-assistant-${activeTurnId || taskId}` : `app-item-${record.events.length}`)
       if (isAssistantNotification && !explicitItemId) fallbackAssistantItemId = itemId
 
+      if (methodKey === 'turnplanupdated') {
+        pushEvent(record, {
+          taskId,
+          type: 'plan.updated',
+          role: 'system',
+          content: '',
+          plan: runtimePlanFromPayload(params),
+          raw: message,
+        })
+        return
+      }
+
+      if (methodKey === 'itemstarted' && item) {
+        pushEvent(record, {
+          taskId,
+          type: 'item.started',
+          role: isCommandExecutionItem(item) ? 'tool' : 'system',
+          content: '',
+          item: runtimeItemFromCodexItem(item, 'item.started'),
+          itemId,
+          raw: message,
+        })
+        return
+      }
+
       if ((methodKey.includes('agentmessage') && methodKey.includes('delta')) || (methodKey === 'itemupdated' && isAgentMessageItem(item))) {
         const delta = assistantDeltaFromParams(params) || firstString(item?.delta, item?.text, textFromContent(item?.content))
         if (!delta) return
@@ -810,6 +837,8 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
             type: 'tool',
             role: 'tool',
             content: body,
+            item: runtimeItemFromCodexItem(commandItem, 'item.completed'),
+            itemId,
             raw: { item: { id: itemId, type: 'command_execution' } },
           })
         }
@@ -821,6 +850,14 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
         setTaskLifecyclePhase(record, 'waiting_final', isRuntimeFailureContent)
         queueUsageReport(params)
         flushBufferedAssistantItems()
+        pushEvent(record, {
+          taskId,
+          type: 'turn.completed',
+          role: 'system',
+          content: '任务完成',
+          turnId: activeTurnId,
+          raw: message,
+        })
         resolveTurn?.()
         return
       }
@@ -924,6 +961,14 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
     }, 60000)
     activeTurnId = appServerTurnId(turnResult) ?? ''
     logTask(record, 'codex.turn.started', { turnId: activeTurnId })
+    pushEvent(record, {
+      taskId,
+      type: 'turn.started',
+      role: 'system',
+      content: '',
+      turnId: activeTurnId,
+      raw: turnResult,
+    })
     await turnFinished
     await Promise.allSettled(pendingUsageReports)
     await Promise.allSettled(pendingToolRuns)

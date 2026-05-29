@@ -3,6 +3,7 @@ import type { RefObject } from 'react'
 import type { CodexTask } from '@eaw/shared'
 import { messageLabel, type TranscriptItem } from '../../tasks'
 import { formatElapsed } from '../../utils/format'
+import { TaskProgressCard } from './TaskProgressCard'
 import { TranscriptMessage } from './TranscriptMessage'
 
 export function Transcript({
@@ -32,6 +33,7 @@ export function Transcript({
         const isLatestAssistant = item.role === 'assistant' && index === visibleTranscript.length - 1 && activeTask.status === 'running'
         return <TranscriptMessage item={item} key={`${activeTask.id}-${item.itemId ?? `${index}-${item.role}`}`} label={messageLabel(item.role)} streaming={isLatestAssistant} />
       })}
+      <TaskProgressCard task={activeTask} />
       {shouldShowThinking && (
         <article className="message assistant pending">
           <div className="message-label">

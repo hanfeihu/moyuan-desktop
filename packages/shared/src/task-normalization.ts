@@ -1,6 +1,7 @@
-import type { CodexTask } from './index.js'
+import type { CodexTask, CodexTaskEvent, RuntimeTaskItem, RuntimeTaskOutput, RuntimeTurn } from './index.js'
 
 export type CodexTranscriptItem = CodexTask['transcript'][number]
+export type StructuredTaskEvent = Pick<CodexTaskEvent, 'approval' | 'item' | 'output' | 'plan' | 'pluginRequest' | 'raw' | 'timestamp' | 'turnId' | 'type'>
 
 function sharedPrefixSuffixLength(left: string, right: string) {
   const maxLength = Math.min(left.length, right.length)
@@ -146,4 +147,220 @@ export function friendlyRuntimeMessage(content: string) {
     return '本轮执行连接中断，已结束，可以重新发送。'
   }
   return content.replace(/%!s\(int64=(\d+)\)/g, '$1')
+}
+
+export function applyTaskStructureEvent(task: CodexTask, event: StructuredTaskEvent) {
+  ensureStructuredTask(task)
+  const timestamp = event.timestamp
+  const raw = event.raw && typeof event.raw === 'object' ? (event.raw as Record<string, unknown>) : undefined
+  const rawParams = raw?.params && typeof raw.params === 'object' ? (raw.params as Record<string, unknown>) : raw
+  const rawItem = rawParams?.item && typeof rawParams.item === 'object' ? (rawParams.item as Record<string, unknown>) : undefined
+  const turnId = event.turnId ?? firstStructuredString(rawParams?.turnId, rawParams?.turn_id, rawParams?.turn && typeof rawParams.turn === 'object' ? (rawParams.turn as { id?: unknown }).id : undefined)
+
+  if (event.type === 'turn.started' || event.type === 'turn.completed' || event.type === 'turn.failed') {
+    const explicitTurnId = turnId || firstStructuredString(rawParams?.id)
+    if (explicitTurnId) {
+      upsertTurn(task, {
+        id: explicitTurnId,
+        status: event.type === 'turn.started' ? 'in_progress' : event.type === 'turn.failed' ? 'failed' : 'completed',
+        startedAt: event.type === 'turn.started' ? timestamp : undefined,
+        completedAt: event.type === 'turn.started' ? undefined : timestamp,
+        error: event.type === 'turn.failed' ? eventText(event) : undefined,
+      })
+    }
+  }
+
+  if (event.plan?.length) {
+    task.plan = event.plan
+    if (turnId) {
+      const turn = upsertTurn(task, { id: turnId, status: 'in_progress' })
+      turn.plan = event.plan
+    }
+  }
+
+  const item = event.item ?? structuredItemFromRaw(rawItem, event)
+  if (item) {
+    upsertItem(task, {
+      ...item,
+      turnId: item.turnId ?? turnId,
+      startedAt: item.startedAt ?? (event.type === 'item.started' ? timestamp : undefined),
+      completedAt: item.completedAt ?? (event.type === 'item.completed' ? timestamp : undefined),
+    })
+  }
+
+  if (event.approval) {
+    task.approvals = upsertById(task.approvals ?? [], event.approval)
+  }
+
+  if (event.pluginRequest) {
+    task.pluginRequests = upsertById(task.pluginRequests ?? [], event.pluginRequest)
+  }
+
+  const output = event.output ?? outputFromStructuredItem(item, timestamp)
+  if (output) {
+    task.outputs = upsertById(task.outputs ?? [], output)
+  }
+}
+
+function ensureStructuredTask(task: CodexTask) {
+  task.items ??= []
+  task.outputs ??= []
+  task.approvals ??= []
+  task.pluginRequests ??= []
+  task.turns ??= []
+}
+
+function upsertTurn(task: CodexTask, next: RuntimeTurn) {
+  task.turns ??= []
+  const index = task.turns.findIndex((turn) => turn.id === next.id)
+  if (index >= 0) {
+    task.turns[index] = {
+      ...task.turns[index],
+      ...next,
+      startedAt: task.turns[index].startedAt ?? next.startedAt,
+      completedAt: next.completedAt ?? task.turns[index].completedAt,
+    }
+    return task.turns[index]
+  }
+  task.turns.push(next)
+  return next
+}
+
+function upsertItem(task: CodexTask, next: RuntimeTaskItem) {
+  task.items ??= []
+  const index = task.items.findIndex((item) => item.id === next.id)
+  if (index >= 0) {
+    task.items[index] = {
+      ...task.items[index],
+      ...next,
+      metadata: { ...(task.items[index].metadata ?? {}), ...(next.metadata ?? {}) },
+      startedAt: task.items[index].startedAt ?? next.startedAt,
+      completedAt: next.completedAt ?? task.items[index].completedAt,
+    }
+    return task.items[index]
+  }
+  task.items.push(next)
+  return next
+}
+
+function upsertById<T extends { id: string }>(items: T[], next: T) {
+  const index = items.findIndex((item) => item.id === next.id)
+  if (index < 0) return [next, ...items]
+  return items.map((item) => (item.id === next.id ? { ...item, ...next } : item))
+}
+
+function structuredItemFromRaw(rawItem: Record<string, unknown> | undefined, event: StructuredTaskEvent): RuntimeTaskItem | undefined {
+  if (!rawItem) return event.item
+  const rawType = normalizeStructuredType(rawItem.type)
+  const id = firstStructuredString(rawItem.id, rawItem.itemId, rawItem.item_id, event.item?.id)
+  if (!id) return undefined
+  const status = structuredStatus(firstStructuredString(rawItem.status), event.type)
+  const metadata = { rawType: rawItem.type, ...rawItem }
+
+  if (rawType === 'commandexecution') {
+    const command = firstStructuredString(rawItem.command, rawItem.commandLine, rawItem.command_line)
+    return {
+      id,
+      type: 'command',
+      title: command ? `运行命令：${command}` : '运行命令',
+      status,
+      content: firstStructuredString(rawItem.aggregatedOutput, rawItem.aggregated_output, rawItem.output),
+      metadata,
+    }
+  }
+
+  if (rawType === 'filechange') {
+    const changes = Array.isArray(rawItem.changes) ? rawItem.changes : []
+    const paths = changes.map((change) => (change && typeof change === 'object' ? firstStructuredString((change as { path?: unknown }).path) : '')).filter(Boolean)
+    return {
+      id,
+      type: 'file_change',
+      title: paths.length ? `修改文件：${paths.slice(0, 3).join(', ')}` : '修改文件',
+      status,
+      summary: paths.join('\n'),
+      metadata,
+    }
+  }
+
+  if (rawType === 'mcptoolcall' || rawType === 'dynamictoolcall') {
+    const tool = firstStructuredString(rawItem.tool, rawItem.toolName, rawItem.tool_name)
+    const server = firstStructuredString(rawItem.server, rawItem.namespace)
+    return {
+      id,
+      type: rawType === 'dynamictoolcall' ? 'plugin' : 'tool_call',
+      title: [server, tool].filter(Boolean).join(' / ') || '调用工具',
+      status,
+      metadata,
+    }
+  }
+
+  if (rawType === 'websearch') {
+    const query = firstStructuredString(rawItem.query)
+    return { id, type: 'web_search', title: query ? `网页搜索：${query}` : '网页搜索', status, metadata }
+  }
+
+  if (rawType === 'imagegeneration') {
+    return {
+      id,
+      type: 'image_generation',
+      title: '生成图片',
+      status,
+      content: firstStructuredString(rawItem.result, rawItem.savedPath, rawItem.saved_path),
+      metadata,
+    }
+  }
+
+  if (rawType === 'agentmessage') {
+    return {
+      id,
+      type: 'assistant_message',
+      title: '生成回复',
+      status,
+      content: firstStructuredString(rawItem.text, rawItem.message),
+      metadata,
+    }
+  }
+
+  if (rawType === 'reasoning') return { id, type: 'reasoning', title: '思考', status, metadata }
+  return { id, type: 'system', title: firstStructuredString(rawItem.type) || '任务事件', status, metadata }
+}
+
+function outputFromStructuredItem(item: RuntimeTaskItem | undefined, timestamp: string): RuntimeTaskOutput | undefined {
+  if (!item || item.status !== 'completed') return undefined
+  const metadata = item.metadata ?? {}
+  if (item.type === 'image_generation') {
+    const url = firstStructuredString(metadata.savedPath, metadata.saved_path, metadata.result, item.content)
+    if (!url) return undefined
+    return { id: `output-${item.id}`, type: 'image', title: '生成图片', path: url.startsWith('/') ? url : undefined, url: url.startsWith('http') ? url : undefined, taskItemId: item.id, createdAt: timestamp }
+  }
+  if (item.type === 'file_change') {
+    return { id: `output-${item.id}`, type: 'file', title: item.title, taskItemId: item.id, metadata, createdAt: timestamp }
+  }
+  return undefined
+}
+
+function structuredStatus(value: string, eventType: StructuredTaskEvent['type']): RuntimeTaskItem['status'] {
+  const normalized = normalizeStructuredType(value)
+  if (eventType === 'item.started') return 'in_progress'
+  if (normalized === 'inprogress' || normalized === 'running') return 'in_progress'
+  if (normalized === 'failed' || normalized === 'error') return 'failed'
+  if (normalized === 'declined') return 'declined'
+  if (eventType === 'item.completed') return 'completed'
+  if (normalized === 'completed' || normalized === 'succeeded') return 'completed'
+  return 'pending'
+}
+
+function firstStructuredString(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === 'string' && value) return value
+  }
+  return ''
+}
+
+function normalizeStructuredType(value: unknown) {
+  return typeof value === 'string' ? value.replace(/[_\s-]/g, '').toLowerCase() : ''
+}
+
+function eventText(event: StructuredTaskEvent) {
+  return typeof (event as { content?: unknown }).content === 'string' ? String((event as { content?: unknown }).content) : ''
 }

@@ -171,6 +171,89 @@ export type Employee = {
   manager: string
 }
 
+export type RuntimeTurnStatus = 'queued' | 'in_progress' | 'completed' | 'failed' | 'interrupted'
+
+export type RuntimeTaskItemStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'declined'
+
+export type RuntimeTaskItemType =
+  | 'user_message'
+  | 'assistant_message'
+  | 'reasoning'
+  | 'command'
+  | 'file_change'
+  | 'tool_call'
+  | 'web_search'
+  | 'image_generation'
+  | 'video_generation'
+  | 'plugin'
+  | 'approval'
+  | 'system'
+
+export type RuntimePlanStep = {
+  step: string
+  status: 'pending' | 'in_progress' | 'completed'
+}
+
+export type RuntimeTaskItem = {
+  id: string
+  type: RuntimeTaskItemType
+  title: string
+  status: RuntimeTaskItemStatus
+  turnId?: string
+  content?: string
+  summary?: string
+  metadata?: Record<string, unknown>
+  startedAt?: string
+  completedAt?: string
+}
+
+export type RuntimeTaskOutput = {
+  id: string
+  type: 'file' | 'asset' | 'link' | 'image' | 'video' | 'plugin_result'
+  title: string
+  url?: string
+  path?: string
+  mediaType?: string
+  taskItemId?: string
+  metadata?: Record<string, unknown>
+  createdAt: string
+}
+
+export type RuntimeApprovalRequest = {
+  id: string
+  type: 'command' | 'file_change' | 'permissions' | 'plugin' | 'tool'
+  status: 'pending' | 'approved' | 'declined' | 'cancelled'
+  title: string
+  reason?: string
+  turnId?: string
+  itemId?: string
+  metadata?: Record<string, unknown>
+  createdAt: string
+  resolvedAt?: string
+}
+
+export type RuntimePluginInputRequest = {
+  id: string
+  pluginId: string
+  title: string
+  status: 'pending' | 'submitted' | 'cancelled'
+  turnId?: string
+  itemId?: string
+  fields: PluginInputField[]
+  values?: Record<string, unknown>
+  createdAt: string
+  resolvedAt?: string
+}
+
+export type RuntimeTurn = {
+  id: string
+  status: RuntimeTurnStatus
+  plan?: RuntimePlanStep[]
+  startedAt?: string
+  completedAt?: string
+  error?: string
+}
+
 export type CodexTask = {
   id: string
   title: string
@@ -186,6 +269,12 @@ export type CodexTask = {
   exitCode?: number | null
   generatedImages?: ImageGenerationResult[]
   generatedVideos?: VideoGenerationResult[]
+  approvals?: RuntimeApprovalRequest[]
+  items?: RuntimeTaskItem[]
+  outputs?: RuntimeTaskOutput[]
+  plan?: RuntimePlanStep[]
+  pluginRequests?: RuntimePluginInputRequest[]
+  turns?: RuntimeTurn[]
   transcript: Array<{
     role: 'user' | 'assistant' | 'tool' | 'system'
     content: string
@@ -266,17 +355,41 @@ export type ClientLogRecord = {
 export type CodexTaskEvent = {
   id: string
   taskId: string
-  type: 'thread.started' | 'turn.started' | 'message' | 'message_delta' | 'tool' | 'error' | 'turn.completed' | 'turn.failed' | 'process.exit'
+  type:
+    | 'thread.started'
+    | 'turn.started'
+    | 'turn.completed'
+    | 'turn.failed'
+    | 'plan.updated'
+    | 'item.started'
+    | 'item.delta'
+    | 'item.completed'
+    | 'approval.requested'
+    | 'approval.resolved'
+    | 'plugin.inputRequested'
+    | 'plugin.inputSubmitted'
+    | 'output.added'
+    | 'message'
+    | 'message_delta'
+    | 'tool'
+    | 'error'
+    | 'process.exit'
   role: 'user' | 'assistant' | 'tool' | 'system'
   content: string
   timestamp: string
   seq?: number
   itemId?: string
   turnId?: string
+  approval?: RuntimeApprovalRequest
+  item?: RuntimeTaskItem
+  output?: RuntimeTaskOutput
+  plan?: RuntimePlanStep[]
+  pluginRequest?: RuntimePluginInputRequest
   raw?: unknown
 }
 
 export {
+  applyTaskStructureEvent,
   compactAssistantTranscript,
   finalAssistantContent,
   friendlyRuntimeMessage,
@@ -284,4 +397,5 @@ export {
   mergeAssistantContent,
   runtimeFailureDiagnostic,
   type CodexTranscriptItem,
+  type StructuredTaskEvent,
 } from './task-normalization.js'

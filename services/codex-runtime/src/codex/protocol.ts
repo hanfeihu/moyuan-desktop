@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { CodexTaskEvent } from '@eaw/shared'
+import type { CodexTaskEvent, RuntimePlanStep, RuntimeTaskItem } from '@eaw/shared'
 import { rawItemId } from '../tasks/events.js'
 
 export function firstString(...values: unknown[]) {
@@ -109,12 +109,14 @@ export function eventFromJson(taskId: string, payload: unknown, maxVisibleToolOu
   }
 
   if ((type === 'item.started' || type === 'item.completed') && isCommandExecutionItem(item)) {
+    const structuredItem = runtimeItemFromCodexItem(item, type)
     if (type === 'item.started') {
       return {
         taskId,
-        type: 'tool',
+        type: 'item.started',
         role: 'tool',
         content: '',
+        item: structuredItem,
         itemId,
         raw: payload,
       }
@@ -132,17 +134,33 @@ export function eventFromJson(taskId: string, payload: unknown, maxVisibleToolOu
       type: 'tool',
       role: 'tool',
       content: body,
+      item: structuredItem,
       itemId,
       raw: payload,
     }
   }
 
   if (type === 'item.started' || type === 'item.completed') {
+    const structuredItem = runtimeItemFromCodexItem(item, type)
     return {
       taskId,
-      type: 'message',
+      type: type === 'item.started' ? 'item.started' : 'item.completed',
       role: 'system',
       content: '',
+      item: structuredItem,
+      itemId: structuredItem?.id,
+      raw: payload,
+    }
+  }
+
+  if (type === 'turn.plan.updated' || type === 'plan.updated') {
+    const plan = runtimePlanFromPayload(obj)
+    return {
+      taskId,
+      type: 'plan.updated',
+      role: 'system',
+      content: '',
+      plan,
       raw: payload,
     }
   }
@@ -192,6 +210,110 @@ export function eventFromJson(taskId: string, payload: unknown, maxVisibleToolOu
     content: message,
     raw: payload,
   }
+}
+
+export function runtimeItemFromCodexItem(item: Record<string, unknown> | null, eventType = ''): RuntimeTaskItem | undefined {
+  if (!item) return undefined
+  const id = firstString(item.id, item.itemId, item.item_id)
+  if (!id) return undefined
+  const rawType = normalizedType(item.type)
+  const status = runtimeItemStatus(firstString(item.status), eventType)
+  const metadata = { ...item }
+
+  if (rawType === 'commandexecution') {
+    const command = firstString(item.command, item.commandLine, item.command_line)
+    return {
+      id,
+      type: 'command',
+      title: command ? `运行命令：${command}` : '运行命令',
+      status,
+      content: firstString(item.aggregatedOutput, item.aggregated_output, item.output),
+      metadata,
+    }
+  }
+
+  if (rawType === 'filechange') {
+    const changes = Array.isArray(item.changes) ? item.changes : []
+    const paths = changes
+      .map((change) => (change && typeof change === 'object' ? firstString((change as { path?: unknown }).path) : ''))
+      .filter(Boolean)
+    return {
+      id,
+      type: 'file_change',
+      title: paths.length ? `修改文件：${paths.slice(0, 3).join(', ')}` : '修改文件',
+      status,
+      summary: paths.join('\n'),
+      metadata,
+    }
+  }
+
+  if (rawType === 'mcptoolcall' || rawType === 'dynamictoolcall') {
+    const tool = firstString(item.tool, item.toolName, item.tool_name)
+    const server = firstString(item.server, item.namespace)
+    return {
+      id,
+      type: rawType === 'dynamictoolcall' ? 'plugin' : 'tool_call',
+      title: [server, tool].filter(Boolean).join(' / ') || '调用工具',
+      status,
+      metadata,
+    }
+  }
+
+  if (rawType === 'websearch') {
+    const query = firstString(item.query)
+    return { id, type: 'web_search', title: query ? `网页搜索：${query}` : '网页搜索', status, metadata }
+  }
+
+  if (rawType === 'imagegeneration') {
+    return {
+      id,
+      type: 'image_generation',
+      title: '生成图片',
+      status,
+      content: firstString(item.result, item.savedPath, item.saved_path),
+      metadata,
+    }
+  }
+
+  if (rawType === 'agentmessage') {
+    return { id, type: 'assistant_message', title: '生成回复', status, content: assistantTextFromItem(item), metadata }
+  }
+
+  if (rawType === 'reasoning') return { id, type: 'reasoning', title: '思考', status, metadata }
+  return { id, type: 'system', title: firstString(item.type) || '任务事件', status, metadata }
+}
+
+export function runtimePlanFromPayload(payload: Record<string, unknown>): RuntimePlanStep[] {
+  const plan = Array.isArray(payload.plan) ? payload.plan : []
+  return plan
+    .map((step) => {
+      if (!step || typeof step !== 'object') return undefined
+      const record = step as Record<string, unknown>
+      const text = firstString(record.step, record.text, record.title)
+      if (!text) return undefined
+      return {
+        step: text,
+        status: runtimePlanStatus(firstString(record.status)),
+      }
+    })
+    .filter((step): step is RuntimePlanStep => Boolean(step))
+}
+
+function runtimeItemStatus(value: string, eventType: string): RuntimeTaskItem['status'] {
+  const normalized = normalizedType(value)
+  if (eventType === 'item.started') return 'in_progress'
+  if (normalized === 'inprogress' || normalized === 'running') return 'in_progress'
+  if (normalized === 'failed' || normalized === 'error') return 'failed'
+  if (normalized === 'declined') return 'declined'
+  if (eventType === 'item.completed' || normalized === 'completed' || normalized === 'succeeded') return 'completed'
+  return 'pending'
+}
+
+function runtimePlanStatus(value: string): RuntimePlanStep['status'] {
+  const normalized = normalizedType(value)
+  if (normalized === 'inprogress' || normalized === 'running') return 'in_progress'
+  if (normalized === 'completed' || normalized === 'done') return 'completed'
+  return 'pending'
 }
 
 function findUsagePayload(payload: unknown): Record<string, unknown> | undefined {

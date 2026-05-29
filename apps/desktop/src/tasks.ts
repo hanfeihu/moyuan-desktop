@@ -1,4 +1,5 @@
 import {
+  applyTaskStructureEvent,
   compactAssistantTranscript,
   finalAssistantContent,
   isRuntimeFailureNotice,
@@ -60,9 +61,15 @@ export function normalizeTask(task: CodexTask): CodexTask {
 
   return {
     ...normalizedTask,
+    approvals: normalizedTask.approvals ?? [],
+    items: normalizedTask.items ?? [],
+    outputs: normalizedTask.outputs ?? [],
+    plan: normalizedTask.plan ?? [],
+    pluginRequests: normalizedTask.pluginRequests ?? [],
     status,
     title: title || transcript.find((item) => item.role === 'user')?.content.slice(0, 36) || '新任务',
     transcript,
+    turns: normalizedTask.turns ?? [],
   }
 }
 
@@ -346,36 +353,50 @@ function eventStatus(event: CodexTaskEvent, fallback: CodexTask['status']): Code
   if (fallback === 'completed' || fallback === 'failed') {
     return fallback
   }
+  if (event.type === 'approval.requested' || event.type === 'plugin.inputRequested') return 'needs_approval'
+  if (event.type === 'approval.resolved' || event.type === 'plugin.inputSubmitted') return 'running'
   if (event.type === 'process.exit') return event.content.includes('完成') ? 'completed' : 'failed'
   if (event.type === 'turn.completed') return 'completed'
-  if (event.type === 'turn.started' || event.type === 'thread.started' || event.type === 'tool' || event.type === 'message' || event.type === 'message_delta') return 'running'
+  if (
+    event.type === 'item.completed' ||
+    event.type === 'item.delta' ||
+    event.type === 'item.started' ||
+    event.type === 'output.added' ||
+    event.type === 'plan.updated' ||
+    event.type === 'turn.started' ||
+    event.type === 'thread.started' ||
+    event.type === 'tool' ||
+    event.type === 'message' ||
+    event.type === 'message_delta'
+  ) return 'running'
   return fallback
 }
 
 export function mergeEventIntoTask(task: CodexTask, event: CodexTaskEvent): CodexTask {
+  const taskWithStructure = structuredTaskFromEvent(task, event)
   const transcriptItem = eventToTranscript(event)
   if (!shouldShowMessage(transcriptItem)) {
-    const nextStatus = eventStatus(event, task.status)
-    const hasFailureDiagnostic = task.transcript.some((item) => item.content.startsWith('失败诊断：'))
+    const nextStatus = eventStatus(event, taskWithStructure.status)
+    const hasFailureDiagnostic = taskWithStructure.transcript.some((item) => item.content.startsWith('失败诊断：'))
     if (nextStatus === 'failed' && !hasFailureDiagnostic) {
       return {
-        ...task,
+        ...taskWithStructure,
         status: nextStatus,
         transcript: [
-          ...task.transcript,
+          ...taskWithStructure.transcript,
           {
             role: 'system',
-            content: failureSummary([...task.transcript, transcriptItem]),
+            content: failureSummary([...taskWithStructure.transcript, transcriptItem]),
             timestamp: event.timestamp,
           },
         ],
       }
     }
-    return { ...task, status: nextStatus }
+    return { ...taskWithStructure, status: nextStatus }
   }
 
   if (event.type === 'message_delta' && event.role === 'assistant') {
-    const transcript = [...task.transcript]
+    const transcript = [...taskWithStructure.transcript]
     const itemIndex = event.itemId ? transcript.findIndex((item) => item.role === 'assistant' && item.itemId === event.itemId) : -1
     const lastIndex = itemIndex >= 0 ? itemIndex : transcript.length - 1
     const lastItem = transcript[lastIndex]
@@ -388,39 +409,53 @@ export function mergeEventIntoTask(task: CodexTask, event: CodexTaskEvent): Code
       const content = mergeAssistantContent(current.content, event.content)
       transcript[lastIndex] = { ...current, content, itemId: event.itemId ?? current.itemId, timestamp: event.timestamp }
     }
-    return { ...task, status: eventStatus(event, task.status), transcript }
+    return { ...taskWithStructure, status: eventStatus(event, taskWithStructure.status), transcript }
   }
 
   if (event.type === 'message' && event.role === 'assistant' && event.itemId) {
-    const existingIndex = task.transcript.findIndex((item) => item.role === 'assistant' && item.itemId === event.itemId)
+    const existingIndex = taskWithStructure.transcript.findIndex((item) => item.role === 'assistant' && item.itemId === event.itemId)
     if (existingIndex >= 0) {
-      const current = task.transcript[existingIndex]
+      const current = taskWithStructure.transcript[existingIndex]
       return {
-        ...task,
-        status: eventStatus(event, task.status),
+        ...taskWithStructure,
+        status: eventStatus(event, taskWithStructure.status),
         transcript: [
-          ...task.transcript.slice(0, existingIndex),
+          ...taskWithStructure.transcript.slice(0, existingIndex),
           { ...current, content: finalAssistantContent(current.content, event.content), timestamp: event.timestamp },
-          ...task.transcript.slice(existingIndex + 1),
+          ...taskWithStructure.transcript.slice(existingIndex + 1),
         ],
       }
     }
   }
 
-  if (event.type === 'message' && event.role === 'assistant' && task.transcript.at(-1)?.role === 'assistant') {
-    const last = task.transcript.at(-1)
+  if (event.type === 'message' && event.role === 'assistant' && taskWithStructure.transcript.at(-1)?.role === 'assistant') {
+    const last = taskWithStructure.transcript.at(-1)
     if (last?.content === event.content || event.content.startsWith(last?.content ?? '')) {
       return {
-        ...task,
-        status: eventStatus(event, task.status),
-        transcript: [...task.transcript.slice(0, -1), { ...transcriptItem, content: finalAssistantContent(last?.content ?? '', event.content), itemId: event.itemId ?? last?.itemId }],
+        ...taskWithStructure,
+        status: eventStatus(event, taskWithStructure.status),
+        transcript: [...taskWithStructure.transcript.slice(0, -1), { ...transcriptItem, content: finalAssistantContent(last?.content ?? '', event.content), itemId: event.itemId ?? last?.itemId }],
       }
     }
   }
 
-  const seen = task.transcript.some((item) => item.timestamp === event.timestamp && item.content === event.content && item.role === event.role)
-  const transcript = seen ? task.transcript : [...task.transcript, transcriptItem]
-  return { ...task, status: eventStatus(event, task.status), transcript }
+  const seen = taskWithStructure.transcript.some((item) => item.timestamp === event.timestamp && item.content === event.content && item.role === event.role)
+  const transcript = seen ? taskWithStructure.transcript : [...taskWithStructure.transcript, transcriptItem]
+  return { ...taskWithStructure, status: eventStatus(event, taskWithStructure.status), transcript }
+}
+
+function structuredTaskFromEvent(task: CodexTask, event: CodexTaskEvent) {
+  const next: CodexTask = {
+    ...task,
+    approvals: [...(task.approvals ?? [])],
+    items: [...(task.items ?? [])],
+    outputs: [...(task.outputs ?? [])],
+    plan: task.plan ? [...task.plan] : [],
+    pluginRequests: [...(task.pluginRequests ?? [])],
+    turns: [...(task.turns ?? [])],
+  }
+  applyTaskStructureEvent(next, event)
+  return next
 }
 
 export function hasCodexActivity(task: CodexTask) {

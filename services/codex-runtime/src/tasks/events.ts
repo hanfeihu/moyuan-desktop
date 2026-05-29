@@ -1,4 +1,4 @@
-import { finalAssistantContent, mergeAssistantContent, type CodexTask, type CodexTaskEvent } from '@eaw/shared'
+import { applyTaskStructureEvent, finalAssistantContent, mergeAssistantContent, type CodexTask, type CodexTaskEvent } from '@eaw/shared'
 import { applyTaskLifecycleEvent } from './lifecycle.js'
 import type { TaskRecord } from './types.js'
 
@@ -84,9 +84,23 @@ export function createTaskEventBus({
       }
     }
 
-    if (!next.content && next.type !== 'thread.started') return
+    const structuralEventTypes = new Set<CodexTaskEvent['type']>([
+      'approval.requested',
+      'approval.resolved',
+      'item.completed',
+      'item.started',
+      'output.added',
+      'plan.updated',
+      'plugin.inputRequested',
+      'plugin.inputSubmitted',
+      'thread.started',
+      'turn.completed',
+      'turn.started',
+    ])
+    if (!next.content && !structuralEventTypes.has(next.type)) return
 
     record.events.push(next)
+    applyTaskStructureEvent(record.task, next)
     const previousPhase = record.lifecycle?.phase
     applyTaskLifecycleEvent(record, next, isRuntimeFailureContent)
     const nextPhase = record.lifecycle?.phase

@@ -927,6 +927,96 @@ button:disabled {
   color: #9aa0a6;
 }
 
+.task-progress-card {
+  width: min(560px, calc(100% - 43px));
+  margin-left: 43px;
+  border: 1px solid rgba(226, 228, 231, 0.92);
+  border-radius: 18px;
+  padding: 18px 22px 20px;
+  background: #ffffff;
+  box-shadow: 0 10px 28px rgba(21, 25, 31, 0.06);
+  color: #6f7378;
+  display: grid;
+  gap: 16px;
+  animation: message-in 180ms ease both;
+}
+
+.task-progress-section {
+  display: grid;
+  gap: 10px;
+}
+
+.task-progress-section + .task-progress-section {
+  border-top: 1px solid rgba(229, 231, 233, 0.9);
+  padding-top: 16px;
+}
+
+.task-progress-title {
+  color: #9a9da1;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.task-progress-list {
+  display: grid;
+  gap: 9px;
+}
+
+.task-progress-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: #65696e;
+  font-size: var(--chat-message-size);
+  font-family: var(--font-chat);
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.task-progress-row span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-progress-mark,
+.task-progress-output-icon,
+.task-progress-approval-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #9a9ea3;
+}
+
+.task-progress-mark.completed {
+  background: #92969a;
+  color: #ffffff;
+}
+
+.task-progress-mark.in_progress {
+  color: #8b8f94;
+}
+
+.task-progress-output-icon,
+.task-progress-approval-icon {
+  color: #262a30;
+}
+
+.task-progress-live {
+  color: #7b8086;
+}
+
+.task-progress-spin {
+  animation: spin 1s linear infinite;
+}
+
 .message.tool {
   width: min(800px, 100%);
 }
