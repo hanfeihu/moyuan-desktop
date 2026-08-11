@@ -13,11 +13,13 @@ import {
   hasLegacyInteractiveVideoPluginFields,
   hasSeedanceInteractiveVideoPluginFields,
   interactiveVideoPluginInputFields,
+  interactiveVideoPluginInputUi,
   isRuntimeFailureNotice,
   runtimeFailureDiagnostic,
   type CodexTask,
   type CodexTaskEvent,
   type PluginDefinition,
+  type RuntimeAttachment,
   type RuntimePluginInputRequest,
 } from '@eaw/shared'
 import { defaultEnterpriseApiBase as enterpriseApiBase, getModelConfig } from './config.js'
@@ -41,6 +43,14 @@ import { registerDiagnosticsRoutes } from './routes/diagnostics.js'
 import { appServerSandboxPolicy, appServerThreadId, appServerTurnId, connectAppServer, findOpenPort } from './codex/app-server.js'
 import { buildBaseInstructions, buildPromptWithContext } from './codex/context.js'
 import {
+  isRuntimeFailureContent,
+  previewLogContent,
+  requestLogSerializer,
+  taskUpdatedAtMs,
+  truncateMiddle,
+  userVisibleFailureMessage,
+} from './format.js'
+import {
   assistantDeltaFromParams,
   assistantTextFromItem,
   codexUsageFromPayload,
@@ -54,33 +64,6 @@ import {
   usageReportId,
 } from './codex/protocol.js'
 import type { TaskRecord } from './tasks/types.js'
-
-function redactRequestUrl(rawUrl = '') {
-  try {
-    const url = new URL(rawUrl, 'http://moyuan.local')
-    if (url.searchParams.has('token')) url.searchParams.set('token', '***')
-    return `${url.pathname}${url.search}${url.hash}`
-  } catch {
-    return rawUrl.replace(/([?&]token=)[^&]+/g, '$1***')
-  }
-}
-
-function requestLogSerializer(request: {
-  method?: string
-  url?: string
-  host?: string
-  hostname?: string
-  remoteAddress?: string
-  remotePort?: number
-}) {
-  return {
-    method: request.method,
-    url: redactRequestUrl(request.url),
-    host: request.host ?? request.hostname,
-    remoteAddress: request.remoteAddress,
-    remotePort: request.remotePort,
-  }
-}
 
 const app = Fastify({
   bodyLimit: 80 * 1024 * 1024,
@@ -143,6 +126,7 @@ const runtimeLogger = createRuntimeLogger(runtimeRoot)
 const workspaceMemory = new Map<string, string>()
 const mutedStderrPatterns = [
   'failed to warm featured plugin ids cache',
+  'remote installed plugin bundle sync failed',
   'startup remote plugin sync failed',
   'skipping startup remote plugin sync',
   'chatgpt authentication required to sync remote plugins',
@@ -179,47 +163,16 @@ function logTask(
   )
 }
 
-function previewLogContent(content: string, maxLength = 240) {
-  const compact = content.replace(/\s+/g, ' ').trim()
-  if (compact.length <= maxLength) return compact
-  return `${compact.slice(0, maxLength)}...`
-}
-
-function truncateMiddle(value: string, maxLength: number) {
-  if (value.length <= maxLength) return value
-  const headLength = Math.floor(maxLength * 0.65)
-  const tailLength = Math.max(0, maxLength - headLength - 80)
-  return `${value.slice(0, headLength)}\n\n... 输出过长，已截断 ${value.length - headLength - tailLength} 个字符 ...\n\n${value.slice(-tailLength)}`
-}
-
-function isRuntimeFailureContent(content: string) {
-  const text = content.trim()
-  if (!text || text.startsWith('$ ')) return false
-  return isRuntimeFailureNotice(text)
-}
-
-function userVisibleFailureMessage(message: string) {
-  if (/Codex app-server|Codex Runtime|ECONNREFUSED|本地 Codex 内核|子进程|spawn|ENOENT|连接失败|连接超时|已断开|退出/i.test(message)) {
-    return '本地 Codex 连接中断，已停止。可以重新发送；详细原因已写入本地日志。'
-  }
-  if (/OPENAI_API_KEY|invalid api key|403 Forbidden|401 Unauthorized|模型服务暂时不可用/i.test(message)) {
-    return '模型服务暂时不可用，已停止。请检查后台模型配置后重试。'
-  }
-  if (/timeout|timed out|超时|模型响应超时/i.test(message)) {
-    return '模型响应超时，已停止。可以缩小任务范围或稍后重试。'
-  }
-  return friendlyRuntimeMessage(message)
-}
-
-function taskUpdatedAtMs(task: CodexTask) {
-  return new Date(task.updatedAt ?? task.createdAt ?? 0).getTime()
-}
-
 function reconcileTaskBeforeResponse(record: TaskRecord) {
-  if (record.task.status !== 'queued' && record.task.status !== 'running') return
-  if (record.task.id.startsWith('image-') || record.task.id.startsWith('video-')) return
-  if (record.cancel || record.cancelRequested) return
-  if (Date.now() - taskUpdatedAtMs(record.task) < 8000) return
+  let changed = false
+  if (dedupePendingPluginInputs(record.task)) {
+    record.awaitingPluginInput = Boolean(record.task.pluginRequests?.some((request) => request.status === 'pending'))
+    changed = true
+  }
+  if (record.task.status !== 'queued' && record.task.status !== 'running') return changed
+  if (record.task.id.startsWith('image-') || record.task.id.startsWith('video-')) return changed
+  if (record.cancel || record.cancelRequested) return changed
+  if (Date.now() - taskUpdatedAtMs(record.task) < 8000) return changed
 
   setTaskLifecyclePhase(record, 'failed', isRuntimeFailureContent, '本地任务状态丢失')
   pushEvent(record, {
@@ -228,6 +181,7 @@ function reconcileTaskBeforeResponse(record: TaskRecord) {
     role: 'system',
     content: '失败诊断：本地任务状态丢失。Runtime 没有可管理的 Codex 子进程或连接，任务已停止，可以重新发送。',
   })
+  return true
 }
 
 function latestTurnTranscript(task: CodexTask) {
@@ -259,9 +213,37 @@ function requestedSkillFromPrompt(prompt: string) {
   return undefined
 }
 
+function attachmentContext(attachments: RuntimeAttachment[] = []) {
+  const images = attachments.filter((attachment) => attachment.type === 'image').slice(0, 16)
+  if (!images.length) return ''
+  const lines = images.map((attachment, index) => {
+    const source = attachment.fileId
+      ? `file_id: ${attachment.fileId}`
+      : attachment.storageUrl
+        ? `url: ${attachment.storageUrl}`
+        : attachment.sha256
+          ? `sha256: ${attachment.sha256.slice(0, 16)}`
+          : '已随消息附带'
+    return `图片${index + 1}: ${attachment.name} (${attachment.mimeType}, ${Math.round(attachment.size / 1024)}KB), ${source}`
+  })
+  return [
+    '用户本轮随消息附带了图片，最多可作为图生图/参考图输入使用：',
+    ...lines,
+    '如果需要调用 image_generation，可在 JSON 里带 images 数组；如果不带 images，Runtime 会自动使用本轮消息附带的图片作为输入。不要把图片只当作文字描述。',
+  ].join('\n')
+}
+
+function promptWithAttachmentContext(prompt: string, attachments: RuntimeAttachment[] = []) {
+  const context = attachmentContext(attachments)
+  if (!context) return prompt
+  return `${prompt.trim() || '请根据我发送的图片继续处理。'}\n\n${context}`
+}
+
 function hasGeneratedAssetForSkill(record: TaskRecord, skill: ReturnType<typeof requestedSkillFromPrompt>) {
   if (skill === 'image_generation') return Boolean(record.task.generatedImages?.length)
-  if (skill === 'video_generation') return Boolean(record.task.generatedVideos?.length)
+  if (skill === 'video_generation') {
+    return Boolean(record.task.generatedVideos?.length) || Boolean(record.handledSkillOutcomes?.has('video_generation'))
+  }
   return true
 }
 
@@ -309,8 +291,10 @@ function queueMissingSkillRepair(record: TaskRecord, taskId: string, skill: Retu
 }
 
 async function waitForFinalAssistantAfterTurn(record: TaskRecord, timeoutMs = 15000) {
+  if (record.awaitingPluginInput) return true
   const startedAt = Date.now()
   while (Date.now() - startedAt < timeoutMs) {
+    if (record.awaitingPluginInput) return true
     if (hasFinalAssistantReply(record, isRuntimeFailureContent)) return true
     if (record.task.status === 'failed' || record.cancelRequested) return false
     await sleep(250)
@@ -362,6 +346,8 @@ function toolPrefillValues(toolCall: MoyuanToolCall, prompt: string) {
     values.generateAudio = toolCall.generateAudio ?? true
     values.prompt = toolCall.prompt ?? textFromVideoToolContent(toolCall.content) ?? prompt
     values.ratio = toolCall.ratio
+    values.returnLastFrame = toolCall.returnLastFrame ?? true
+    values.watermark = toolCall.watermark ?? false
   }
   for (const key of Object.keys(values)) {
     if (values[key] === undefined || values[key] === '') delete values[key]
@@ -380,15 +366,23 @@ function pluginRequestFromTool(plugin: PluginDefinition, toolCall: MoyuanToolCal
 
 function shouldRequestPluginBeforeTool(record: TaskRecord, prompt: string, skills: { plugins?: PluginDefinition[] }, toolCall: MoyuanToolCall) {
   if (!pluginForTool(skills.plugins, toolCall.tool)) return false
-  if (record.awaitingPluginInput) return false
   if (prompt.includes('员工已经提交插件表单')) return false
   return true
 }
 
 function requestPluginBeforeTool(record: TaskRecord, prompt: string, skills: { plugins?: PluginDefinition[] }, toolCall: MoyuanToolCall) {
-  if (!shouldRequestPluginBeforeTool(record, prompt, skills, toolCall)) return false
   const plugin = pluginForTool(skills.plugins, toolCall.tool)
   if (!plugin) return false
+  if (record.task.pluginRequests?.some((request) => request.pluginId === plugin.id && request.status === 'pending')) {
+    record.awaitingPluginInput = true
+    setTaskLifecyclePhase(record, 'waiting_input', isRuntimeFailureContent)
+    logTask(record, 'plugin.before_tool.reused_pending', {
+      pluginId: plugin.id,
+      targetTool: toolCall.tool,
+    })
+    return true
+  }
+  if (!shouldRequestPluginBeforeTool(record, prompt, skills, toolCall)) return false
   const pluginCall = pluginRequestFromTool(plugin, toolCall, prompt)
   logTask(record, 'plugin.before_tool.requested', {
     pluginId: plugin.id,
@@ -408,9 +402,11 @@ function requestPluginInput(record: TaskRecord, plugin: PluginDefinition, call: 
     status: 'pending',
     turnId: record.currentTurnId,
     fields: plugin.inputFields,
+    inputUi: plugin.inputUi,
     values: call.values,
     createdAt: now,
   }
+  cancelOlderPendingPluginInputs(record.task, request)
 
   pushEvent(record, {
     taskId: record.task.id,
@@ -441,11 +437,89 @@ function requestPluginInput(record: TaskRecord, plugin: PluginDefinition, call: 
   record.awaitingPluginInput = true
 }
 
+function requestTime(request: RuntimePluginInputRequest) {
+  const time = new Date(request.createdAt ?? 0).getTime()
+  return Number.isFinite(time) ? time : 0
+}
+
+function cancelOlderPendingPluginInputs(task: CodexTask, nextRequest: RuntimePluginInputRequest) {
+  let changed = false
+  task.pluginRequests = (task.pluginRequests ?? []).map((request) => {
+    if (request.status !== 'pending' || request.pluginId !== nextRequest.pluginId) return request
+    changed = true
+    return { ...request, status: 'cancelled', resolvedAt: nextRequest.createdAt }
+  })
+  task.items = (task.items ?? []).map((item) => {
+    if (item.type !== 'plugin' || item.status !== 'pending') return item
+    if (item.metadata?.pluginId !== nextRequest.pluginId) return item
+    changed = true
+    return { ...item, status: 'declined', completedAt: nextRequest.createdAt }
+  })
+  task.sources = (task.sources ?? []).filter((source) => source.type !== 'plugin' || source.metadata?.pluginId !== nextRequest.pluginId)
+  return changed
+}
+
+function dedupePendingPluginInputs(task: CodexTask) {
+  const requests = task.pluginRequests ?? []
+  const pendingByPlugin = new Map<string, RuntimePluginInputRequest>()
+  for (const request of requests) {
+    if (request.status !== 'pending') continue
+    const current = pendingByPlugin.get(request.pluginId)
+    if (!current || requestTime(request) >= requestTime(current)) pendingByPlugin.set(request.pluginId, request)
+  }
+
+  let changed = false
+  task.pluginRequests = requests.map((request) => {
+    if (request.status !== 'pending') return request
+    if (pendingByPlugin.get(request.pluginId)?.id === request.id) return request
+    changed = true
+    return { ...request, status: 'cancelled', resolvedAt: request.resolvedAt ?? new Date().toISOString() }
+  })
+
+  const activePendingItemIds = new Set(task.pluginRequests.filter((request) => request.status === 'pending').map((request) => request.itemId ?? `item-${request.id}`))
+  const activePendingSourceIds = new Set(task.pluginRequests.filter((request) => request.status === 'pending').map((request) => `source-${request.id}`))
+  task.items = (task.items ?? []).map((item) => {
+    if (item.type !== 'plugin' || item.status !== 'pending') return item
+    if (activePendingItemIds.has(item.id)) return item
+    changed = true
+    return { ...item, status: 'declined', completedAt: item.completedAt ?? new Date().toISOString() }
+  })
+  task.sources = (task.sources ?? []).filter((source) => {
+    if (source.type !== 'plugin') return true
+    const pluginId = typeof source.metadata?.pluginId === 'string' ? source.metadata.pluginId : ''
+    if (!pluginId || !pendingByPlugin.has(pluginId)) return true
+    if (activePendingSourceIds.has(source.id)) return true
+    changed = true
+    return false
+  })
+
+  if (changed) task.updatedAt = new Date().toISOString()
+  return changed
+}
+
 function cloneInteractiveVideoPluginFields() {
   return interactiveVideoPluginInputFields.map((field) => ({
     ...field,
     options: field.options ? [...field.options] : undefined,
   }))
+}
+
+function normalizeInteractiveVideoPluginFields(fields: RuntimePluginInputRequest['fields']) {
+  const defaults = cloneInteractiveVideoPluginFields()
+  return defaults.map((field) => {
+    const existing = fields.find((item) => item.id === field.id)
+    if (!existing) return field
+    return {
+      ...existing,
+      label: field.label,
+      placeholder: field.placeholder,
+      helpText: field.helpText,
+      maxFiles: field.maxFiles,
+      options: field.options,
+      required: field.required,
+      type: field.type,
+    }
+  })
 }
 
 function valueArray(value: unknown) {
@@ -457,6 +531,16 @@ function valueArray(value: unknown) {
 function migrateLegacyInteractiveVideoValues(values?: Record<string, unknown>) {
   const next = { ...(values ?? {}) }
   if (!next.firstFrame && next.referenceImage) next.firstFrame = next.referenceImage
+  if (!next.prompt) {
+    const textParts = [
+      next.subjectDefinitions ? `主体定义：\n${String(next.subjectDefinitions)}` : '',
+      next.coreIdea ? `核心创意：\n${String(next.coreIdea)}` : '',
+      next.shotList ? `分镜时序：\n${String(next.shotList)}` : '',
+      next.visualStyle ? `画质与风格：\n${String(next.visualStyle)}` : '',
+      next.constraints ? `约束条件：\n${String(next.constraints)}` : '',
+    ].filter(Boolean)
+    if (textParts.length) next.prompt = textParts.join('\n\n')
+  }
 
   const referenceImages = [
     ...valueArray(next.referenceImages),
@@ -485,17 +569,43 @@ function migratePendingInteractiveVideoPluginRequests(task: CodexTask) {
   let changed = false
   const requests = task.pluginRequests?.map((request) => {
     if (request.pluginId !== 'interactive-video-request' || request.status !== 'pending') return request
-    if (hasSeedanceInteractiveVideoPluginFields(request.fields) && !hasLegacyInteractiveVideoPluginFields(request.fields)) return request
+    const currentFieldIds = request.fields.map((field) => field.id).join('|')
+    const defaultFieldIds = interactiveVideoPluginInputFields.map((field) => field.id).join('|')
+    const hasCurrentFields = currentFieldIds === defaultFieldIds && hasSeedanceInteractiveVideoPluginFields(request.fields) && !hasLegacyInteractiveVideoPluginFields(request.fields)
+    const normalizedFields = hasCurrentFields ? normalizeInteractiveVideoPluginFields(request.fields) : cloneInteractiveVideoPluginFields()
+    const fieldsChanged = JSON.stringify(normalizedFields) !== JSON.stringify(request.fields)
+    if (hasCurrentFields && request.inputUi && !fieldsChanged) return request
     changed = true
     return {
       ...request,
-      fields: cloneInteractiveVideoPluginFields(),
+      fields: normalizedFields,
+      inputUi: { ...interactiveVideoPluginInputUi, ...request.inputUi },
       values: migrateLegacyInteractiveVideoValues(request.values),
     }
   })
   if (!changed || !requests) return false
   task.pluginRequests = requests
   task.updatedAt = new Date().toISOString()
+  return true
+}
+
+function revivePendingPluginInput(task: CodexTask) {
+  dedupePendingPluginInputs(task)
+  const pendingRequest = task.pluginRequests?.find((request) => request.status === 'pending')
+  if (!pendingRequest) return false
+  if (task.status === 'needs_approval') return false
+  task.status = 'needs_approval'
+  task.exitCode = null
+  task.updatedAt = new Date().toISOString()
+  const latestNotice = [...task.transcript].reverse().find((item) => item.turnId === pendingRequest.turnId && item.role === 'system' && item.content.includes('等待你补充'))
+  if (!latestNotice) {
+    task.transcript.push({
+      role: 'system',
+      content: '视频生成表单已准备好，等待你补充参数后继续。',
+      timestamp: task.updatedAt,
+      turnId: pendingRequest.turnId,
+    })
+  }
   return true
 }
 
@@ -582,13 +692,7 @@ async function normalizePluginSubmittedValues(pluginRequest: RuntimePluginInputR
 
 function buildSeedanceContent(values: Record<string, unknown>) {
   const content: unknown[] = []
-  const textParts = [
-    values.subjectDefinitions ? `主体定义：\n${String(values.subjectDefinitions)}` : '',
-    values.prompt ? `核心创意：\n${String(values.prompt)}` : '',
-    values.shotList ? `分镜时序：\n${String(values.shotList)}` : '',
-    values.visualStyle ? `画质与风格：\n${String(values.visualStyle)}` : '',
-    values.constraints ? `约束条件：\n${String(values.constraints)}` : '',
-  ].filter(Boolean)
+  const textParts = [values.prompt ? String(values.prompt) : ''].filter(Boolean)
   if (textParts.length) content.push({ type: 'text', text: textParts.join('\n\n') })
 
   for (const [fieldId, value] of Object.entries(values)) {
@@ -636,20 +740,19 @@ async function pluginSubmissionPrompt(pluginRequest: RuntimePluginInputRequest, 
     '',
     'Seedance 2.0 编排要求：',
     '- 你需要根据表单内容组织 video_generation 工具调用；不要把表单当作最终结果。',
-    '- 多模态参考：用“参考图片N/视频N/音频N中的主体、动作、运镜、风格或音色，生成...”表述。',
-    '- 编辑视频：直接说“严格编辑视频N”，不要写“参考视频N”，未提及部分默认保持不变。',
-    '- 延长视频：直接说“向前/向后延长视频N”，保持音视频风格、主体和叙事一致。',
-    '- 主体要明确绑定素材，例如“主角@图片1”；复杂视频优先按镜头1、镜头2、镜头3组织。',
+    '- 表单字段已经贴近 Seedance 原始接口：prompt 对应 content[0].text，图片/视频/音频素材按上传顺序进入 content 数组。',
+    '- 多模态参考：用“参考图片N/视频N/音频N中的主体、动作、运镜、风格或音色，生成...”表述；也可以按用户原始 prompt 直接组织。',
+    '- 编辑视频：直接说“严格编辑视频N”，不要写“参考视频N”；延长视频直接说“向前/向后延长视频N”。',
     '- 避免无意义堆满素材；文本+音频、纯音频输入不支持，音频应与图片或视频素材组合使用。',
     '- 输出工具 JSON 时，素材数组应使用 image_url/video_url/audio_url，并按需要设置 role 为 first_frame、last_frame、reference_image、reference_video、reference_audio。',
+    '- return_last_frame 建议保持 true；这样查询任务时可拿到无水印 PNG 尾帧，后续可作为下一段视频首帧继续生成。',
     seedanceContent.length ? `建议 content：${JSON.stringify(seedanceContent)}` : '',
     '',
     `建议参数：${JSON.stringify({
       duration: normalizedValues.duration,
       generate_audio: normalizedValues.generateAudio,
       ratio: normalizedValues.ratio,
-      resolution: normalizedValues.resolution,
-      taskType: normalizedValues.taskType,
+      return_last_frame: normalizedValues.returnLastFrame,
       watermark: normalizedValues.watermark,
     })}`,
     '',
@@ -659,6 +762,50 @@ async function pluginSubmissionPrompt(pluginRequest: RuntimePluginInputRequest, 
 
 function canReuseParentTask(record: TaskRecord) {
   if (record.task.status === 'queued' || record.task.status === 'running' || record.cancel) return false
+  return true
+}
+
+function closePendingPluginInputsForNewTurn(record: TaskRecord, now: string) {
+  const pendingRequests = record.task.pluginRequests?.filter((request) => request.status === 'pending') ?? []
+  if (!pendingRequests.length) return false
+  record.task.pluginRequests = (record.task.pluginRequests ?? []).map((request) =>
+    request.status === 'pending' ? { ...request, status: 'cancelled', resolvedAt: now } : request,
+  )
+  record.task.items = (record.task.items ?? []).map((item) =>
+    item.type === 'plugin' && item.status === 'pending' ? { ...item, status: 'declined', completedAt: now } : item,
+  )
+  record.task.sources = (record.task.sources ?? []).filter((source) => source.type !== 'plugin')
+  record.awaitingPluginInput = false
+  appendTranscriptItem(record, {
+    role: 'assistant',
+    content: '好的，先不处理这个插件表单；你继续说就行，需要时我再帮你接上。',
+    timestamp: now,
+  })
+  return true
+}
+
+function deferPendingPluginInput(record: TaskRecord, requestId: string, now: string) {
+  const request = record.task.pluginRequests?.find((item) => item.id === requestId)
+  if (!request || request.status !== 'pending') return false
+  record.task.pluginRequests = (record.task.pluginRequests ?? []).map((item) =>
+    item.id === requestId ? { ...item, status: 'cancelled', resolvedAt: now } : item,
+  )
+  record.task.items = (record.task.items ?? []).map((item) =>
+    item.type === 'plugin' && item.status === 'pending' && (item.id === (request.itemId ?? `item-${request.id}`) || item.metadata?.pluginId === request.pluginId)
+      ? { ...item, status: 'declined', completedAt: now }
+      : item,
+  )
+  record.task.sources = (record.task.sources ?? []).filter((source) => source.type !== 'plugin' || source.metadata?.pluginId !== request.pluginId)
+  record.awaitingPluginInput = Boolean(record.task.pluginRequests?.some((item) => item.status === 'pending'))
+  appendTranscriptItem(record, {
+    role: 'assistant',
+    content: '好的，这个先放一放。你后面需要生成视频或补素材时再叫我就行。',
+    timestamp: now,
+  })
+  if (!record.awaitingPluginInput) {
+    setTaskLifecyclePhase(record, 'completed', isRuntimeFailureContent)
+  }
+  record.task.updatedAt = now
   return true
 }
 
@@ -724,8 +871,8 @@ async function recoverPendingVideoJobs(record: TaskRecord, options: RuntimeRunOp
     const metadata = item.metadata
     const providerTaskId = metadataString(metadata, 'providerTaskId')
     if (!providerTaskId) continue
+    const resourceTurnId = item.turnId
     const existingOutput = (record.task.outputs ?? []).some((output) => output.type === 'video' && (output.taskItemId === item.id || output.id === `video-${providerTaskId}`))
-    if (existingOutput) continue
 
     try {
       const result = await queryVideoGeneration(providerTaskId, options, {
@@ -734,6 +881,7 @@ async function recoverPendingVideoJobs(record: TaskRecord, options: RuntimeRunOp
         model: metadataString(metadata, 'model'),
         prompt: metadataString(metadata, 'prompt') ?? record.task.title,
         ratio: metadataString(metadata, 'ratio'),
+        returnLastFrame: item.metadata?.returnLastFrame === false ? false : true,
         resolution: metadataString(metadata, 'resolution'),
       })
       const now = new Date().toISOString()
@@ -744,37 +892,65 @@ async function recoverPendingVideoJobs(record: TaskRecord, options: RuntimeRunOp
           type: 'item.completed',
           role: 'system',
           content: '',
+          turnId: resourceTurnId,
           itemId: item.id,
           item: {
             ...item,
+            turnId: resourceTurnId,
             status: 'completed',
             content: '视频生成完成',
             completedAt: now,
-            metadata: { ...(item.metadata ?? {}), lastCheckedAt: now, providerTaskId, rawStatus: result.status, url: result.video.url },
+            metadata: { ...(item.metadata ?? {}), lastCheckedAt: now, providerTaskId, rawStatus: result.status, returnLastFrame: result.video.returnLastFrame, lastFrameUrl: result.video.lastFrameUrl, url: result.video.url },
           },
         })
-        pushEvent(record, {
-          taskId: record.task.id,
-          type: 'output.added',
-          role: 'system',
-          content: '',
-          output: {
-            id: `video-${result.video.id}`,
-            type: 'video',
-            title: '生成视频',
-            url: result.video.url,
-            taskItemId: item.id,
-            metadata: { duration: result.video.duration, model: result.video.model, prompt: result.video.prompt, ratio: result.video.ratio, resolution: result.video.resolution, usageTokens: result.video.usageTokens },
-            createdAt: result.video.createdAt,
-          },
-          source: {
-            id: `skill-video-${result.video.id}`,
-            type: 'skill',
-            title: '视频生成技能',
-            metadata: { model: result.video.model },
-            createdAt: result.video.createdAt,
-          },
-        })
+        if (!existingOutput) {
+          pushEvent(record, {
+            taskId: record.task.id,
+            type: 'output.added',
+            role: 'system',
+            content: '',
+            output: {
+              id: `video-${result.video.id}`,
+              type: 'video',
+              title: '生成视频',
+              turnId: resourceTurnId,
+              url: result.video.url,
+              taskItemId: item.id,
+              metadata: { billableCny: result.video.billableCny, billableProviderTokens: result.video.billableProviderTokens, costCny: result.video.costCny, deductionFactor: result.video.deductionFactor, duration: result.video.duration, model: result.video.model, prompt: result.video.prompt, ratio: result.video.ratio, rawTokens: result.video.rawTokens, resolution: result.video.resolution, returnLastFrame: result.video.returnLastFrame, lastFrameUrl: result.video.lastFrameUrl, usageTokens: result.video.usageTokens },
+              createdAt: result.video.createdAt,
+            },
+            source: {
+              id: `skill-video-${result.video.id}`,
+              type: 'skill',
+              title: '视频生成技能',
+              metadata: { model: result.video.model },
+              createdAt: result.video.createdAt,
+            },
+          })
+        }
+        if (result.video.lastFrameUrl && !(record.task.outputs ?? []).some((output) => output.id === `video-last-frame-${result.video!.id}`)) {
+          pushEvent(record, {
+            taskId: record.task.id,
+            type: 'output.added',
+            role: 'system',
+            content: '',
+            output: {
+              id: `video-last-frame-${result.video.id}`,
+              type: 'image',
+              title: '尾帧图片',
+              turnId: resourceTurnId,
+              url: result.video.lastFrameUrl,
+              taskItemId: item.id,
+              metadata: {
+                model: result.video.model,
+                prompt: result.video.prompt,
+                sourceVideoId: result.video.id,
+                usageTokens: result.video.usageTokens,
+              },
+              createdAt: result.video.createdAt,
+            },
+          })
+        }
         continue
       }
 
@@ -784,9 +960,11 @@ async function recoverPendingVideoJobs(record: TaskRecord, options: RuntimeRunOp
         type: failed ? 'item.completed' : 'item.delta',
         role: 'system',
         content: '',
+        turnId: resourceTurnId,
         itemId: item.id,
         item: {
           ...item,
+          turnId: resourceTurnId,
           status: failed ? 'failed' : 'in_progress',
           content: failed ? result.error ?? '视频生成失败' : `视频仍在生成中${result.status ? `：${result.status}` : ''}`,
           completedAt: failed ? now : undefined,
@@ -891,6 +1069,7 @@ async function loadStore() {
     const saved = JSON.parse(raw) as { tasks?: CodexTask[] }
     for (const task of saved.tasks ?? []) {
       const restored = persistedTask(task)
+      const pendingPluginRevived = revivePendingPluginInput(restored)
       migratePendingInteractiveVideoPluginRequests(restored)
       if (restored.status === 'queued' || restored.status === 'running') {
         restored.status = 'failed'
@@ -910,6 +1089,7 @@ async function loadStore() {
         nextTranscriptSeq: transcriptState.nextTranscriptSeq,
         subscribers: new Set(),
         streamItemIndexes: new Map(),
+        awaitingPluginInput: pendingPluginRevived,
       })
     }
   } catch {
@@ -1108,7 +1288,8 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
   const taskId = record.task.id
   workspace = await ensureWorkspace(workspace)
   record.task.workspace = workspace
-  const requiredSkill = requestedSkillFromPrompt(prompt)
+  const attachmentPrompt = promptWithAttachmentContext(prompt, record.currentAttachments)
+  const requiredSkill = requestedSkillFromPrompt(attachmentPrompt)
   const codexBin = resolveCodexBin()
   const { modelConfig: config, skills } = await loadEnterpriseRuntimeConfig(options.enterpriseAuthToken, options.enterpriseApiBase)
   const codexHome = await createCodexHome(config)
@@ -1121,7 +1302,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
   const diffSummary = await getGitDiff(workspace)
   const resourceContext = await recoverPendingVideoJobs(record, options)
   const baseInstructions = buildBaseInstructions(skillInstructions)
-  const promptWithContext = buildPromptWithContext(prompt, {
+  const promptWithContext = buildPromptWithContext(attachmentPrompt, {
     commandHistory: record.task.commandHistory,
     diffSummary,
     memory,
@@ -1141,7 +1322,8 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
       targetTools: plugin.targetTools ?? [],
       triggerPolicy: plugin.triggerPolicy ?? 'manual',
     })),
-    promptLength: prompt.length,
+    attachmentCount: record.currentAttachments?.length ?? 0,
+    promptLength: attachmentPrompt.length,
     providerId: config.providerId,
     reasoningEffort,
     resume: Boolean(sessionId),
@@ -1349,6 +1531,10 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
             if (fallbackAssistantItemId === itemId) fallbackAssistantItemId = ''
             return
           }
+          if (startPluginInputRequest(parseMoyuanPluginInputCall(content))) {
+            if (fallbackAssistantItemId === itemId) fallbackAssistantItemId = ''
+            return
+          }
           if (!content.trim()) return
           pushEvent(record, {
             taskId,
@@ -1386,7 +1572,9 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
 
       if (methodKey === 'turncompleted') {
         completed = true
-        setTaskLifecyclePhase(record, 'waiting_final', isRuntimeFailureContent)
+        if (!record.awaitingPluginInput) {
+          setTaskLifecyclePhase(record, 'waiting_final', isRuntimeFailureContent)
+        }
         queueUsageReport(params)
         flushBufferedAssistantItems()
         pushEvent(record, {
@@ -1431,10 +1619,13 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
         if (eventWithItemId.type === 'message' && eventWithItemId.role === 'assistant') {
           const toolCall = parseMoyuanToolCall(eventWithItemId.content)
           if (startToolRun(toolCall)) return
+          if (startPluginInputRequest(parseMoyuanPluginInputCall(eventWithItemId.content))) return
         }
         if (eventWithItemId.type === 'turn.completed') {
           completed = true
-          setTaskLifecyclePhase(record, 'waiting_final', isRuntimeFailureContent)
+          if (!record.awaitingPluginInput) {
+            setTaskLifecyclePhase(record, 'waiting_final', isRuntimeFailureContent)
+          }
           queueUsageReport(eventWithItemId.raw)
           flushBufferedAssistantItems()
           resolveTurn?.()
@@ -1453,6 +1644,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
         optOutNotificationMethods: [],
       },
     }, 15000)
+    connection.notify('initialized')
     logTask(record, 'codex.app_server.initialized', { model: config.defaultModel })
 
     const threadResult = sessionId
@@ -1550,7 +1742,8 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
   const taskId = record.task.id
   workspace = await ensureWorkspace(workspace)
   record.task.workspace = workspace
-  const requiredSkill = requestedSkillFromPrompt(prompt)
+  const attachmentPrompt = promptWithAttachmentContext(prompt, record.currentAttachments)
+  const requiredSkill = requestedSkillFromPrompt(attachmentPrompt)
   const codexBin = resolveCodexBin()
   const { modelConfig: config, skills } = await loadEnterpriseRuntimeConfig(options.enterpriseAuthToken, options.enterpriseApiBase)
   const codexHome = await createCodexHome(config)
@@ -1576,7 +1769,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
   const memory = workspaceMemory.get(workspace)
   const diffSummary = await getGitDiff(workspace)
   const resourceContext = await recoverPendingVideoJobs(record, options)
-  const promptWithContext = buildPromptWithContext(prompt, {
+  const promptWithContext = buildPromptWithContext(attachmentPrompt, {
     commandHistory: record.task.commandHistory,
     diffSummary,
     memory,
@@ -1596,7 +1789,8 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
       targetTools: plugin.targetTools ?? [],
       triggerPolicy: plugin.triggerPolicy ?? 'manual',
     })),
-    promptLength: prompt.length,
+    attachmentCount: record.currentAttachments?.length ?? 0,
+    promptLength: attachmentPrompt.length,
     providerId: config.providerId,
     reasoningEffort,
     resume: Boolean(sessionId),
@@ -1781,6 +1975,10 @@ app.post('/api/codex/tasks', async (request, reply) => {
     logRuntime('task.create.invalid_request', parsed.error.flatten(), 'warn')
     return reply.status(400).send({ error: '任务参数不完整', detail: parsed.error.flatten() })
   }
+  const promptText = parsed.data.prompt.trim() || (parsed.data.attachments.length ? '请根据我发送的图片继续处理。' : '')
+  if (!promptText) {
+    return reply.status(400).send({ error: '请输入任务内容或添加图片' })
+  }
 
   const quota = await validateEnterpriseQuota(parsed.data.enterpriseAuthToken, parsed.data.enterpriseApiBase)
   if (!quota.ok) {
@@ -1804,7 +2002,7 @@ app.post('/api/codex/tasks', async (request, reply) => {
   const task: CodexTask =
     reusableRecord?.task ?? {
       id: `codex-${Date.now()}`,
-      title: parsed.data.prompt.slice(0, 36),
+      title: promptText.slice(0, 36),
       status: 'queued',
       workspace: parsed.data.workspace,
       sessionId: requestedSessionId,
@@ -1821,6 +2019,7 @@ app.post('/api/codex/tasks', async (request, reply) => {
     streamItemIndexes: new Map(),
   }
   if (reusableRecord) {
+    closePendingPluginInputsForNewTurn(record, now)
     startTaskTurn(record, now)
   } else {
     hydrateRecordTranscriptState(record)
@@ -1832,9 +2031,11 @@ app.post('/api/codex/tasks', async (request, reply) => {
   task.workspaceMemory = workspaceMemory.get(parsed.data.workspace)
   task.diffSummary = await getGitDiff(parsed.data.workspace)
   task.updatedAt = now
+  record.currentAttachments = parsed.data.attachments
   appendTranscriptItem(record, {
     role: 'user',
-    content: parsed.data.prompt,
+    content: promptText,
+    attachments: parsed.data.attachments,
     timestamp: now,
   })
 
@@ -1844,14 +2045,15 @@ app.post('/api/codex/tasks', async (request, reply) => {
   await saveStore()
   logTask(record, 'task.create.accepted', {
     employeeId: parsed.data.employeeId,
+    attachmentCount: parsed.data.attachments.length,
     parentTaskId: parsed.data.parentTaskId,
-    promptLength: parsed.data.prompt.length,
-    promptPreview: previewLogContent(parsed.data.prompt),
+    promptLength: promptText.length,
+    promptPreview: previewLogContent(promptText),
     reusable: Boolean(reusableRecord),
     requestedSessionId,
   })
 
-  void runCodex(record, parsed.data.prompt, parsed.data.workspace, requestedSessionId ?? task.sessionId, {
+  void runCodex(record, promptText, parsed.data.workspace, requestedSessionId ?? task.sessionId, {
     enterpriseApiBase: parsed.data.enterpriseApiBase,
     enterpriseAuthToken: parsed.data.enterpriseAuthToken,
     reasoningEffort: parsed.data.reasoningEffort,
@@ -1876,7 +2078,7 @@ app.get('/api/codex/tasks', async () => {
   let changed = false
   taskRecords.forEach((record) => {
     changed = migratePendingInteractiveVideoPluginRequests(record.task) || changed
-    reconcileTaskBeforeResponse(record)
+    changed = reconcileTaskBeforeResponse(record) || changed
   })
   if (changed) await saveStore()
   return {
@@ -1906,15 +2108,18 @@ app.post('/api/images/generations', async (request, reply) => {
   const record: TaskRecord = { task, events: [], lifecycle: hydrateTaskLifecycle(task, isRuntimeFailureContent), subscribers: new Set(), streamItemIndexes: new Map() }
   hydrateRecordTranscriptState(record)
   record.currentTurnId = `${task.id}-turn-1`
+  record.currentAttachments = parsed.data.attachments
   appendTranscriptItem(record, {
     role: 'user',
     content: parsed.data.prompt,
+    attachments: parsed.data.attachments,
     timestamp: now,
   })
   records.set(task.id, record)
   await saveStore()
   logTask(record, 'image.create.accepted', {
     employeeId: parsed.data.employeeId,
+    attachmentCount: parsed.data.attachments.length,
     model: parsed.data.model,
     promptLength: parsed.data.prompt.length,
     promptPreview: previewLogContent(parsed.data.prompt),
@@ -1924,6 +2129,7 @@ app.post('/api/images/generations', async (request, reply) => {
   void runImageGenerationTool({
     record,
     prompt: parsed.data.prompt,
+    images: undefined,
     runtimeRoot,
     saveStore,
     pushEvent,
@@ -1939,9 +2145,43 @@ app.post('/api/images/generations', async (request, reply) => {
   return { data: task }
 })
 
+app.get('/api/image-proxy', async (request, reply) => {
+  const query = z.object({ url: z.string().url() }).safeParse(request.query)
+  if (!query.success) {
+    return reply.status(400).send({ error: '缺少有效的 url 参数' })
+  }
+  let target: URL
+  try {
+    target = new URL(query.data.url)
+  } catch {
+    return reply.status(400).send({ error: 'url 解析失败' })
+  }
+  // 防 SSRF：仅允许 http(s) 且主机在白名单内
+  const allowedHosts = new Set(['codex.tminos.com'])
+  if (!/^https?:$/.test(target.protocol) || !allowedHosts.has(target.hostname)) {
+    return reply.status(403).send({ error: '不允许代理该地址' })
+  }
+  try {
+    const upstream = await fetch(target.toString())
+    if (!upstream.ok || !upstream.body) {
+      return reply.status(upstream.status || 502).send({ error: `远程图片获取失败（${upstream.status}）` })
+    }
+    const contentType = upstream.headers.get('content-type') ?? 'image/png'
+    const buffer = Buffer.from(await upstream.arrayBuffer())
+    return reply
+      .header('Content-Type', contentType)
+      .header('Cache-Control', 'public, max-age=86400')
+      .send(buffer)
+  } catch (error) {
+    logRuntime('image_proxy.failed', { url: target.toString(), error: error instanceof Error ? error.message : String(error) }, 'warn')
+    return reply.status(502).send({ error: '远程图片获取失败' })
+  }
+})
+
 app.get('/api/images/:fileName', async (request, reply) => {
   const params = z.object({ fileName: z.string().regex(/^[a-f0-9-]+\.png$/) }).parse(request.params)
   const imagePath = path.join(runtimeRoot, 'images', params.fileName)
+
 
   try {
     const image = await readFile(imagePath)
@@ -1960,8 +2200,9 @@ app.get('/api/codex/tasks/:taskId', async (request, reply) => {
   }
 
   const changed = migratePendingInteractiveVideoPluginRequests(record.task)
+  const revived = revivePendingPluginInput(record.task)
   reconcileTaskBeforeResponse(record)
-  if (changed) await saveStore()
+  if (changed || revived) await saveStore()
   return { data: sanitizeTask(record.task) }
 })
 
@@ -2059,6 +2300,18 @@ app.post('/api/codex/tasks/:taskId/plugin-requests/:requestId/submit', async (re
     })
   })
 
+  return { data: sanitizeTask(record.task) }
+})
+
+app.post('/api/codex/tasks/:taskId/plugin-requests/:requestId/defer', async (request, reply) => {
+  const params = z.object({ requestId: z.string(), taskId: z.string() }).parse(request.params)
+  const record = records.get(params.taskId)
+  if (!record) return reply.status(404).send({ error: '任务不存在' })
+
+  migratePendingInteractiveVideoPluginRequests(record.task)
+  const changed = deferPendingPluginInput(record, params.requestId, new Date().toISOString())
+  if (!changed) return reply.status(404).send({ error: '插件请求不存在或已处理' })
+  await saveStore()
   return { data: sanitizeTask(record.task) }
 })
 

@@ -1,6 +1,6 @@
 import { BugOutlined, DesktopOutlined, WarningOutlined } from '@ant-design/icons'
 import { PageContainer, ProCard, ProTable, StatisticCard } from '@ant-design/pro-components'
-import { Button, Drawer, Space, Tag, Typography } from 'antd'
+import { Button, Drawer, Input, Space, Tag, Typography } from 'antd'
 import { useEffect, useMemo, useState } from 'react'
 import type { ClientLogRecord } from '@eaw/shared'
 import { loadClientLogs } from '@/services/admin'
@@ -28,13 +28,14 @@ function compactDevice(log: ClientLogRecord) {
 
 export default function LogsPage() {
   const [logs, setLogs] = useState<ClientLogRecord[]>([])
+  const [eventFilter, setEventFilter] = useState('')
   const [loading, setLoading] = useState(false)
   const [selectedLog, setSelectedLog] = useState<ClientLogRecord | null>(null)
 
-  const refresh = async () => {
+  const refresh = async (nextEvent = eventFilter) => {
     setLoading(true)
     try {
-      setLogs(await loadClientLogs({ limit: 500 }))
+      setLogs(await loadClientLogs({ event: nextEvent, limit: 500 }))
     } finally {
       setLoading(false)
     }
@@ -61,7 +62,30 @@ export default function LogsPage() {
   return (
     <PageContainer
       className="admin-page"
-      extra={<Button onClick={refresh} type="primary">刷新日志</Button>}
+      extra={(
+        <Space>
+          <Input.Search
+            allowClear
+            onChange={(event) => setEventFilter(event.target.value)}
+            onSearch={(value) => {
+              setEventFilter(value)
+              void refresh(value)
+            }}
+            placeholder="筛选事件"
+            style={{ width: 220 }}
+            value={eventFilter}
+          />
+          <Button
+            onClick={() => {
+              setEventFilter('desktop.diagnostics.snapshot')
+              void refresh('desktop.diagnostics.snapshot')
+            }}
+          >
+            诊断快照
+          </Button>
+          <Button onClick={() => refresh()} type="primary">刷新日志</Button>
+        </Space>
+      )}
       subTitle="集中查看桌面端运行状态、设备、系统、IP、会话和错误现场"
       title="日志管理"
     >

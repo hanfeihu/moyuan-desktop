@@ -43,10 +43,14 @@ export default function AssetsPage() {
       assets.reduce(
         (total, asset) => ({
           images: total.images + (asset.type === 'image' ? 1 : 0),
+          billable: total.billable + (asset.billableCny ?? 0),
+          cost: total.cost + (asset.costCny ?? 0),
+          rawTokens: total.rawTokens + (asset.rawTokens ?? 0),
+          billableProviderTokens: total.billableProviderTokens + (asset.billableProviderTokens ?? asset.rawTokens ?? 0),
           tokens: total.tokens + asset.tokenUsage,
           videos: total.videos + (asset.type === 'video' ? 1 : 0),
         }),
-        { images: 0, tokens: 0, videos: 0 },
+        { billable: 0, billableProviderTokens: 0, cost: 0, images: 0, rawTokens: 0, tokens: 0, videos: 0 },
       ),
     [assets],
   )
@@ -56,7 +60,8 @@ export default function AssetsPage() {
       <StatisticCard.Group className="dashboard-stats">
         <StatisticCard statistic={{ title: '图片资源', value: summary.images, icon: <PictureOutlined /> }} />
         <StatisticCard statistic={{ title: '视频资源', value: summary.videos, icon: <VideoCameraOutlined /> }} />
-        <StatisticCard statistic={{ title: '技能 Token', value: summary.tokens }} />
+        <StatisticCard statistic={{ title: '平台 Token', value: summary.tokens }} />
+        <StatisticCard statistic={{ title: '计费金额', value: `¥${summary.billable.toFixed(2)}` }} />
       </StatisticCard.Group>
 
       <ProCard className="section-card">
@@ -112,11 +117,40 @@ export default function AssetsPage() {
               ellipsis: true,
             },
             {
-              title: 'Token',
+              title: '平台 Token',
               dataIndex: 'tokenUsage',
               width: 130,
               sorter: (a, b) => a.tokenUsage - b.tokenUsage,
               renderText: (value) => formatNumber(Number(value ?? 0)),
+            },
+            {
+              title: '原始 Token',
+              dataIndex: 'rawTokens',
+              width: 130,
+              renderText: (value) => (value ? formatNumber(Number(value)) : '-'),
+            },
+            {
+              title: '上游计费 Token',
+              dataIndex: 'billableProviderTokens',
+              width: 150,
+              renderText: (value, row) => (value || row.rawTokens ? formatNumber(Number(value ?? row.rawTokens)) : '-'),
+            },
+            {
+              title: '抵扣系数',
+              dataIndex: 'deductionFactor',
+              width: 110,
+              renderText: (value) => (value ? Number(value).toFixed(8) : '1.00000000'),
+            },
+            {
+              title: '成本/计费',
+              dataIndex: 'costCny',
+              width: 140,
+              render: (_, row) => (
+                <Space direction="vertical" size={0}>
+                  <span>¥{(row.costCny ?? 0).toFixed(4)}</span>
+                  <span className="muted-text">收 ¥{(row.billableCny ?? 0).toFixed(4)}</span>
+                </Space>
+              ),
             },
             {
               title: '状态',

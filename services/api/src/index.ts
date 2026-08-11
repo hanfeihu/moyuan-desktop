@@ -2,18 +2,39 @@ import cors from '@fastify/cors'
 import 'dotenv/config'
 import Fastify from 'fastify'
 import nodemailer from 'nodemailer'
-import { createHash, createHmac, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { createHash, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import { Readable } from 'node:stream'
+import { Pool } from 'pg'
 import { z } from 'zod'
 import {
   hasLegacyInteractiveVideoPluginFields,
   hasSeedanceInteractiveVideoPluginFields,
   interactiveVideoPluginInputFields,
+  interactiveVideoPluginInputUi,
 } from '@eaw/shared'
+import { calculateUsageCharge, chargeUsage, normalizeBillingConfig } from './billing.js'
+import {
+  findFirstString,
+  findFirstLastFrameUrl,
+  findFirstVideoUrl,
+  firstImageFromPayload,
+  normalizedVideoStatus,
+  promptFromVideoContent,
+  readUpstreamJson,
+  usageTotalTokens,
+} from './payload.js'
+import {
+  extensionForContentType,
+  hmac,
+  md5Hex,
+  minioConfig,
+  parseDataUrl,
+  uploadToMinio,
+} from './storage.js'
 import type {
   AccountUser,
+  BillingConfig,
+  BillingMeterConfig,
   ClientLogRecord,
   Employee,
   EnterprisePolicy,
@@ -27,6 +48,7 @@ import type {
   VideoResolution,
   RechargeOrder,
   TokenPlan,
+  UsageLedgerEntry,
   VideoSkillConfig,
 } from '@eaw/shared'
 
@@ -91,6 +113,16 @@ const pluginInputFieldSchema = z.object({
   options: z.array(z.object({ label: z.string().min(1), value: z.string().min(1) })).optional(),
 })
 
+const pluginInputUiSchema = z.object({
+  variant: z.enum(['default', 'video']).optional(),
+  kicker: z.string().optional(),
+  title: z.string().optional(),
+  description: z.string().optional(),
+  promptSectionTitle: z.string().optional(),
+  mediaSectionTitle: z.string().optional(),
+  settingsSectionTitle: z.string().optional(),
+}).optional()
+
 const pluginDefinitionSchema = z.object({
   name: z.string().min(1),
   description: z.string().min(1),
@@ -101,13 +133,27 @@ const pluginDefinitionSchema = z.object({
   triggerPolicy: z.enum(['manual', 'before_tool']).default('manual'),
   enabled: z.boolean(),
   triggerHints: z.array(z.string().min(1)).default([]),
+  inputUi: pluginInputUiSchema,
   inputFields: z.array(pluginInputFieldSchema).default([]),
   permissions: z.array(z.string().min(1)).default([]),
   quotaType: z.enum(['token', 'task', 'asset']),
 })
 
+const imageGenerationInputImageSchema = z.object({
+  mimeType: z.string().min(1).optional(),
+  name: z.string().min(1).optional(),
+  sha256: z.string().min(1).optional(),
+  size: z.number().int().nonnegative().optional(),
+  file_id: z.string().min(1).optional(),
+  fileId: z.string().min(1).optional(),
+  image_url: z.union([z.string().min(1), z.object({ url: z.string().min(1) })]).optional(),
+  url: z.string().min(1).optional(),
+  dataUrl: z.string().min(1).optional(),
+})
+
 const imageGenerationSchema = z.object({
   async: z.boolean().optional(),
+  images: z.array(imageGenerationInputImageSchema).max(16).optional(),
   model: z.string().optional(),
   n: z.coerce.number().int().min(1).max(4).default(1),
   prompt: z.string().min(1),
@@ -140,6 +186,7 @@ const videoGenerationSchema = z
     prompt: z.string().optional(),
     ratio: z.enum(videoRatioOptions).optional(),
     resolution: z.enum(videoResolutionOptions).optional(),
+    return_last_frame: z.boolean().optional(),
     watermark: z.boolean().optional(),
   })
   .passthrough()
@@ -180,6 +227,25 @@ const tokenPlanSchema = z.object({
 const rechargeOrderSchema = z.object({
   method: z.enum(['alipay', 'wxpay']).default('alipay'),
   planId: z.string().min(1),
+})
+
+const billingMeterSchema = z.object({
+  costCny: z.coerce.number().positive(),
+  costUnitTokens: z.coerce.number().int().positive(),
+  deductionFactor: z.coerce.number().positive().default(1),
+  enabled: z.boolean(),
+  id: z.string().min(1),
+  markupRate: z.coerce.number().min(0),
+  modelPattern: z.string().optional(),
+  name: z.string().min(1),
+  provider: z.string().optional(),
+  type: z.enum(['brain', 'image', 'video']),
+})
+
+const billingConfigSchema = z.object({
+  meters: z.array(billingMeterSchema).min(1),
+  platformPriceCny: z.coerce.number().positive(),
+  platformTokens: z.coerce.number().int().positive(),
 })
 
 const sendCodeSchema = z.object({
@@ -232,8 +298,10 @@ type StoredAdminConfig = {
   paymentGatewayKey?: string
   rechargeOrders?: RechargeOrder[]
   tokenPlans?: TokenPlan[]
+  billingConfig?: BillingConfig
+  usageLedger?: UsageLedgerEntry[]
   users?: AccountUser[]
-  sessions?: Array<{ tokenHash: string; userId: string; createdAt: string; lastSeenAt: string }>
+  sessions?: Array<{ tokenHash: string; userId: string; createdAt: string; lastSeenAt: string; expiresAt?: string }>
   videoTaskCharges?: VideoTaskCharge[]
   generatedAssets?: GeneratedAssetRecord[]
   clientLogs?: ClientLogRecord[]
@@ -251,9 +319,15 @@ type AdminSession = {
   tokenHash: string
   createdAt: string
   lastSeenAt: string
+  expiresAt?: string
 }
 
 type VideoTaskCharge = {
+  billableCny?: number
+  billableProviderTokens?: number
+  costCny?: number
+  deductionFactor?: number
+  rawTokens?: number
   taskId: string
   userId: string
   tokens: number
@@ -262,18 +336,41 @@ type VideoTaskCharge = {
   updatedAt: string
 }
 
+type ImageGenerationDiagnostic = {
+  baseUrl?: string
+  error?: string
+  imageCount?: number
+  message?: string
+  model?: string
+  promptLength?: number
+  provider?: string
+  requestId?: string
+  size?: string
+  stage: 'configuration' | 'upstream_request' | 'upstream_response' | 'billing' | 'storage'
+  status?: number
+  upstreamDurationMs?: number
+  upstreamErrorCode?: string
+  upstreamPayloadPreview?: string
+  url?: string
+}
+
 type ImageGenerationJob = {
   body: {
+    images?: ImageGenerationRequestImage[]
     model: string
     n: number
     prompt: string
     size: '1024x1024' | '1024x1536' | '1536x1024'
   }
   createdAt: string
+  diagnostic?: ImageGenerationDiagnostic
   error?: string
   id: string
   result?: {
+    billableCny?: number
+    costCny?: number
     raw: unknown
+    rawTokens?: number
     storageUrl?: string
     usageTokens: number
     user: AccountUser
@@ -283,13 +380,26 @@ type ImageGenerationJob = {
   userId: string
 }
 
+type ImageGenerationRequestImage = {
+  file_id?: string
+  image_url?: string | { url: string }
+  url?: string
+  dataUrl?: string
+  mimeType?: string
+  name?: string
+  sha256?: string
+  size?: number
+}
+
 const employees: Employee[] = [
   { id: 'u-1001', name: '韩飞虎', department: '销售一组', title: '客户经理', source: 'wecom', manager: '王敏' },
   { id: 'u-1002', name: '林青', department: '交付中心', title: '实施顾问', source: 'lark', manager: '赵远' },
   { id: 'u-1003', name: '周然', department: '产品部', title: '产品经理', source: 'dingtalk', manager: '陈立' },
 ]
 
-const configFile = process.env.ADMIN_CONFIG_FILE ?? './data/admin-config.json'
+const databaseUrl = process.env.DATABASE_URL?.trim()
+const pgPool = databaseUrl ? new Pool({ connectionString: databaseUrl }) : undefined
+const allowEmptyPostgresState = process.env.ALLOW_EMPTY_POSTGRES_STATE === '1'
 let storedConfig = await loadStoredConfig()
 let modelProviderApiKeys: Record<string, string> = {
   blector: process.env.AI_API_KEY ?? '',
@@ -307,6 +417,8 @@ let mailSettings: MailServiceConfig = buildMailSettings(storedConfig.mailSetting
 let paymentGatewayKey = storedConfig.paymentGatewayKey ?? process.env.ZPAYZ_KEY ?? ''
 let paymentGateway: PaymentGatewayConfig = buildPaymentGateway(storedConfig.paymentGateway)
 let tokenPlans: TokenPlan[] = normalizeTokenPlans(storedConfig.tokenPlans)
+let billingConfig: BillingConfig = normalizeBillingConfig(storedConfig.billingConfig)
+let usageLedger: UsageLedgerEntry[] = storedConfig.usageLedger ?? []
 let rechargeOrders: RechargeOrder[] = storedConfig.rechargeOrders ?? []
 let users: AccountUser[] = storedConfig.users ?? []
 let sessions = storedConfig.sessions ?? []
@@ -324,7 +436,12 @@ let persistStoredConfigInFlight: Promise<void> | null = null
 let persistStoredConfigDirty = false
 let scheduledPersistStoredConfig: NodeJS.Timeout | undefined
 
-if (needsStoredConfigMigration(storedConfig)) {
+const historicalBillingMigration = migrateHistoricalBillingUsage()
+
+if (needsStoredConfigMigration(storedConfig) || historicalBillingMigration.changed) {
+  if (historicalBillingMigration.changed) {
+    app.log.info({ migration: historicalBillingMigration }, 'historical billing usage migrated')
+  }
   await persistStoredConfig()
 }
 
@@ -342,46 +459,83 @@ function maskKey(key: string | undefined) {
 }
 
 async function loadStoredConfig(): Promise<StoredAdminConfig> {
-  try {
-    return JSON.parse(await readFile(configFile, 'utf8')) as StoredAdminConfig
-  } catch {
-    return {}
+  if (!pgPool) {
+    throw new Error('DATABASE_URL is required. Moyuan Admin API does not support JSON fallback for production state.')
+  }
+
+  await ensurePostgresStateTable()
+  const result = await pgPool.query<{ payload: StoredAdminConfig }>('select payload from moyuan_admin_state where id = $1', ['main'])
+  const payload = result.rows[0]?.payload
+  if (!payload && !allowEmptyPostgresState) {
+    throw new Error('PostgreSQL admin state is empty. Run the JSON-to-PostgreSQL migration once or set ALLOW_EMPTY_POSTGRES_STATE=1 for first-time setup.')
+  }
+  return payload ?? {}
+}
+
+async function ensurePostgresStateTable() {
+  if (!pgPool) return
+  await pgPool.query(`
+    create table if not exists moyuan_admin_state (
+      id text primary key,
+      payload jsonb not null,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    )
+  `)
+}
+
+function serializedStoredConfig(): StoredAdminConfig {
+  return {
+    imageSkill: toStoredImageSkillConfig(imageSkill),
+    imageSkillApiKey,
+    modelProviderApiKeys,
+    modelProviders: modelProviders.map(toStoredModelProviderConfig),
+    videoSkill: toStoredVideoSkillConfig(videoSkill),
+    videoSkillApiKey,
+    plugins,
+    adminAuth,
+    adminSessions,
+    mailSettings,
+    mailAuthCode,
+    paymentGateway: toStoredPaymentGateway(paymentGateway),
+    paymentGatewayKey,
+    tokenPlans,
+    billingConfig,
+    usageLedger: usageLedger.slice(0, 5000),
+    rechargeOrders,
+    users,
+    sessions,
+    videoTaskCharges,
+    generatedAssets,
+    clientLogs: clientLogs.slice(0, maxStoredClientLogs),
+    usageReportIds: Array.from(usageReportIds).slice(-5000),
   }
 }
 
 async function writeStoredConfig() {
-  await mkdir(dirname(configFile), { recursive: true })
-  await writeFile(
-    configFile,
-    JSON.stringify(
-      {
-        imageSkill: toStoredImageSkillConfig(imageSkill),
-        imageSkillApiKey,
-        modelProviderApiKeys,
-        modelProviders: modelProviders.map(toStoredModelProviderConfig),
-        videoSkill: toStoredVideoSkillConfig(videoSkill),
-        videoSkillApiKey,
-        plugins,
-        adminAuth,
-        adminSessions,
-        mailSettings,
-        mailAuthCode,
-        paymentGateway: toStoredPaymentGateway(paymentGateway),
-        paymentGatewayKey,
-        tokenPlans,
-        rechargeOrders,
-        users,
-        sessions,
-        videoTaskCharges,
-        generatedAssets,
-        clientLogs: clientLogs.slice(0, maxStoredClientLogs),
-        usageReportIds: Array.from(usageReportIds).slice(-5000),
-      },
-      null,
-      2,
-    ),
+  if (!pgPool) {
+    throw new Error('DATABASE_URL is required. Refusing to persist admin state outside PostgreSQL.')
+  }
+
+  await ensurePostgresStateTable()
+  await pgPool.query(
+    `
+      insert into moyuan_admin_state (id, payload, created_at, updated_at)
+      values ($1, $2::jsonb, now(), now())
+      on conflict (id) do update set payload = excluded.payload, updated_at = now()
+    `,
+    ['main', JSON.stringify(serializedStoredConfig())],
   )
 }
+
+/*
+ * Production data contract:
+ * - PostgreSQL is the only runtime source of truth for admin state.
+ * - JSON files are migration/backup artifacts only and must not be used as
+ *   runtime fallback. A missing DATABASE_URL must fail startup loudly.
+ * - An empty PostgreSQL state must fail startup unless explicitly allowed for
+ *   first-time setup with ALLOW_EMPTY_POSTGRES_STATE=1.
+ */
 
 async function persistStoredConfig() {
   if (persistStoredConfigInFlight) {
@@ -409,12 +563,24 @@ function schedulePersistStoredConfig(delayMs = 1000) {
   }, delayMs)
 }
 
+// Cancel any pending debounced write and persist immediately. Used on graceful
+// shutdown so a scheduled (but not yet flushed) write is not lost on restart.
+async function flushPersistStoredConfig() {
+  if (scheduledPersistStoredConfig) {
+    clearTimeout(scheduledPersistStoredConfig)
+    scheduledPersistStoredConfig = undefined
+  }
+  await persistStoredConfig()
+}
+
 function needsStoredConfigMigration(config: StoredAdminConfig) {
   return (
     !config.modelProviders ||
     !config.imageSkill ||
     !config.videoSkill ||
     !config.plugins ||
+    !config.billingConfig ||
+    config.billingConfig?.meters?.some((meter) => typeof meter.deductionFactor !== 'number') ||
     'maskedApiKey' in config.imageSkill ||
     'apiKeyConfigured' in config.imageSkill ||
     'maskedApiKey' in config.videoSkill ||
@@ -617,6 +783,7 @@ function normalizePlugin(plugin: Partial<PluginDefinition> & Pick<PluginDefiniti
     ready,
     status: !ready ? 'needs_config' : enabled ? 'ready' : 'disabled',
     triggerHints: plugin.triggerHints ?? [],
+    inputUi: plugin.inputUi,
     inputFields: plugin.inputFields ?? [],
     permissions: plugin.permissions ?? [],
     quotaType: plugin.quotaType ?? 'task',
@@ -629,7 +796,7 @@ function defaultPlugins(): PluginDefinition[] {
     normalizePlugin({
       id: 'interactive-video-request',
       name: '视频生成表单',
-      description: 'Codex 需要用户补充文本、首尾帧、参考图/视频/音频和生成参数时，弹出多模态视频表单。',
+      description: 'Codex 需要用户补充视频描述、首尾帧、参考图/视频/音频和生成设置时，弹出多模态视频表单。',
       category: 'media',
       handler: 'runtime',
       interactionMode: 'requires_user_input',
@@ -637,6 +804,7 @@ function defaultPlugins(): PluginDefinition[] {
       triggerPolicy: 'before_tool',
       enabled: true,
       triggerHints: ['生成视频', '图生视频', '文生视频', '做短片'],
+      inputUi: interactiveVideoPluginInputUi,
       inputFields: interactiveVideoPluginInputFields,
       permissions: ['请求用户补充参数', '读取用户上传素材', '把表单结果交回 Codex'],
       quotaType: 'task',
@@ -658,12 +826,15 @@ function normalizePlugins(stored?: PluginDefinition[]): PluginDefinition[] {
         ?? (rawExisting?.targetTools?.length ? 'before_tool' : defaultPlugin.triggerPolicy)
       const hasSeedanceFields = hasSeedanceInteractiveVideoPluginFields(existing.inputFields)
       const hasLegacyVideoFields = hasLegacyInteractiveVideoPluginFields(existing.inputFields)
+      const defaultFieldIds = defaultPlugin.inputFields.map((field) => field.id).join('|')
+      const existingFieldIds = existing.inputFields.map((field) => field.id).join('|')
       return normalizePlugin({
         ...defaultPlugin,
         ...existing,
-        inputFields: hasSeedanceFields && !hasLegacyVideoFields ? mergePluginFields(defaultPlugin.inputFields, existing.inputFields) : defaultPlugin.inputFields,
+        inputFields: hasSeedanceFields && !hasLegacyVideoFields && existingFieldIds === defaultFieldIds ? mergePluginFields(defaultPlugin.inputFields, existing.inputFields) : defaultPlugin.inputFields,
         targetTools: existing.targetTools?.length ? existing.targetTools : defaultPlugin.targetTools,
         triggerPolicy: migratedTriggerPolicy,
+        inputUi: { ...defaultPlugin.inputUi, ...existing.inputUi },
         enabled: existing.enabled,
         ready: existing.ready,
         updatedAt: existing.updatedAt,
@@ -676,7 +847,12 @@ function normalizePlugins(stored?: PluginDefinition[]): PluginDefinition[] {
 function mergePluginFields(defaultFields: PluginDefinition['inputFields'], storedFields: PluginDefinition['inputFields'] = []) {
   const fields = [...storedFields]
   for (const field of defaultFields) {
-    if (!fields.some((item) => item.id === field.id)) fields.push(field)
+    const existingIndex = fields.findIndex((item) => item.id === field.id)
+    if (existingIndex >= 0) {
+      fields[existingIndex] = { ...fields[existingIndex], ...field }
+    } else {
+      fields.push(field)
+    }
   }
   return fields
 }
@@ -805,18 +981,135 @@ function sanitizeUser(user: AccountUser): AccountUser {
   return { ...normalizeUser(user) }
 }
 
+function migrateHistoricalBillingUsage() {
+  const now = new Date().toISOString()
+  const userDeltas = new Map<string, { skillTokens: number; tokenUsed: number }>()
+  let assetsUpdated = 0
+  let chargesUpdated = 0
+  let ledgerUpdated = 0
+
+  for (const entry of usageLedger) {
+    if (!isPositiveFiniteNumber(entry.rawTokens)) continue
+    const hasStoredFactor = isPositiveFiniteNumber(entry.deductionFactor)
+    const hasStoredBillableTokens = isPositiveFiniteNumber(entry.billableProviderTokens)
+
+    if (entry.source !== 'video') {
+      if (!hasStoredFactor || !hasStoredBillableTokens) {
+        entry.deductionFactor = hasStoredFactor ? entry.deductionFactor : 1
+        entry.billableProviderTokens = hasStoredBillableTokens ? entry.billableProviderTokens : entry.rawTokens
+        ledgerUpdated += 1
+      }
+      continue
+    }
+
+    if (hasStoredFactor && hasStoredBillableTokens) continue
+
+    const previousPlatformTokens = isPositiveFiniteNumber(entry.platformTokens) ? entry.platformTokens : 0
+    const calculation = calculateUsageCharge(billingConfig, {
+      model: entry.model,
+      provider: entry.provider,
+      rawTokens: entry.rawTokens,
+      source: entry.source,
+      taskId: entry.taskId,
+    })
+
+    entry.rawTokens = calculation.rawTokens
+    entry.billableProviderTokens = calculation.billableProviderTokens
+    entry.deductionFactor = calculation.deductionFactor
+    entry.costCny = calculation.costCny
+    entry.billableCny = calculation.billableCny
+    entry.platformTokens = calculation.platformTokens
+    entry.platformTokenUnitPriceCny = calculation.platformTokenUnitPriceCny
+    entry.markupRate = calculation.meter.markupRate
+    entry.meterId = calculation.meter.id
+    entry.meterName = calculation.meter.name
+    entry.provider = entry.provider ?? calculation.meter.provider
+    ledgerUpdated += 1
+
+    const delta = calculation.platformTokens - previousPlatformTokens
+    if (delta !== 0) {
+      const existing = userDeltas.get(entry.userId) ?? { skillTokens: 0, tokenUsed: 0 }
+      existing.skillTokens += delta
+      existing.tokenUsed += delta
+      userDeltas.set(entry.userId, existing)
+    }
+
+    if (entry.taskId) {
+      const charge = findVideoCharge(entry.taskId, entry.userId)
+      if (charge) {
+        charge.billableCny = calculation.billableCny
+        charge.billableProviderTokens = calculation.billableProviderTokens
+        charge.costCny = calculation.costCny
+        charge.deductionFactor = calculation.deductionFactor
+        charge.rawTokens = calculation.rawTokens
+        charge.tokens = calculation.platformTokens
+        charge.updatedAt = now
+        chargesUpdated += 1
+      }
+
+      const asset = generatedAssets.find((item) => item.taskId === entry.taskId && item.userId === entry.userId)
+      if (asset) {
+        asset.billableCny = calculation.billableCny
+        asset.billableProviderTokens = calculation.billableProviderTokens
+        asset.costCny = calculation.costCny
+        asset.deductionFactor = calculation.deductionFactor
+        asset.rawTokens = calculation.rawTokens
+        asset.tokenUsage = calculation.platformTokens
+        asset.updatedAt = now
+        assetsUpdated += 1
+      }
+    }
+  }
+
+  for (const [userId, delta] of userDeltas) {
+    const user = users.find((item) => item.id === userId)
+    if (!user) continue
+    normalizeUser(user)
+    user.skillTokens = Math.max(0, user.skillTokens + delta.skillTokens)
+    user.tokenUsed = Math.max(0, user.tokenUsed + delta.tokenUsed)
+    user.quotaUpdatedAt = now
+  }
+
+  return {
+    assetsUpdated,
+    changed: ledgerUpdated > 0 || chargesUpdated > 0 || assetsUpdated > 0 || userDeltas.size > 0,
+    chargesUpdated,
+    ledgerUpdated,
+    usersAdjusted: userDeltas.size,
+  }
+}
+
+function isPositiveFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+}
+
+// Session lifetime. Existing sessions without an expiresAt predate this change
+// and are treated as non-expiring so the rollout does not log anyone out.
+const userSessionTtlMs = Number(process.env.SESSION_TTL_MS ?? 30 * 24 * 60 * 60 * 1000)
+const adminSessionTtlMs = Number(process.env.ADMIN_SESSION_TTL_MS ?? 7 * 24 * 60 * 60 * 1000)
+
+function sessionExpired(session: { expiresAt?: string }) {
+  if (!session.expiresAt) return false
+  const expiresAtMs = Date.parse(session.expiresAt)
+  return Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()
+}
+
 function createSession(userId: string) {
   const token = randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '')
-  const now = new Date().toISOString()
-  sessions = [{ tokenHash: tokenHash(token), userId, createdAt: now, lastSeenAt: now }, ...sessions].slice(0, 500)
+  const now = new Date()
+  const nowIso = now.toISOString()
+  const expiresAt = new Date(now.getTime() + userSessionTtlMs).toISOString()
+  sessions = [{ tokenHash: tokenHash(token), userId, createdAt: nowIso, lastSeenAt: nowIso, expiresAt }, ...sessions.filter((item) => !sessionExpired(item))].slice(0, 500)
   void persistStoredConfig()
   return token
 }
 
 function createAdminSession() {
   const token = randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '')
-  const now = new Date().toISOString()
-  adminSessions = [{ tokenHash: tokenHash(token), createdAt: now, lastSeenAt: now }, ...adminSessions].slice(0, 100)
+  const now = new Date()
+  const nowIso = now.toISOString()
+  const expiresAt = new Date(now.getTime() + adminSessionTtlMs).toISOString()
+  adminSessions = [{ tokenHash: tokenHash(token), createdAt: nowIso, lastSeenAt: nowIso, expiresAt }, ...adminSessions.filter((item) => !sessionExpired(item))].slice(0, 100)
   void persistStoredConfig()
   return token
 }
@@ -833,6 +1126,11 @@ function getRequestAdmin(request: { headers: Record<string, unknown> }) {
   if (!token) return undefined
   const session = adminSessions.find((item) => item.tokenHash === tokenHash(token))
   if (!session) return undefined
+  if (sessionExpired(session)) {
+    adminSessions = adminSessions.filter((item) => item !== session)
+    schedulePersistStoredConfig()
+    return undefined
+  }
   session.lastSeenAt = new Date().toISOString()
   return { username: adminAuth.username }
 }
@@ -842,6 +1140,11 @@ function getUserByToken(token: string) {
   const hash = tokenHash(token)
   const session = sessions.find((item) => item.tokenHash === hash)
   if (!session) return undefined
+  if (sessionExpired(session)) {
+    sessions = sessions.filter((item) => item !== session)
+    schedulePersistStoredConfig()
+    return undefined
+  }
   session.lastSeenAt = new Date().toISOString()
   return users.find((user) => user.id === session.userId && user.status === 'active')
 }
@@ -873,7 +1176,8 @@ app.addHook('preHandler', async (request, reply) => {
   if (pathname === '/api/admin/desktop/bootstrap') return
   if (pathname.startsWith('/api/admin/model-proxy/')) return
   if (pathname === '/api/admin/client-logs' && request.method === 'POST') return
-  if (pathname === '/api/admin/me' || pathname === '/api/admin/me/usage') return
+  if (pathname === '/api/admin/plugin-assets' && request.method === 'POST') return
+  if (pathname === '/api/admin/me' || pathname === '/api/admin/me/workspace' || pathname === '/api/admin/me/usage') return
 
   if (!adminAuth) return
   if (!getRequestAdmin(request)) {
@@ -991,123 +1295,62 @@ function videoSkillTaskUrl(taskId?: string) {
   return `${base}${path}`
 }
 
-function findFirstString(payload: unknown, keys: string[]): string | undefined {
-  if (!payload || typeof payload !== 'object') return undefined
-  if (Array.isArray(payload)) {
-    for (const item of payload) {
-      const found = findFirstString(item, keys)
-      if (found) return found
-    }
-    return undefined
-  }
-
-  const record = payload as Record<string, unknown>
-  for (const key of keys) {
-    const value = record[key]
-    if (typeof value === 'string' && value) return value
-  }
-  for (const value of Object.values(record)) {
-    const found = findFirstString(value, keys)
-    if (found) return found
-  }
-  return undefined
-}
-
-function findFirstVideoUrl(payload: unknown): string | undefined {
-  if (!payload || typeof payload !== 'object') return undefined
-  if (Array.isArray(payload)) {
-    for (const item of payload) {
-      const found = findFirstVideoUrl(item)
-      if (found) return found
-    }
-    return undefined
-  }
-
-  const record = payload as Record<string, unknown>
-  for (const [key, value] of Object.entries(record)) {
-    if (typeof value === 'string' && /^https?:\/\//i.test(value) && (/\.(mp4|webm|mov)(\?|#|$)/i.test(value) || /video/i.test(key))) {
-      return value
-    }
-  }
-  for (const value of Object.values(record)) {
-    const found = findFirstVideoUrl(value)
-    if (found) return found
-  }
-  return undefined
-}
-
-async function readUpstreamJson(response: Response) {
-  const text = await response.text()
-  if (!text) return {}
-  try {
-    return JSON.parse(text) as unknown
-  } catch {
-    return { message: text }
-  }
-}
-
-function usageTotalTokens(payload: unknown): number | undefined {
-  if (!payload || typeof payload !== 'object') return undefined
-  const usage = (payload as { usage?: unknown }).usage
-  if (!usage || typeof usage !== 'object') return undefined
-  const total = (usage as { total_tokens?: unknown; totalTokens?: unknown }).total_tokens ?? (usage as { total_tokens?: unknown; totalTokens?: unknown }).totalTokens
-  return typeof total === 'number' && Number.isFinite(total) && total >= 0 ? Math.ceil(total) : undefined
-}
-
-function chargeSkillTokens(user: AccountUser, totalTokens: number) {
-  normalizeUser(user)
-  if (totalTokens <= 0) throw new Error('技能接口没有返回有效 usage.total_tokens，无法计费')
-  const remainingTokens = user.tokenBudget - user.tokenUsed
-  if (totalTokens > remainingTokens) {
-    throw new Error('Token 额度不足，请联系管理员派发额度')
-  }
-  user.skillTokens += totalTokens
-  user.tokenUsed += totalTokens
-}
-
-function normalizedVideoStatus(status?: string) {
-  const value = (status ?? '').toLowerCase()
-  if (['succeeded', 'success', 'completed', 'done', 'finish', 'finished'].some((item) => value.includes(item))) return 'completed'
-  if (['failed', 'error', 'canceled', 'cancelled', 'rejected'].some((item) => value.includes(item))) return 'failed'
-  return 'running'
-}
-
 function findVideoCharge(taskId: string, userId: string) {
   return videoTaskCharges.find((item) => item.taskId === taskId && item.userId === userId)
 }
 
-function chargeVideoTask(user: AccountUser, taskId: string, usageTokens: number) {
+function appendUsageLedger(entry: UsageLedgerEntry) {
+  usageLedger = [entry, ...usageLedger].slice(0, 5000)
+}
+
+function chargeMeteredUsage(user: AccountUser, input: {
+  assetId?: string
+  completionTokens?: number
+  model?: string
+  promptTokens?: number
+  provider?: string
+  rawTokens: number
+  reportId?: string
+  source: 'brain' | 'image' | 'video'
+  taskId?: string
+}) {
+  normalizeUser(user)
+  const result = chargeUsage(user, billingConfig, input)
+  appendUsageLedger(result.entry)
+  return result.entry
+}
+
+function chargeImageUsage(user: AccountUser, input: { model: string; provider: string; rawTokens: number; taskId?: string }) {
+  return chargeMeteredUsage(user, { ...input, source: 'image' })
+}
+
+function chargeVideoTask(user: AccountUser, taskId: string, rawTokens: number, input: { model?: string; provider?: string } = {}) {
   const existing = findVideoCharge(taskId, user.id)
   if (existing) return existing
 
-  chargeSkillTokens(user, usageTokens)
+  const entry = chargeMeteredUsage(user, {
+    model: input.model,
+    provider: input.provider ?? videoSkill.provider,
+    rawTokens,
+    source: 'video',
+    taskId,
+  })
   const now = new Date().toISOString()
   const charge: VideoTaskCharge = {
+    billableCny: entry.billableCny,
+    billableProviderTokens: entry.billableProviderTokens,
+    costCny: entry.costCny,
+    deductionFactor: entry.deductionFactor,
+    rawTokens,
     taskId,
     userId: user.id,
-    tokens: usageTokens,
+    tokens: entry.platformTokens,
     status: 'completed',
     createdAt: now,
     updatedAt: now,
   }
   videoTaskCharges = [charge, ...videoTaskCharges].slice(0, 1000)
   return charge
-}
-
-function firstImageFromPayload(payload: unknown) {
-  if (!payload || typeof payload !== 'object') return undefined
-  const data = (payload as { data?: unknown }).data
-  return Array.isArray(data) && data[0] && typeof data[0] === 'object' ? (data[0] as { b64_json?: unknown; url?: unknown }) : undefined
-}
-
-function promptFromVideoContent(content: unknown) {
-  if (!Array.isArray(content)) return ''
-  for (const item of content) {
-    if (!item || typeof item !== 'object') continue
-    const text = (item as { text?: unknown }).text
-    if (typeof text === 'string' && text.trim()) return text.trim()
-  }
-  return ''
 }
 
 function upsertGeneratedAsset(input: {
@@ -1119,6 +1362,11 @@ function upsertGeneratedAsset(input: {
   status: GeneratedAssetRecord['status']
   storageUrl?: string
   taskId?: string
+  rawTokens?: number
+  costCny?: number
+  deductionFactor?: number
+  billableProviderTokens?: number
+  billableCny?: number
   tokenUsage?: number
   type: GeneratedAssetRecord['type']
   url?: string
@@ -1140,6 +1388,11 @@ function upsertGeneratedAsset(input: {
     taskId: input.taskId ?? existing?.taskId,
     status: input.status,
     tokenUsage: input.tokenUsage ?? existing?.tokenUsage ?? 0,
+    rawTokens: input.rawTokens ?? existing?.rawTokens,
+    billableProviderTokens: input.billableProviderTokens ?? existing?.billableProviderTokens,
+    deductionFactor: input.deductionFactor ?? existing?.deductionFactor,
+    costCny: input.costCny ?? existing?.costCny,
+    billableCny: input.billableCny ?? existing?.billableCny,
     provider: input.provider,
     metadata: { ...(existing?.metadata ?? {}), ...(input.metadata ?? {}) },
     createdAt: existing?.createdAt ?? now,
@@ -1185,10 +1438,6 @@ function appendClientLog(user: AccountUser, payload: z.infer<typeof clientLogSch
   }
   clientLogs = [log, ...clientLogs].slice(0, maxStoredClientLogs)
   return log
-}
-
-function md5Hex(data: string) {
-  return createHash('md5').update(data).digest('hex')
 }
 
 function paymentPublicBaseUrl(request?: { headers: Record<string, unknown> }) {
@@ -1287,131 +1536,176 @@ function completeRechargeOrder(order: RechargeOrder, tradeNo?: string) {
   return order
 }
 
-function hmac(key: Buffer | string, data: string) {
-  return createHmac('sha256', key).update(data).digest()
+function upstreamPayloadPreview(payload: unknown) {
+  try {
+    return JSON.stringify(payload, (key, value) => {
+      const normalizedKey = key.toLowerCase()
+      if (/b64|base64|image_data|imagedata|dataurl|image_url/.test(normalizedKey)) return '[image omitted]'
+      if (typeof value === 'string' && value.startsWith('data:image/')) return '[image data url omitted]'
+      if (/api[-_]?key|authorization|bearer|token|secret|password/.test(normalizedKey)) return '[redacted]'
+      return value
+    }).replace(/\s+/g, ' ').slice(0, 800)
+  } catch {
+    return String(payload).slice(0, 800)
+  }
 }
 
-function sha256Hex(data: Buffer | string) {
-  return createHash('sha256').update(data).digest('hex')
-}
-
-function minioConfig() {
-  const endpoint = process.env.MINIO_ENDPOINT?.replace(/\/$/, '')
-  const accessKey = process.env.MINIO_ACCESS_KEY ?? process.env.MINIO_ROOT_USER
-  const secretKey = process.env.MINIO_SECRET_KEY ?? process.env.MINIO_ROOT_PASSWORD
-  const bucket = process.env.MINIO_BUCKET ?? 'worldcup-materials'
-  if (!endpoint || !accessKey || !secretKey || !bucket) return undefined
+function imageGenerationDiagnostic(
+  stage: ImageGenerationDiagnostic['stage'],
+  body: ImageGenerationJob['body'],
+  values: Partial<ImageGenerationDiagnostic> = {},
+): ImageGenerationDiagnostic {
   return {
-    accessKey,
-    bucket,
-    endpoint,
-    publicBaseUrl: (process.env.MINIO_PUBLIC_BASE_URL ?? `${endpoint}/${bucket}`).replace(/\/$/, ''),
-    region: process.env.MINIO_REGION ?? 'us-east-1',
-    secretKey,
+    baseUrl: imageSkill.baseUrl,
+    imageCount: body.images?.length ?? 0,
+    model: body.model,
+    promptLength: body.prompt.length,
+    provider: imageSkill.provider,
+    size: body.size,
+    stage,
+    url: imageSkillGenerationUrl(),
+    ...values,
   }
 }
 
-async function uploadToMinio(objectKey: string, bytes: Buffer, contentType: string) {
-  const config = minioConfig()
-  if (!config) return undefined
-
-  const target = new URL(`${config.endpoint}/${config.bucket}/${objectKey}`)
-  const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '')
-  const dateStamp = amzDate.slice(0, 8)
-  const payloadHash = sha256Hex(bytes)
-  const headers = {
-    'content-type': contentType,
-    host: target.host,
-    'x-amz-content-sha256': payloadHash,
-    'x-amz-date': amzDate,
+function imageGenerationFailureMessage(status: number | undefined, message: string, diagnostic?: ImageGenerationDiagnostic) {
+  const requestId = diagnostic?.requestId ? ` 排障请求 ID：${diagnostic.requestId}` : ''
+  if (status === 504 || /504|Gateway Timeout|timeout|timed out|超时/i.test(message)) {
+    return `图片模型通道超时。上游图片服务没有在预期时间内返回结果，通常是模型排队、网关超时或通道波动，不是你的提示词一定有问题。${requestId}`
   }
-  const signedHeaders = Object.keys(headers).sort().join(';')
-  const canonicalHeaders = Object.keys(headers)
-    .sort()
-    .map((key) => `${key}:${headers[key as keyof typeof headers]}\n`)
-    .join('')
-  const canonicalRequest = ['PUT', target.pathname, '', canonicalHeaders, signedHeaders, payloadHash].join('\n')
-  const credentialScope = `${dateStamp}/${config.region}/s3/aws4_request`
-  const stringToSign = ['AWS4-HMAC-SHA256', amzDate, credentialScope, sha256Hex(canonicalRequest)].join('\n')
-  const signingKey = hmac(hmac(hmac(hmac(`AWS4${config.secretKey}`, dateStamp), config.region), 's3'), 'aws4_request')
-  const signature = createHmac('sha256', signingKey).update(stringToSign).digest('hex')
-  const authorization = `AWS4-HMAC-SHA256 Credential=${config.accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`
-
-  const response = await fetch(target, {
-    body: bytes as unknown as BodyInit,
-    headers: {
-      Authorization: authorization,
-      'Content-Type': contentType,
-      'x-amz-content-sha256': payloadHash,
-      'x-amz-date': amzDate,
-    },
-    method: 'PUT',
-  })
-  if (!response.ok) throw new Error(`MinIO 归档失败：${response.status}`)
-  return `${config.publicBaseUrl}/${objectKey}`
+  if (status === 401 || status === 403 || /invalid api key|unauthorized|forbidden|401|403/i.test(message)) {
+    return `图片模型通道鉴权失败。请检查后台图片技能的 KEY、Base URL 和默认模型配置。${requestId}`
+  }
+  if (status && status >= 500) {
+    return `图片模型通道暂时不可用。上游返回 ${status}，可以稍后重试。${requestId}`
+  }
+  return `${message}${requestId}`
 }
 
-function extensionForContentType(contentType: string, fileName?: string) {
-  const existing = fileName?.match(/\.([a-z0-9]{1,8})$/i)?.[1]
-  if (existing) return existing.toLowerCase()
-  if (contentType.includes('png')) return 'png'
-  if (contentType.includes('jpeg') || contentType.includes('jpg')) return 'jpg'
-  if (contentType.includes('webp')) return 'webp'
-  if (contentType.includes('mp4')) return 'mp4'
-  if (contentType.includes('quicktime')) return 'mov'
-  if (contentType.includes('mpeg')) return 'mp3'
-  if (contentType.includes('wav')) return 'wav'
-  return 'bin'
+function normalizeImageInput(input: ImageGenerationRequestImage): ImageGenerationRequestImage | undefined {
+  if (typeof input.image_url === 'string') return { image_url: input.image_url }
+  if (input.image_url && typeof input.image_url === 'object' && typeof input.image_url.url === 'string') return { image_url: { url: input.image_url.url } }
+  if (input.url) return { image_url: { url: input.url } }
+  if (input.dataUrl) return { image_url: { url: input.dataUrl } }
+  const fileId = input.file_id ?? (input as { fileId?: string }).fileId
+  if (fileId) return { file_id: fileId }
+  return undefined
 }
 
-function parseDataUrl(dataUrl: string) {
-  const matched = dataUrl.match(/^data:([^;,]+)?(;base64)?,(.*)$/s)
-  if (!matched) throw new Error('素材不是有效的 data URL')
-  const contentType = matched[1] || 'application/octet-stream'
-  const isBase64 = Boolean(matched[2])
-  const payload = matched[3] ?? ''
-  const bytes = isBase64 ? Buffer.from(payload, 'base64') : Buffer.from(decodeURIComponent(payload))
-  if (!bytes.length) throw new Error('素材内容为空')
-  return { bytes, contentType }
+async function resolveImageInputsForUpstream(images: ImageGenerationRequestImage[] = []) {
+  const resolved: ImageGenerationRequestImage[] = []
+  for (const image of images.slice(0, 16)) {
+    const normalized = normalizeImageInput(image)
+    if (!normalized) continue
+    resolved.push(normalized)
+  }
+  return resolved
 }
 
-async function callImageSkillApi(init: RequestInit) {
+async function imageSkillUpstreamBody(body: ImageGenerationJob['body']) {
+  const images = await resolveImageInputsForUpstream(body.images)
+  return {
+    model: body.model,
+    n: body.n,
+    prompt: body.prompt,
+    size: body.size,
+    ...(images.length ? { images } : {}),
+  }
+}
+
+async function callImageSkillApi(init: RequestInit, input?: { url?: string }) {
   if (!imageSkill.enabled || !imageSkillApiKey) {
-    return { ok: false as const, status: 400, payload: { error: '图片生成技能未启用，请管理员在后台配置并启用 gpt-image-2 KEY' } }
+    return {
+      diagnostic: { stage: 'configuration' as const, message: '图片生成技能未启用，请管理员在后台配置并启用 gpt-image-2 KEY', provider: imageSkill.provider },
+      ok: false as const,
+      status: 400,
+      payload: { error: '图片生成技能未启用，请管理员在后台配置并启用 gpt-image-2 KEY' },
+    }
   }
 
-  const response = await fetch(imageSkillGenerationUrl(), {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${imageSkillApiKey}`,
-      'Content-Type': 'application/json',
-      ...(init.headers ?? {}),
-    },
-  })
-  const payload = await readUpstreamJson(response)
-  return { ok: response.ok, status: response.status, payload }
+  const startedAt = Date.now()
+  const url = input?.url ?? imageSkillGenerationUrl()
+  try {
+    const response = await fetch(url, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${imageSkillApiKey}`,
+        'Content-Type': 'application/json',
+        ...(init.headers ?? {}),
+      },
+    })
+    const payload = await readUpstreamJson(response)
+    const upstreamDurationMs = Date.now() - startedAt
+    const requestId = response.headers.get('x-request-id') ?? response.headers.get('x-tos-request-id') ?? response.headers.get('x-volc-request-id') ?? findFirstString(payload, ['request_id', 'requestId', 'logid', 'log_id'])
+    const upstreamErrorCode = findFirstString(payload, ['code', 'error_code', 'errorCode', 'type'])
+    return {
+      diagnostic: {
+        requestId,
+        stage: 'upstream_response' as const,
+        status: response.status,
+        upstreamDurationMs,
+        upstreamErrorCode,
+        upstreamPayloadPreview: response.ok ? undefined : upstreamPayloadPreview(payload),
+        url,
+      },
+      ok: response.ok,
+      status: response.status,
+      payload,
+    }
+  } catch (error) {
+    const upstreamDurationMs = Date.now() - startedAt
+    const message = error instanceof Error ? error.message : String(error)
+    return {
+      diagnostic: {
+        error: message,
+        message,
+        stage: 'upstream_request' as const,
+        upstreamDurationMs,
+        url,
+      },
+      ok: false as const,
+      status: 0,
+      payload: { error: message || '图片生成上游请求失败' },
+    }
+  }
 }
 
 async function completeImageGeneration(user: AccountUser, body: ImageGenerationJob['body']) {
+  const upstreamBody = await imageSkillUpstreamBody(body)
   const upstream = await callImageSkillApi({
-    body: JSON.stringify(body),
+    body: JSON.stringify(upstreamBody),
     method: 'POST',
-  })
+  }, { url: imageSkillGenerationUrl() })
+  const diagnostic = imageGenerationDiagnostic(upstream.diagnostic.stage, body, upstream.diagnostic)
 
   if (!upstream.ok) {
-    const message = findFirstString(upstream.payload, ['message', 'error', 'msg']) ?? `图片生成接口返回 ${upstream.status}`
-    throw new Error(message)
+    const rawMessage = findFirstString(upstream.payload, ['message', 'error', 'msg']) ?? (upstream.status ? `图片生成接口返回 ${upstream.status}` : '图片生成上游请求失败')
+    const message = imageGenerationFailureMessage(upstream.status, rawMessage, diagnostic)
+    const error = new Error(message) as Error & { diagnostic?: ImageGenerationDiagnostic }
+    error.diagnostic = { ...diagnostic, message, error: rawMessage }
+    throw error
   }
 
-  const usageTokens = usageTotalTokens(upstream.payload)
-  if (!usageTokens) {
-    throw new Error('图片生成接口没有返回 usage.total_tokens，无法计费')
+  const rawTokens = usageTotalTokens(upstream.payload)
+  if (!rawTokens) {
+    const error = new Error('图片生成接口没有返回 usage.total_tokens，无法计费') as Error & { diagnostic?: ImageGenerationDiagnostic }
+    error.diagnostic = imageGenerationDiagnostic('billing', body, {
+      message: error.message,
+      status: upstream.status,
+      upstreamDurationMs: upstream.diagnostic.upstreamDurationMs,
+      upstreamPayloadPreview: upstreamPayloadPreview(upstream.payload),
+    })
+    throw error
   }
 
-  chargeSkillTokens(user, usageTokens)
+  const charge = chargeImageUsage(user, {
+    model: body.model,
+    provider: imageSkill.provider,
+    rawTokens,
+  })
 
   const firstImage = firstImageFromPayload(upstream.payload)
-  const upstreamUrl = typeof firstImage?.url === 'string' ? firstImage.url : undefined
+  const generatedImageUrl = typeof firstImage?.url === 'string' ? firstImage.url : undefined
   let storageUrl: string | undefined
   let storageError: string | undefined
   if (typeof firstImage?.b64_json === 'string' && firstImage.b64_json) {
@@ -1429,10 +1723,16 @@ async function completeImageGeneration(user: AccountUser, body: ImageGenerationJ
     model: body.model,
     provider: imageSkill.provider,
     status: 'succeeded',
-    tokenUsage: usageTokens,
-    url: storageUrl ?? upstreamUrl ?? '',
+    tokenUsage: charge.platformTokens,
+    rawTokens,
+    billableProviderTokens: charge.billableProviderTokens,
+    deductionFactor: charge.deductionFactor,
+    costCny: charge.costCny,
+    billableCny: charge.billableCny,
+    url: storageUrl ?? generatedImageUrl ?? '',
     storageUrl,
     metadata: {
+      imageCount: body.images?.length ?? 0,
       size: body.size,
       storageError,
       upstreamId: findFirstString(upstream.payload, ['id']),
@@ -1443,7 +1743,12 @@ async function completeImageGeneration(user: AccountUser, body: ImageGenerationJ
   return {
     raw: upstream.payload,
     storageUrl,
-    usageTokens,
+    usageTokens: charge.platformTokens,
+    rawTokens,
+    billableProviderTokens: charge.billableProviderTokens,
+    deductionFactor: charge.deductionFactor,
+    costCny: charge.costCny,
+    billableCny: charge.billableCny,
     user: sanitizeUser(user),
   }
 }
@@ -1468,9 +1773,12 @@ function startImageGenerationJob(user: AccountUser, body: ImageGenerationJob['bo
       job.updatedAt = new Date().toISOString()
     })
     .catch(async (error) => {
+      const diagnostic = error && typeof error === 'object' ? (error as { diagnostic?: ImageGenerationDiagnostic }).diagnostic : undefined
       job.status = 'failed'
       job.error = error instanceof Error ? error.message : String(error)
+      job.diagnostic = diagnostic
       job.updatedAt = new Date().toISOString()
+      app.log.warn({ diagnostic, error: job.error, jobId: job.id }, 'image generation job failed')
       upsertGeneratedAsset({
         user,
         type: 'image',
@@ -1480,7 +1788,9 @@ function startImageGenerationJob(user: AccountUser, body: ImageGenerationJob['bo
         status: 'failed',
         tokenUsage: 0,
         metadata: {
+          diagnostic,
           error: job.error,
+          imageCount: body.images?.length ?? 0,
           size: body.size,
         },
       })
@@ -1514,6 +1824,7 @@ function serializeImageGenerationJob(job: ImageGenerationJob) {
       jobId: job.id,
       status: job.status,
       error: job.error ?? '图片生成失败',
+      diagnostic: job.diagnostic,
     }
   }
   return {
@@ -1690,6 +2001,10 @@ app.get('/api/admin/payment-gateway', async () => ({ data: paymentGateway }))
 
 app.get('/api/admin/token-plans', async () => ({ data: tokenPlans }))
 
+app.get('/api/admin/billing-config', async () => ({ data: billingConfig }))
+
+app.get('/api/admin/usage-ledger', async () => ({ data: usageLedger }))
+
 app.get('/api/admin/recharge-orders', async () => ({ data: rechargeOrders }))
 
 app.get('/api/admin/desktop/bootstrap', async (request, reply) => {
@@ -1765,6 +2080,27 @@ app.put('/api/admin/payment-gateway', async (request, reply) => {
 
   await persistStoredConfig()
   return { data: paymentGateway }
+})
+
+app.put('/api/admin/billing-config', async (request, reply) => {
+  const parsed = billingConfigSchema.safeParse(request.body)
+  if (!parsed.success) {
+    return reply.status(400).send({ error: '计费配置不完整', detail: parsed.error.flatten() })
+  }
+
+  const now = new Date().toISOString()
+  billingConfig = normalizeBillingConfig({
+    ...parsed.data,
+    updatedAt: now,
+    meters: parsed.data.meters.map((meter) => ({
+      ...meter,
+      provider: meter.provider?.trim() || undefined,
+      modelPattern: meter.modelPattern?.trim() || undefined,
+      updatedAt: now,
+    })) satisfies BillingMeterConfig[],
+  })
+  await persistStoredConfig()
+  return { data: billingConfig }
 })
 
 app.post('/api/admin/token-plans', async (request, reply) => {
@@ -1890,12 +2226,30 @@ app.post('/api/admin/plugin-assets', async (request, reply) => {
   if (!parsed.success) return reply.status(400).send({ error: '插件素材参数不完整', detail: parsed.error.flatten() })
 
   try {
+    request.log.info({ dataUrlLength: parsed.data.dataUrl.length }, 'plugin-asset: start')
     const { bytes, contentType } = parseDataUrl(parsed.data.dataUrl)
+    request.log.info({ bytes: bytes.byteLength, contentType }, 'plugin-asset: parsed')
     const ext = extensionForContentType(parsed.data.type ?? contentType, parsed.data.name)
     const url = await uploadToMinio(`moyuan/plugin-assets/${user.id}/${randomUUID()}.${ext}`, bytes, parsed.data.type ?? contentType)
+    request.log.info({ url }, 'plugin-asset: uploaded')
     if (!url) return reply.status(503).send({ error: '素材归档服务未配置，请管理员配置 MinIO' })
+    // 同时登记为生成资产，使上传的素材（如遮脸图）出现在「我的资源」中、可被图生视频选用
+    const assetType = (parsed.data.type ?? contentType).startsWith('video/') ? 'video' : 'image'
+    const asset = upsertGeneratedAsset({
+      type: assetType,
+      url,
+      storageUrl: url,
+      prompt: parsed.data.name ?? '上传素材',
+      model: 'upload',
+      provider: 'plugin-asset',
+      status: 'succeeded',
+      tokenUsage: 0,
+      user,
+      metadata: { source: 'plugin-asset-upload' },
+    })
     return {
       data: {
+        id: asset.id,
         name: parsed.data.name,
         size: bytes.byteLength,
         type: parsed.data.type ?? contentType,
@@ -2038,6 +2392,42 @@ app.get('/api/admin/me', async (request, reply) => {
   return { data: { user: sanitizeUser(user) } }
 })
 
+app.get('/api/admin/me/workspace', async (request, reply) => {
+  const user = getRequestUser(request)
+  if (!user) return unauthorized(reply)
+  normalizeUser(user)
+  const assets = generatedAssets.filter((asset) => asset.userId === user.id).slice(0, 80)
+  const ledger = usageLedger.filter((entry) => entry.userId === user.id).slice(0, 120)
+  const totals = ledger.reduce(
+    (summary, entry) => ({
+      ...summary,
+      billableCny: summary.billableCny + entry.billableCny,
+      costCny: summary.costCny + entry.costCny,
+      platformTokens: summary.platformTokens + entry.platformTokens,
+      rawTokens: summary.rawTokens + entry.rawTokens,
+      billableProviderTokens: summary.billableProviderTokens + (entry.billableProviderTokens ?? entry.rawTokens),
+    }),
+    {
+      assets: assets.length,
+      images: assets.filter((asset) => asset.type === 'image').length,
+      videos: assets.filter((asset) => asset.type === 'video').length,
+      platformTokens: 0,
+      rawTokens: 0,
+      billableProviderTokens: 0,
+      costCny: 0,
+      billableCny: 0,
+    },
+  )
+  return {
+    data: {
+      user: sanitizeUser(user),
+      assets,
+      usageLedger: ledger,
+      totals,
+    },
+  }
+})
+
 app.post('/api/admin/me/usage', async (request, reply) => {
   const user = getRequestUser(request)
   if (!user) return unauthorized(reply)
@@ -2054,19 +2444,26 @@ app.post('/api/admin/me/usage', async (request, reply) => {
   const completionTokens = parsed.data.completionTokens
   const skillTokens = parsed.data.skillTokens
   const totalTokens = parsed.data.totalTokens ?? promptTokens + completionTokens + skillTokens
-  const remainingTokens = user.tokenBudget - user.tokenUsed
-  if (totalTokens > remainingTokens) {
-    return reply.status(402).send({ error: 'Token 额度不足，请联系管理员派发额度', data: { user: sanitizeUser(user) } })
+  try {
+    chargeMeteredUsage(user, {
+      completionTokens,
+      promptTokens,
+      rawTokens: totalTokens,
+      reportId,
+      source: 'brain',
+      taskId: parsed.data.taskId,
+    })
+  } catch (error) {
+    return reply.status(402).send({ error: error instanceof Error ? error.message : 'Token 额度不足，请联系管理员派发额度', data: { user: sanitizeUser(user) } })
   }
-  user.promptTokens += promptTokens
-  user.completionTokens += completionTokens
-  user.skillTokens += skillTokens
-  user.tokenUsed += totalTokens
   if (reportId) {
     usageReportIds.add(reportId)
     usageReportIds = new Set(Array.from(usageReportIds).slice(-5000))
   }
-  await persistStoredConfig()
+  // Hot path: a usage report fires on every completed turn. Debounce the write
+  // so bursts collapse into one full-file rewrite instead of one per turn.
+  // Graceful shutdown flushes any pending write (see process exit handlers).
+  schedulePersistStoredConfig()
   return { data: { user: sanitizeUser(user) } }
 })
 
@@ -2084,11 +2481,13 @@ app.post('/api/admin/skills/image/generations', async (request, reply) => {
   }
 
   const body = {
+    images: parsed.data.images?.slice(0, 16),
     model: parsed.data.model ?? imageSkill.defaultModel,
     n: parsed.data.n,
     prompt: parsed.data.prompt,
     size: parsed.data.size ?? imageSkill.defaultSize,
   }
+  if (!body.images?.length) delete body.images
 
   if (parsed.data.async) {
     const job = startImageGenerationJob(user, body)
@@ -2100,8 +2499,10 @@ app.post('/api/admin/skills/image/generations', async (request, reply) => {
     result = await completeImageGeneration(user, body)
   } catch (error) {
     const message = error instanceof Error ? error.message : '图片生成失败'
+    const diagnostic = error && typeof error === 'object' ? (error as { diagnostic?: ImageGenerationDiagnostic }).diagnostic : undefined
+    app.log.warn({ diagnostic, error: message }, 'sync image generation failed')
     const status = message.includes('Token 额度不足') ? 402 : message.includes('没有返回 usage.total_tokens') ? 502 : 502
-    return reply.status(status).send({ error: message })
+    return reply.status(status).send({ error: message, diagnostic })
   }
 
   return {
@@ -2161,6 +2562,7 @@ app.post('/api/admin/skills/video/generations', async (request, reply) => {
     model: parsed.data.model ?? videoSkill.defaultModel,
     ratio: parsed.data.ratio ?? videoSkill.defaultRatio,
     resolution: parsed.data.resolution ?? videoSkill.defaultResolution,
+    return_last_frame: parsed.data.return_last_frame ?? true,
     watermark: parsed.data.watermark ?? false,
   }
   delete (body as { prompt?: unknown }).prompt
@@ -2179,6 +2581,7 @@ app.post('/api/admin/skills/video/generations', async (request, reply) => {
   const status = findFirstString(upstream.payload, ['status'])
   const videoStatus = normalizedVideoStatus(status)
   const videoUrl = findFirstVideoUrl(upstream.payload)
+  const lastFrameUrl = findFirstLastFrameUrl(upstream.payload)
   let usageTokens = 0
   if (taskId && videoStatus === 'completed') {
     const actualTokens = usageTotalTokens(upstream.payload)
@@ -2186,11 +2589,12 @@ app.post('/api/admin/skills/video/generations', async (request, reply) => {
       return reply.status(502).send({ error: '视频生成接口没有返回 usage.total_tokens，无法计费', upstream: upstream.payload })
     }
     try {
-      usageTokens = chargeVideoTask(user, taskId, actualTokens).tokens
+      usageTokens = chargeVideoTask(user, taskId, actualTokens, { model: body.model, provider: videoSkill.provider }).tokens
     } catch (error) {
       return reply.status(402).send({ error: error instanceof Error ? error.message : 'Token 额度不足，请联系管理员派发额度', data: { user: sanitizeUser(user) } })
     }
   }
+  const charge = taskId ? findVideoCharge(taskId, user.id) : undefined
   if (taskId) {
     upsertGeneratedAsset({
       user,
@@ -2201,11 +2605,18 @@ app.post('/api/admin/skills/video/generations', async (request, reply) => {
       provider: videoSkill.provider,
       status: videoStatus === 'completed' ? 'succeeded' : videoStatus === 'failed' ? 'failed' : 'running',
       tokenUsage: usageTokens,
+      rawTokens: charge?.rawTokens,
+      billableProviderTokens: charge?.billableProviderTokens,
+      deductionFactor: charge?.deductionFactor,
+      costCny: charge?.costCny,
+      billableCny: charge?.billableCny,
       url: videoUrl ?? '',
       metadata: {
         duration: body.duration,
         ratio: body.ratio,
         resolution: body.resolution,
+        returnLastFrame: body.return_last_frame,
+        lastFrameUrl,
         status,
       },
     })
@@ -2217,8 +2628,14 @@ app.post('/api/admin/skills/video/generations', async (request, reply) => {
       taskId,
       status,
       videoUrl,
+      lastFrameUrl,
       raw: upstream.payload,
       usageTokens,
+      rawTokens: charge?.rawTokens,
+      billableProviderTokens: charge?.billableProviderTokens,
+      deductionFactor: charge?.deductionFactor,
+      costCny: charge?.costCny,
+      billableCny: charge?.billableCny,
       user: sanitizeUser(user),
     },
   }
@@ -2240,6 +2657,8 @@ app.get('/api/admin/skills/video/generations/:taskId', async (request, reply) =>
   const status = findFirstString(upstream.payload, ['status'])
   const videoStatus = normalizedVideoStatus(status)
   const videoUrl = findFirstVideoUrl(upstream.payload)
+  const lastFrameUrl = findFirstLastFrameUrl(upstream.payload)
+  const existingAsset = generatedAssets.find((asset) => asset.taskId === params.taskId && asset.userId === user.id)
   let charge = findVideoCharge(params.taskId, user.id)
   if (videoStatus === 'completed') {
     const actualTokens = usageTotalTokens(upstream.payload) ?? charge?.tokens
@@ -2247,12 +2666,14 @@ app.get('/api/admin/skills/video/generations/:taskId', async (request, reply) =>
       return reply.status(502).send({ error: '视频生成接口没有返回 usage.total_tokens，无法计费', upstream: upstream.payload })
     }
     try {
-      charge = chargeVideoTask(user, params.taskId, actualTokens)
+      charge = chargeVideoTask(user, params.taskId, actualTokens, {
+        model: existingAsset?.model ?? findFirstString(upstream.payload, ['model']) ?? videoSkill.defaultModel,
+        provider: videoSkill.provider,
+      })
     } catch (error) {
       return reply.status(402).send({ error: error instanceof Error ? error.message : 'Token 额度不足，请联系管理员派发额度', data: { user: sanitizeUser(user) } })
     }
   }
-  const existingAsset = generatedAssets.find((asset) => asset.taskId === params.taskId && asset.userId === user.id)
   if (existingAsset || videoUrl || videoStatus !== 'running') {
     upsertGeneratedAsset({
       user,
@@ -2263,11 +2684,18 @@ app.get('/api/admin/skills/video/generations/:taskId', async (request, reply) =>
       provider: videoSkill.provider,
       status: videoStatus === 'completed' ? 'succeeded' : videoStatus === 'failed' ? 'failed' : 'running',
       tokenUsage: charge?.tokens ?? existingAsset?.tokenUsage ?? 0,
+      rawTokens: charge?.rawTokens ?? existingAsset?.rawTokens,
+      billableProviderTokens: charge?.billableProviderTokens ?? existingAsset?.billableProviderTokens,
+      deductionFactor: charge?.deductionFactor ?? existingAsset?.deductionFactor,
+      costCny: charge?.costCny ?? existingAsset?.costCny,
+      billableCny: charge?.billableCny ?? existingAsset?.billableCny,
       url: videoUrl ?? existingAsset?.url ?? '',
       metadata: {
         duration: (upstream.payload as { duration?: unknown })?.duration,
         ratio: (upstream.payload as { ratio?: unknown })?.ratio,
         resolution: (upstream.payload as { resolution?: unknown })?.resolution,
+        returnLastFrame: existingAsset?.metadata?.returnLastFrame,
+        lastFrameUrl: lastFrameUrl ?? existingAsset?.metadata?.lastFrameUrl,
         status,
       },
     })
@@ -2279,8 +2707,14 @@ app.get('/api/admin/skills/video/generations/:taskId', async (request, reply) =>
       taskId: params.taskId,
       status,
       videoUrl,
+      lastFrameUrl,
       raw: upstream.payload,
       usageTokens: charge?.tokens ?? 0,
+      rawTokens: charge?.rawTokens,
+      billableProviderTokens: charge?.billableProviderTokens,
+      deductionFactor: charge?.deductionFactor,
+      costCny: charge?.costCny,
+      billableCny: charge?.billableCny,
       chargeStatus: charge?.status,
       user: sanitizeUser(user),
     },
@@ -2425,4 +2859,26 @@ app.get('/api/desktop/bootstrap', async () => ({
 
 const port = Number(process.env.API_PORT ?? 4000)
 const host = process.env.API_HOST ?? '0.0.0.0'
+
+// Flush any debounced config write before exiting so a scheduled (but not yet
+// persisted) write — e.g. a usage report — survives a graceful restart.
+let shuttingDown = false
+async function gracefulShutdown(signal: NodeJS.Signals) {
+  if (shuttingDown) return
+  shuttingDown = true
+  app.log.info({ signal }, 'shutting down, flushing stored config')
+  try {
+    await flushPersistStoredConfig()
+    await app.close()
+  } catch (error) {
+    app.log.error({ error }, 'graceful shutdown failed')
+  } finally {
+    process.exit(0)
+  }
+}
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => void gracefulShutdown(signal))
+}
+
 await app.listen({ host, port })

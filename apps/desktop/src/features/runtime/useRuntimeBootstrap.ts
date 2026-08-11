@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import type { CodexTask } from '@eaw/shared'
+import { uploadDiagnosticsSnapshot } from '../../diagnostics'
 import { errorLogDetails, logClientEvent } from '../../logger'
 import { runtimeUrl } from '../../config'
 import type { RuntimeState } from './types'
@@ -27,6 +28,7 @@ export function useRuntimeBootstrap({
       })
       .catch((error) => {
         logClientEvent('runtime.health.offline', errorLogDetails(error, { runtimeUrl }), 'warn')
+        void uploadDiagnosticsSnapshot('runtime-health-offline')
         onRuntimeState('offline')
       })
 
@@ -39,6 +41,7 @@ export function useRuntimeBootstrap({
       })
       .catch((error) => {
         logClientEvent('tasks.load.failed', errorLogDetails(error, { runtimeUrl }), 'warn')
+        void uploadDiagnosticsSnapshot('runtime-tasks-load-failed')
         onRuntimeState('offline')
         onLoadFailed()
       })

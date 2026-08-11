@@ -35,7 +35,7 @@ export function errorLogDetails(error: unknown, extra?: Record<string, unknown>)
   }
 }
 
-function stableDeviceId() {
+export function stableDeviceId() {
   const existing = window.localStorage.getItem(deviceIdStorageKey)
   if (existing) return existing
   const id = window.crypto?.randomUUID?.() ?? `device-${Date.now()}-${Math.random().toString(16).slice(2)}`

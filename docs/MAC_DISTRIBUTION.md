@@ -63,3 +63,19 @@ spctl --assess --type execute --verbose "/Applications/Moyuan Desktop.app"
 ```bash
 spctl --assess --type open --verbose "apps/desktop/release/Moyuan-Desktop-*-mac-arm64.dmg"
 ```
+
+## 2026-05-31 签名耗时经验
+
+`apps/desktop/package.json` 当前配置了 `"asar": false`，并且桌面端会把 Runtime 和依赖一起放进安装包。macOS 打包时 `electron-builder` 会对包内大量文件逐个 `codesign`，所以发布时可能出现数分钟没有新日志的情况。这不一定是卡死。
+
+判断是否还在正常推进：
+
+```bash
+pgrep -fl 'codesign|hdiutil|electron-builder|app-builder'
+```
+
+如果还能看到 `codesign` 进程，并且签名路径在不同文件之间变化，说明仍在签名。等到后续出现 `building target=macOS zip`、`building target=DMG` 或 `skipped macOS notarization` 这类日志，才算进入下一阶段。
+
+这次 `0.1.28` 发布时，macOS 签名阶段大约沉默了 9 分钟，但最终成功生成了 mac arm64 的 zip 和 dmg。以后不要因为短时间无输出就中断发布，先检查进程状态。
+
+后续优化方向：启用 `asar`，只通过 `asarUnpack` 或 `extraResources` 解包 Runtime 真正需要直接读取或执行的文件。这样可以显著减少需要逐个签名的文件数量，也能降低 macOS 打包耗时。

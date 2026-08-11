@@ -2,6 +2,11 @@ import type { CodexTask, CodexTaskEvent, RuntimeTaskItem, RuntimeTaskOutput, Run
 
 export type CodexTranscriptItem = CodexTask['transcript'][number]
 export type StructuredTaskEvent = Pick<CodexTaskEvent, 'approval' | 'item' | 'output' | 'plan' | 'pluginRequest' | 'raw' | 'source' | 'timestamp' | 'turnId' | 'type'>
+export type RuntimeTaskStatusExplanation = {
+  detail?: string
+  kind: 'queued' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'interrupted'
+  title: string
+}
 
 function sharedPrefixSuffixLength(left: string, right: string) {
   const maxLength = Math.min(left.length, right.length)
@@ -63,6 +68,12 @@ export function isRuntimeFailureNotice(content: string) {
   const codexRuntimeFailure =
     /(Codex app-server|Codex Runtime).*(退出|断开|失败|错误|超时|没有返回|没有正常|未启动|没连上|请求超时)/i.test(text) ||
     /(退出|断开|失败|错误|超时|没有返回|没有正常|未启动|没连上|请求超时).*(Codex app-server|Codex Runtime)/i.test(text)
+  const enterpriseFailure =
+    /(Token\s*额度不足|当前没有可用\s*Token|额度不足|请先登录墨渊账号|登录状态已失效|账号已停用|企业后台暂时不可用)/i.test(text) ||
+    /(plugin-assets|素材上传失败|文件上传失败|Payload Too Large|413)/i.test(text) ||
+    /(图片生成失败|图片没有生成出来|图片模型通道|图片服务.*失败|图片生成接口)/i.test(text) ||
+    /(视频生成失败|视频没有生成成功|视频服务.*失败|火山方舟.*(失败|未开通)|Ark.*(failed|error))/i.test(text) ||
+    /(本地任务状态丢失|任务状态已丢失|Runtime 已重启|任务不存在|Runtime 返回 404)/i.test(text)
 
   return (
     text.startsWith('失败诊断：') ||
@@ -71,6 +82,7 @@ export function isRuntimeFailureNotice(content: string) {
     text.includes('模型响应超时') ||
     text.includes('模型服务暂时不可用') ||
     codexRuntimeFailure ||
+    enterpriseFailure ||
     /ECONNREFUSED|OPENAI_API_KEY|invalid api key|403 Forbidden|401 Unauthorized|timed out|timeout/i.test(text)
   )
 }
@@ -102,11 +114,44 @@ export function runtimeFailureDiagnostic(items: CodexTranscriptItem[] | string) 
   const evidence = failureEvidence(text)
   const suffix = evidence ? ` 原始线索：${evidence}` : ''
 
+  if (/Token\s*额度不足|当前没有可用\s*Token|额度不足|insufficient quota|quota exceeded|balance/i.test(text)) {
+    return `失败诊断：Token 额度不足。本轮没有继续执行；请充值或让管理员派发额度后重试。${suffix}`
+  }
+  if (/请先登录墨渊账号|登录状态已失效|账号已停用|未授权的本地 Runtime 请求/i.test(text)) {
+    return `失败诊断：账号状态不可用。本轮没有继续执行；请重新登录，或让管理员检查账号状态。${suffix}`
+  }
+  if (/plugin-assets|插件表单提交失败|素材上传失败|文件上传失败|Payload Too Large|413/i.test(text)) {
+    return `失败诊断：插件素材上传失败。表单里的图片、视频或音频没有成功交给后台；可以压缩素材或重新提交插件表单。${suffix}`
+  }
+  if (/not activated the model|has not activated the model|activate the model service|视频模型.*(尚未|未|没有)开通|火山方舟.*模型.*(尚未|未|没有)开通/i.test(text)) {
+    return `失败诊断：视频模型尚未开通。火山方舟当前模型还没有激活，本轮已停止；请在 Ark 控制台开通后重试。${suffix}`
+  }
   if (/OPENAI_API_KEY|invalid api key|403 Forbidden|401 Unauthorized|模型服务暂时不可用/i.test(text)) {
     return `失败诊断：模型通道鉴权失败。后台模型 KEY、Base URL 或默认模型可能不匹配，本轮已停止；请检查后台模型配置后重试。${suffix}`
   }
-  if (/not activated the model|has not activated the model|activate the model service/i.test(text)) {
-    return `失败诊断：视频模型尚未开通。火山方舟当前模型还没有激活，本轮已停止；请在 Ark 控制台开通后重试。${suffix}`
+  if (/敏感信息|敏感内容|sensitive|safety|安全审核|content policy|policy violation/i.test(text)) {
+    return `失败诊断：视频服务安全审核未通过。本轮没有生成资源；请把公众人物、敏感关系、暴力或容易误解的描述改成更中性的虚构表达后重试。${suffix}`
+  }
+  if (/图片模型通道.*(超时|504)|图片生成失败.*(504|技能代理|Gateway Timeout)|图片服务.*(Gateway Timeout|超时)|图片生成接口返回\s*504/i.test(text)) {
+    return `失败诊断：图片模型通道超时。本轮没有生成图片资源；通常是图片服务排队、网关超时或通道波动，可以直接重试，或把画面描述收窄后再试。${suffix}`
+  }
+  if (/图片模型通道鉴权失败|图片.*(invalid api key|401|403|Unauthorized|Forbidden)|图片生成技能未启用/i.test(text)) {
+    return `失败诊断：图片模型通道配置不可用。本轮没有生成图片资源；请检查后台图片技能的 KEY、Base URL 和默认模型。${suffix}`
+  }
+  if (/图片生成接口没有返回 usage\.total_tokens|图片.*无法计费|图片.*计费用量/i.test(text)) {
+    return `失败诊断：图片生成计费信息缺失。本轮没有生成可入账图片；系统为了避免扣错 Token 没有继续入账，需要检查图片代理返回格式。${suffix}`
+  }
+  if (/图片生成失败|图片没有生成出来|图片模型通道|图片服务|图片生成接口/i.test(text)) {
+    return `失败诊断：图片生成服务返回失败。本轮没有生成图片资源；可以调整提示词或稍后重试。${suffix}`
+  }
+  if (/视频生成失败|视频没有生成成功|视频服务|content_generation|火山方舟|Ark/i.test(text)) {
+    return `失败诊断：视频生成服务返回失败。本轮没有生成视频资源；可以调整提示词或素材后重试。${suffix}`
+  }
+  if (/企业后台暂时不可用|Failed to fetch|NetworkError|fetch failed|ECONNRESET|Bad Gateway|Service Unavailable|Gateway Timeout|50[234]/i.test(text)) {
+    return `失败诊断：企业后台暂时不可用。本轮没有继续执行；请稍后重试，或检查后台服务状态。${suffix}`
+  }
+  if (/本地任务状态丢失|任务状态已丢失|Runtime 已重启|任务不存在|Runtime 返回 404/i.test(text)) {
+    return `失败诊断：本地任务状态丢失。Runtime 重启或任务记录丢失后无法继续追踪本轮；可以重新发送。${suffix}`
   }
   if (/timeout|timed out|超时|模型响应超时/i.test(text)) {
     const hasLargeScan = /node_modules|dist|release|\.git|package-lock|find .*type f|find .*maxdepth|grep -n|cat .*index\./i.test(text)
@@ -122,6 +167,16 @@ export function runtimeFailureDiagnostic(items: CodexTranscriptItem[] | string) 
 }
 
 export function friendlyRuntimeMessage(content: string) {
+  const withoutEvidence = content.replace(/\s*原始线索：.*$/s, '').trim()
+  if (withoutEvidence.startsWith('失败诊断：') && /Token\s*额度不足|当前没有可用\s*Token|额度不足/i.test(withoutEvidence)) {
+    return 'Token 额度不足，任务已停止。充值或让管理员派发额度后可以重试。'
+  }
+  if (withoutEvidence.startsWith('失败诊断：') && /账号状态不可用|请先登录墨渊账号|登录状态已失效|账号已停用/i.test(withoutEvidence)) {
+    return '账号状态不可用，任务已停止。请重新登录，或让管理员检查账号状态。'
+  }
+  if (withoutEvidence.startsWith('失败诊断：') && /插件素材上传失败|plugin-assets|素材上传|文件上传|Payload Too Large|413/i.test(withoutEvidence)) {
+    return '插件素材上传失败，任务已停止。可以压缩素材后重新提交表单。'
+  }
   if (content.startsWith('失败诊断：') && /本地 Codex|Codex app-server|Codex Runtime|ECONNREFUSED|连接中断|没有正常收口/i.test(content)) {
     return '本地 Codex 连接中断，已停止。可以重新发送；详细原因已写入本地日志。'
   }
@@ -130,6 +185,33 @@ export function friendlyRuntimeMessage(content: string) {
   }
   if (content.startsWith('失败诊断：') && /超时|timeout|timed out/i.test(content)) {
     return '模型响应超时，已停止。可以缩小任务范围或稍后重试。'
+  }
+  if (withoutEvidence.startsWith('失败诊断：') && /图片模型通道超时|图片.*504|Gateway Timeout/i.test(withoutEvidence)) {
+    return '图片模型通道超时，这次没有生成图片。通常是上游排队或网关波动，可以重新发送。'
+  }
+  if (withoutEvidence.startsWith('失败诊断：') && /图片模型通道配置不可用|图片模型通道鉴权失败|图片生成技能未启用/i.test(withoutEvidence)) {
+    return '图片生成通道配置不可用，请管理员检查后台图片技能的 KEY、Base URL 和默认模型。'
+  }
+  if (withoutEvidence.startsWith('失败诊断：') && /图片生成计费信息缺失|无法计费|计费用量/i.test(withoutEvidence)) {
+    return '图片生成返回缺少计费用量，系统没有扣错 Token。需要检查图片代理返回格式。'
+  }
+  if (withoutEvidence.startsWith('失败诊断：') && /图片生成服务返回失败|图片生成失败|图片没有生成出来|图片模型通道|图片服务/i.test(withoutEvidence)) {
+    return '图片生成服务返回失败，这次没有生成图片。可以调整提示词或稍后重试。'
+  }
+  if (withoutEvidence.startsWith('失败诊断：') && /视频服务安全审核未通过|安全审核|content policy|policy violation/i.test(withoutEvidence)) {
+    return '视频服务安全审核未通过，任务已停止。可以把人物、关系或动作描述改得更中性后重试。'
+  }
+  if (withoutEvidence.startsWith('失败诊断：') && /视频模型尚未开通|火山方舟.*模型.*(尚未|未|没有)开通/i.test(withoutEvidence)) {
+    return '火山方舟视频模型还没有开通，请管理员到 Ark 控制台开通当前视频模型后再试。'
+  }
+  if (withoutEvidence.startsWith('失败诊断：') && /视频生成服务返回失败|视频生成失败|视频没有生成成功|视频服务/i.test(withoutEvidence)) {
+    return '视频生成服务返回失败，任务已停止。可以调整提示词或素材后重试。'
+  }
+  if (withoutEvidence.startsWith('失败诊断：') && /企业后台暂时不可用|后台服务状态/i.test(withoutEvidence)) {
+    return '企业后台暂时不可用，任务已停止。请稍后重试，或检查后台服务状态。'
+  }
+  if (withoutEvidence.startsWith('失败诊断：') && /本地任务状态丢失|Runtime 重启|任务记录丢失/i.test(withoutEvidence)) {
+    return '本地 Runtime 已重启，这个任务状态已丢失。可以重新发送。'
   }
   if (/本地 Codex 内核暂时没有启动成功/.test(content)) {
     return '本轮执行连接中断，已结束，可以重新发送。'
@@ -146,7 +228,137 @@ export function friendlyRuntimeMessage(content: string) {
   if (isRuntimeFailureNotice(content) && /Codex app-server|Codex Runtime|ECONNREFUSED/i.test(content)) {
     return '本轮执行连接中断，已结束，可以重新发送。'
   }
-  return content.replace(/%!s\(int64=(\d+)\)/g, '$1')
+  if (withoutEvidence.startsWith('失败诊断：')) {
+    return withoutEvidence.replace(/^失败诊断：/, '').replace(/%!s\(int64=(\d+)\)/g, '$1')
+  }
+  return withoutEvidence.replace(/%!s\(int64=(\d+)\)/g, '$1')
+}
+
+function latestFailureContent(task: CodexTask) {
+  const items = [...(task.items ?? [])].reverse()
+  const failedItem = items.find((item) => item.status === 'failed' && (item.content || item.summary || item.title))
+  if (failedItem) return failedItem.content || failedItem.summary || failedItem.title
+
+  const failedTurn = [...(task.turns ?? [])].reverse().find((turn) => turn.status === 'failed' && turn.error)
+  if (failedTurn?.error) return failedTurn.error
+
+  const transcriptFailure = [...(task.transcript ?? [])].reverse().find((item) => {
+    const text = item.content.trim()
+    return text.startsWith('失败诊断：') || isRuntimeFailureNotice(text) || /^Codex\s*任务退出，代码/.test(text)
+  })
+  return transcriptFailure?.content
+}
+
+function metadataText(metadata: Record<string, unknown> | undefined, key: string) {
+  const value = metadata?.[key]
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function latestItemWithStatus(task: CodexTask, status: RuntimeTaskItem['status']) {
+  return [...(task.items ?? [])].reverse().find((item) => item.status === status)
+}
+
+function latestVisibleItemWithStatus(task: CodexTask, status: RuntimeTaskItem['status']) {
+  return [...(task.items ?? [])].reverse().find((item) => item.status === status && isVisibleProgressItem(item))
+}
+
+function isVisibleProgressItem(item: RuntimeTaskItem) {
+  const rawType = normalizeStructuredType(item.metadata?.type)
+  if (item.type === 'system' || item.type === 'user_message' || item.type === 'assistant_message' || item.type === 'reasoning') return false
+  if (rawType === 'usermessage' || rawType === 'agentmessage' || rawType === 'agentmessageevent') return false
+  if (/^(userMessage|agentMessage)$/i.test(item.title.trim())) return false
+  return true
+}
+
+function itemProgressDetail(item: RuntimeTaskItem) {
+  if (item.type !== 'video_generation') return item.content
+  if (item.metadata?.handledFailure === true) return item.content || '视频服务没有生成资源，墨渊已说明原因。'
+  const rawStatus = metadataText(item.metadata, 'rawStatus')
+  const providerTaskId = metadataText(item.metadata, 'providerTaskId')
+  if (rawStatus && providerTaskId) return `平台状态：${rawStatus}，Runtime 会继续查询结果。`
+  if (rawStatus) return `平台状态：${rawStatus}，Runtime 会继续查询结果。`
+  if (providerTaskId) return '视频任务已创建，Runtime 正在查询生成结果。'
+  return item.content || '正在准备视频生成服务。'
+}
+
+export function runtimeTaskStatusExplanation(task: CodexTask, elapsedMs = 0): RuntimeTaskStatusExplanation | undefined {
+  const pendingPlugin = (task.pluginRequests ?? []).find((request) => request.status === 'pending')
+  if (pendingPlugin && task.status !== 'interrupted') {
+    return {
+      kind: 'waiting_input',
+      title: '等待插件表单',
+      detail: `${pendingPlugin.title} 需要补充后继续执行。`,
+    }
+  }
+
+  if (task.status === 'failed') {
+    const failedVideoItem = [...(task.items ?? [])].reverse().find((item) => item.type === 'video_generation' && item.status === 'failed')
+    const content = failedVideoItem?.content || latestFailureContent(task) || '任务没有正常完成'
+    return {
+      kind: 'failed',
+      title: failedVideoItem ? '视频没有生成' : '需要处理',
+      detail: friendlyRuntimeMessage(runtimeFailureDiagnostic(content)),
+    }
+  }
+
+  if (task.status === 'interrupted') {
+    return {
+      kind: 'interrupted',
+      title: '任务已停止',
+      detail: '这轮执行已经中断，可以在当前对话里重新发送。',
+    }
+  }
+
+  if (task.status === 'completed') {
+    const outputCount = task.outputs?.length ?? 0
+    const handledVideoItem = [...(task.items ?? [])].reverse().find((item) => item.type === 'video_generation' && item.metadata?.handledFailure === true)
+    if (handledVideoItem) {
+      return {
+        kind: 'completed',
+        title: '视频请求已处理',
+        detail: '这次没有生成视频资源，墨渊已经在聊天里说明原因和修改建议。',
+      }
+    }
+    return outputCount
+      ? { kind: 'completed', title: '任务已完成', detail: `已整理 ${outputCount} 个输出。` }
+      : undefined
+  }
+
+  if (task.status === 'queued') {
+    return {
+      kind: 'queued',
+      title: '已发送，正在创建任务',
+      detail: elapsedMs > 7000 ? '如果这里停留很久，通常是账号校验、Runtime 启动或后台连接较慢。' : undefined,
+    }
+  }
+
+  if (task.status === 'running' || task.status === 'needs_approval') {
+    const runningVideoItem = [...(task.items ?? [])].reverse().find((item) => item.type === 'video_generation' && item.status === 'in_progress')
+    if (runningVideoItem) {
+      return {
+        kind: 'running',
+        title: '视频正在生成',
+        detail: itemProgressDetail(runningVideoItem),
+      }
+    }
+
+    const runningItem = latestVisibleItemWithStatus(task, 'in_progress')
+    if (runningItem) {
+      return {
+        kind: 'running',
+        title: runningItem.title,
+        detail: runningItem.content || runningItem.summary,
+      }
+    }
+
+    return {
+      kind: 'running',
+      title: elapsedMs > 9000 ? 'Codex 仍在编排' : 'Codex 正在编排',
+      detail: elapsedMs > 9000 ? '可能正在准备工具调用、等待模型返回，或等待 Runtime 推送事件。' : undefined,
+    }
+  }
+
+  return undefined
 }
 
 export function applyTaskStructureEvent(task: CodexTask, event: StructuredTaskEvent) {
@@ -305,6 +517,17 @@ function structuredItemFromRaw(rawItem: Record<string, unknown> | undefined, eve
     return { id, type: 'web_search', title: query ? `网页搜索：${query}` : '网页搜索', status, metadata }
   }
 
+  if (rawType === 'usermessage') {
+    return {
+      id,
+      type: 'user_message',
+      title: '收到你的消息',
+      status: 'completed',
+      content: firstStructuredString(rawItem.text, rawItem.message, textFromStructuredContent(rawItem.content)),
+      metadata,
+    }
+  }
+
   if (rawType === 'imagegeneration') {
     return {
       id,
@@ -329,6 +552,20 @@ function structuredItemFromRaw(rawItem: Record<string, unknown> | undefined, eve
 
   if (rawType === 'reasoning') return { id, type: 'reasoning', title: '思考', status, metadata }
   return { id, type: 'system', title: firstStructuredString(rawItem.type) || '任务事件', status, metadata }
+}
+
+function textFromStructuredContent(value: unknown) {
+  if (typeof value === 'string') return value
+  if (!Array.isArray(value)) return ''
+  return value
+    .map((part) => {
+      if (typeof part === 'string') return part
+      if (!part || typeof part !== 'object') return ''
+      const record = part as Record<string, unknown>
+      return firstStructuredString(record.text, record.content, record.value)
+    })
+    .filter(Boolean)
+    .join('')
 }
 
 function outputFromStructuredItem(item: RuntimeTaskItem | undefined, timestamp: string): RuntimeTaskOutput | undefined {

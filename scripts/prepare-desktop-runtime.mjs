@@ -40,6 +40,9 @@ await cp(path.join(runtimeSource, 'dist'), path.join(runtimeTarget, 'dist'), { r
 const runtimePackage = JSON.parse(await readFile(path.join(runtimeSource, 'package.json'), 'utf8'))
 const dependencies = { ...runtimePackage.dependencies }
 delete dependencies['@eaw/shared']
+const codexDependency = dependencies['@openai/codex']
+const codexVersion = typeof codexDependency === 'string' ? codexDependency.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/)?.[0] : undefined
+if (!codexVersion) throw new Error(`Cannot resolve the bundled Codex version from ${codexDependency ?? 'missing dependency'}`)
 
 await writeFile(
   path.join(runtimeTarget, 'package.json'),
@@ -58,6 +61,17 @@ await writeFile(
 )
 
 await run(npmBin, ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--package-lock=false'], runtimeTarget)
+await run(npmBin, [
+  'install',
+  '--omit=dev',
+  '--ignore-scripts',
+  '--no-audit',
+  '--no-fund',
+  '--package-lock=false',
+  '--force',
+  `@openai/codex-win32-x64@npm:@openai/codex@${codexVersion}-win32-x64`,
+  `@openai/codex-win32-arm64@npm:@openai/codex@${codexVersion}-win32-arm64`,
+], runtimeTarget)
 await patchBundledCodexLauncher()
 
 const sharedPackage = JSON.parse(await readFile(path.join(sharedSource, 'package.json'), 'utf8'))

@@ -5,12 +5,14 @@ import { taskMeta } from '../../tasks'
 export function Sidebar({
   activeTaskId,
   isWelcome,
+  onAccountOpen,
   onNewConversation,
   onSelectTask,
   tasks,
 }: {
   activeTaskId: string
   isWelcome: boolean
+  onAccountOpen: () => void
   onNewConversation: () => void
   onSelectTask: (taskId: string) => void
   tasks: CodexTask[]
@@ -55,7 +57,7 @@ export function Sidebar({
         <button title="设置">
           <Settings size={16} />
         </button>
-        <button title="账号">
+        <button onClick={onAccountOpen} title="我的中心">
           <UserRound size={17} />
         </button>
       </div>

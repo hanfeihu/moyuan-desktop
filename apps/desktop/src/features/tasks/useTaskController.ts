@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react'
-import type { AccountUser, CodexTask, CodexTaskEvent } from '@eaw/shared'
+import type { AccountUser, CodexTask, CodexTaskEvent, RuntimeAttachment } from '@eaw/shared'
 import { defaultWorkspace, enterpriseApiBase, localEmployeeId, runtimeUrl, type ExecutionSettings } from '../../config'
+import { uploadDiagnosticsSnapshot } from '../../diagnostics'
 import { errorLogDetails, logClientEvent } from '../../logger'
 import { loadSignedInUser } from '../auth/useAuth'
 import type { RuntimeState } from '../runtime/types'
-import { cancelRuntimeTask, createRuntimeTask, submitRuntimePluginInput } from '../runtime/client'
+import { cancelRuntimeTask, createRuntimeTask, deferRuntimePluginInput, submitRuntimePluginInput } from '../runtime/client'
+import { attachmentForPersistence, revokeAttachmentPreview } from '../chat/attachments'
+import { conversationImages, type ConversationImage } from '../chat/conversationImages'
+import { BREAKDOWN_PROMPT_MARKER, CHARACTER_EXTRACTION_MARKER } from '../storyboard/prompt'
 import { useLiveTaskPolling } from '../runtime/useLiveTaskPolling'
 import { useRuntimeBootstrap } from '../runtime/useRuntimeBootstrap'
 import { useTaskEventStream } from '../runtime/useTaskEventStream'
@@ -44,12 +48,51 @@ function isRuntimeTaskId(taskId: string) {
   return taskId !== 'welcome' && !taskId.startsWith('pending-') && !taskId.startsWith('error-')
 }
 
+// 短剧分镜功能产生的「辅助任务」：逐镜/定妆生图(image-*)、拆分镜 LLM 调用。
+// 这些是后台中间产物，不应污染左侧对话列表。
+function isAuxiliaryTask(task?: CodexTask | null) {
+  if (!task) return false
+  if (task.id.startsWith('image-')) return true
+  const firstUser = task.transcript.find((item) => item.role === 'user')
+  const probe = firstUser?.content ?? task.title ?? ''
+  return probe.startsWith(BREAKDOWN_PROMPT_MARKER) || probe.startsWith(CHARACTER_EXTRACTION_MARKER)
+}
+
 function shouldWatchRuntimeTask(task?: CodexTask | null) {
   return Boolean(task && isRuntimeTaskId(task.id) && isLiveTask(task))
 }
 
 const SUBMIT_AUTH_REFRESH_TIMEOUT_MS = 5000
 const SUBMIT_AUTH_REQUIRED_TIMEOUT_MS = 7000
+const MAX_IMAGE_ATTACHMENTS = 16
+
+async function sha256Hex(value: string) {
+  const bytes = new TextEncoder().encode(value)
+  const digest = await window.crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+async function fileToAttachment(file: File): Promise<RuntimeAttachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('图片读取失败'))
+    reader.onload = async () => {
+      const dataUrl = typeof reader.result === 'string' ? reader.result : ''
+      resolve({
+        id: `attachment-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        type: 'image',
+        name: file.name || '图片',
+        mimeType: file.type || 'image/png',
+        size: file.size,
+        localUrl: URL.createObjectURL(file),
+        dataUrl,
+        sha256: dataUrl ? await sha256Hex(dataUrl) : undefined,
+        createdAt: nowIso(),
+      })
+    }
+    reader.readAsDataURL(file)
+  })
+}
 
 export function useTaskController({
   authState,
@@ -76,6 +119,7 @@ export function useTaskController({
   const [isCancelling, setIsCancelling] = useState(false)
   const [runtimeState, setRuntimeState] = useState<RuntimeState>('checking')
   const [quotaNotice, setQuotaNotice] = useState('')
+  const [attachments, setAttachments] = useState<RuntimeAttachment[]>([])
   const [sseReconnectNonce, setSseReconnectNonce] = useState(0)
   const [watchedTaskIds, setWatchedTaskIds] = useState<string[]>([])
   const workspace = defaultWorkspace
@@ -87,6 +131,7 @@ export function useTaskController({
   const liveTaskIds = useMemo(() => tasks.filter(shouldWatchRuntimeTask).map((task) => task.id).sort().join('|'), [tasks])
   const watchedTaskIdsKey = useMemo(() => watchedTaskIds.slice().sort().join('|'), [watchedTaskIds])
   const visibleTranscript = useMemo(() => activeTask.transcript.filter(shouldShowMessage), [activeTask.transcript])
+  const mentionImages = useMemo(() => conversationImages(activeTask), [activeTask])
   const isWelcome = activeTask.id === 'welcome'
   const isBusy = isLiveTask(activeTask)
   const busyElapsed = useBusyElapsed(activeTask, isBusy)
@@ -96,7 +141,7 @@ export function useTaskController({
   const remainingTokens = authUser ? authUser.tokenBudget - authUser.tokenUsed : 0
   const quotaDepleted = remainingTokens <= 0
   const placeholder = quotaDepleted ? 'Token 额度不足，可先充值或联系管理员' : isBusy ? '当前任务运行中，完成后继续发送' : '让墨渊做点什么...'
-  const canSubmit = !isSubmitting && !isBusy && !quotaDepleted && Boolean(prompt.trim())
+  const canSubmit = !isSubmitting && !isBusy && !quotaDepleted && (Boolean(prompt.trim()) || attachments.length > 0)
   const showStatusBadge = !isWelcome && (activeTask.status !== 'completed' || runtimeState === 'offline')
 
   function selectTask(taskId: string) {
@@ -121,6 +166,63 @@ export function useTaskController({
     window.requestAnimationFrame(onFocusComposer)
   }
 
+  async function addImageAttachments(files: File[]) {
+    const images = files.filter((file) => file.type.startsWith('image/')).slice(0, Math.max(0, MAX_IMAGE_ATTACHMENTS - attachments.length))
+    if (!images.length) {
+      if (attachments.length >= MAX_IMAGE_ATTACHMENTS) {
+        setQuotaNotice(`一次最多添加 ${MAX_IMAGE_ATTACHMENTS} 张图片。`)
+        window.setTimeout(() => setQuotaNotice(''), 2400)
+      }
+      return
+    }
+    try {
+      const next = await Promise.all(images.map(fileToAttachment))
+      setAttachments((current) => [...current, ...next].slice(0, MAX_IMAGE_ATTACHMENTS))
+    } catch (error) {
+      logClientEvent('attachments.image_read_failed', errorLogDetails(error), 'warn')
+      setQuotaNotice('图片读取失败，请重新选择。')
+      window.setTimeout(() => setQuotaNotice(''), 2400)
+    }
+  }
+
+  function removeAttachment(id: string) {
+    setAttachments((current) => {
+      const target = current.find((attachment) => attachment.id === id)
+      if (target?.localUrl?.startsWith('blob:')) URL.revokeObjectURL(target.localUrl)
+      return current.filter((attachment) => attachment.id !== id)
+    })
+  }
+
+  function attachConversationImage(image: ConversationImage) {
+    const dedupeKey = image.dataUrl ?? image.url
+    let added = false
+    setAttachments((current) => {
+      if (current.length >= MAX_IMAGE_ATTACHMENTS) return current
+      const exists = current.some((attachment) => (attachment.storageUrl ?? attachment.dataUrl ?? attachment.localUrl) === dedupeKey)
+      if (exists) return current
+      added = true
+      return [
+        ...current,
+        {
+          id: `mention-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          type: 'image',
+          name: image.name,
+          mimeType: image.mimeType ?? 'image/png',
+          size: image.size ?? 0,
+          dataUrl: image.dataUrl,
+          storageUrl: image.dataUrl ? undefined : image.url,
+          localUrl: image.dataUrl ? undefined : image.url,
+          sha256: image.sha256,
+          createdAt: nowIso(),
+        },
+      ]
+    })
+    if (!added && attachments.length >= MAX_IMAGE_ATTACHMENTS) {
+      setQuotaNotice(`一次最多添加 ${MAX_IMAGE_ATTACHMENTS} 张图片。`)
+      window.setTimeout(() => setQuotaNotice(''), 2400)
+    }
+  }
+
   function resetTasks() {
     logClientEvent('task.reset')
     setQuotaNotice('')
@@ -130,7 +232,10 @@ export function useTaskController({
 
   const handleRuntimeTasksLoaded = useCallback((loadedTasks: CodexTask[]) => {
     if (!loadedTasks.length) return
-    const nextTasks = loadedTasks.map(normalizeTask).sort((a, b) => taskSortValue(b) - taskSortValue(a))
+    const nextTasks = loadedTasks
+      .filter((task) => !isAuxiliaryTask(task))
+      .map(normalizeTask)
+      .sort((a, b) => taskSortValue(b) - taskSortValue(a))
     setTasks(nextTasks)
     setActiveTaskId((current) => (current === welcomeTask.id ? nextTasks[0]?.id ?? current : current))
   }, [])
@@ -293,10 +398,41 @@ export function useTaskController({
     }
   }
 
+  async function deferPluginRequest(requestId: string) {
+    if (activeTask.id === 'welcome') return
+    logClientEvent('plugin_request.defer.start', { requestId, task: taskLogSummary(activeTask) })
+    try {
+      const updatedTask = await deferRuntimePluginInput(activeTask.id, requestId)
+      logClientEvent('plugin_request.defer.success', { requestId, task: taskLogSummary(updatedTask) })
+      setRuntimeState('online')
+      setTasks((current) => mergeTask(current, updatedTask))
+    } catch (error) {
+      logClientEvent('plugin_request.defer.failed', errorLogDetails(error, { requestId, task: taskLogSummary(activeTask) }), 'error')
+      const message = error instanceof Error ? error.message : '稍后处理失败'
+      setTasks((current) =>
+        current.map((task) =>
+          task.id === activeTask.id
+            ? {
+                ...task,
+                transcript: [
+                  ...task.transcript,
+                  { role: 'system', content: `稍后处理失败：${message}`, timestamp: nowIso() },
+                ],
+              }
+            : task,
+        ),
+      )
+    } finally {
+      window.requestAnimationFrame(onFocusComposer)
+    }
+  }
+
   async function submitTask() {
     const promptText = prompt.trim()
+    const draftAttachments = attachments
+    const taskAttachments = draftAttachments.map(attachmentForPersistence)
     const workspacePath = workspace.trim() || defaultWorkspace
-    if (!promptText || isSubmitting || isBusy || !authToken) return
+    if ((!promptText && !taskAttachments.length) || isSubmitting || isBusy || !authToken) return
     if (quotaDepleted) {
       logClientEvent('task.submit.quota_depleted', { remainingTokens })
       setQuotaNotice('当前没有可用 Token，等待管理员在后台派发额度。')
@@ -308,16 +444,19 @@ export function useTaskController({
     logClientEvent('task.submit.preflight', {
       activeTask: taskLogSummary(activeTask),
       executionSettings,
+      attachmentCount: taskAttachments.length,
       promptLength: promptText.length,
       workspace: workspacePath,
     })
     onPinToBottom()
     const shouldResume = activeTask.id !== 'welcome' && canResumeTask(activeTask)
-    const pendingTask = shouldResume ? appendPendingTurn(activeTask, promptText, workspacePath) : buildPendingTask(promptText, workspacePath)
+    const pendingTask = shouldResume ? appendPendingTurn(activeTask, promptText, workspacePath, taskAttachments) : buildPendingTask(promptText, workspacePath, taskAttachments)
     setIsSubmitting(true)
     setTasks((current) => mergeTask(current, pendingTask))
     setActiveTaskId(pendingTask.id)
     setPrompt('')
+    setAttachments([])
+    draftAttachments.forEach(revokeAttachmentPreview)
 
     const failPendingTask = (message: string) => {
       const failedTask: CodexTask = {
@@ -396,6 +535,7 @@ export function useTaskController({
         sandboxMode: executionSettings.sandboxMode,
         workspace: workspacePath,
         prompt: promptText,
+        attachments: taskAttachments,
         parentTaskId: shouldResume ? activeTask.id : undefined,
         sessionId: shouldResume ? activeTask.sessionId : undefined,
       })
@@ -416,6 +556,7 @@ export function useTaskController({
         shouldResume,
         sourceTask: taskLogSummary(activeTask),
       }), 'error')
+      void uploadDiagnosticsSnapshot('task-submit-failed')
       setRuntimeState('offline')
       const errorTask = buildLocalErrorTask(error, workspacePath)
       setTasks((current) => (shouldResume ? mergeTask(current, errorTask) : replaceTask(current, pendingTask.id, errorTask)))
@@ -428,12 +569,16 @@ export function useTaskController({
 
   return {
     activeTask,
+    attachments,
+    addImageAttachments,
+    attachConversationImage,
     busyElapsed,
     canSubmit,
     isBusy,
     isCancelling,
     isSubmitting,
     isWelcome,
+    mentionImages,
     placeholder,
     prompt,
     quotaDepleted,
@@ -443,10 +588,12 @@ export function useTaskController({
     runtimeState,
     selectTask,
     setPrompt,
+    removeAttachment,
     shouldShowThinking,
     showStatusBadge,
     startNewConversation,
     stopActiveTask,
+    deferPluginRequest,
     submitPluginRequest,
     submitTask,
     tasks,

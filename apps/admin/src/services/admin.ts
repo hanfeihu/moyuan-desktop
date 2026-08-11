@@ -1,5 +1,6 @@
-import type { AccountUser, ClientLogRecord, Employee, EnterprisePolicy, GeneratedAssetRecord, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, PaymentGatewayConfig, PluginDefinition, RechargeOrder, TokenPlan, VideoSkillConfig } from '@eaw/shared'
-import { defaultEmployees, defaultImageSkill, defaultMailSettings, defaultPaymentGateway, defaultPolicy, defaultProviders, defaultTokenPlans, defaultVideoSkill } from '@/data/defaults'
+import type { AccountUser, BillingConfig, ClientLogRecord, Employee, EnterprisePolicy, GeneratedAssetRecord, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, PaymentGatewayConfig, PluginDefinition, RechargeOrder, TokenPlan, UsageLedgerEntry, VideoSkillConfig } from '@eaw/shared'
+import { interactiveVideoPluginInputFields, interactiveVideoPluginInputUi } from '@eaw/shared'
+import { defaultBillingConfig, defaultEmployees, defaultImageSkill, defaultMailSettings, defaultPaymentGateway, defaultPolicy, defaultProviders, defaultTokenPlans, defaultVideoSkill } from '@/data/defaults'
 
 const apiBase = '/admin-api'
 const adminTokenStorageKey = 'moyuan.admin.token'
@@ -20,6 +21,7 @@ export type AdminSnapshot = {
   policy: PolicyView
   providers: ModelProviderConfig[]
   imageSkill: ImageSkillConfig
+  billingConfig: BillingConfig
   paymentGateway: PaymentGatewayConfig
   plugins: PluginDefinition[]
   tokenPlans: TokenPlan[]
@@ -79,12 +81,26 @@ function normalizeTokenPlans(plans?: TokenPlan[] | null): TokenPlan[] {
   return (plans?.length ? plans : defaultTokenPlans).slice().sort((left, right) => left.sort - right.sort || left.price - right.price)
 }
 
+function normalizeBillingConfig(config?: Partial<BillingConfig> | null): BillingConfig {
+  const fallbackMeters = defaultBillingConfig.meters
+  const meters = config?.meters?.length ? config.meters : fallbackMeters
+  return {
+    ...defaultBillingConfig,
+    ...config,
+    meters: meters.map((meter, index) => ({
+      ...fallbackMeters[index],
+      ...meter,
+      deductionFactor: meter.deductionFactor ?? fallbackMeters[index]?.deductionFactor ?? 1,
+    })),
+  }
+}
+
 function defaultPlugins(): PluginDefinition[] {
   return [
     {
       id: 'interactive-video-request',
       name: '视频生成表单',
-      description: 'Codex 需要用户补充文本、首尾帧、参考图/视频/音频和生成参数时，弹出多模态视频表单。',
+      description: 'Codex 需要用户补充视频描述、首尾帧、参考图/视频/音频和生成设置时，弹出多模态视频表单。',
       category: 'media',
       handler: 'runtime',
       interactionMode: 'requires_user_input',
@@ -94,21 +110,8 @@ function defaultPlugins(): PluginDefinition[] {
       ready: true,
       status: 'ready',
       triggerHints: ['生成视频', '图生视频', '文生视频', '做短片'],
-      inputFields: [
-        { id: 'taskType', label: '任务类型', type: 'select', required: true },
-        { id: 'prompt', label: '核心创意', type: 'textarea', required: true },
-        { id: 'subjectDefinitions', label: '主体定义', type: 'textarea' },
-        { id: 'shotList', label: '分镜时序', type: 'textarea' },
-        { id: 'firstFrame', label: '首帧图片', type: 'image', maxFiles: 1 },
-        { id: 'lastFrame', label: '尾帧图片', type: 'image', maxFiles: 1 },
-        { id: 'referenceImages', label: '参考图片', type: 'image', maxFiles: 9 },
-        { id: 'referenceVideos', label: '参考视频', type: 'video', maxFiles: 3 },
-        { id: 'referenceAudios', label: '参考音频', type: 'audio', maxFiles: 3 },
-        { id: 'visualStyle', label: '画质与风格', type: 'textarea' },
-        { id: 'constraints', label: '约束条件', type: 'textarea' },
-        { id: 'ratio', label: '画面比例', type: 'select' },
-        { id: 'duration', label: '时长', type: 'number' },
-      ],
+      inputUi: interactiveVideoPluginInputUi,
+      inputFields: interactiveVideoPluginInputFields,
       permissions: ['请求用户补充参数', '读取用户上传素材', '把表单结果交回 Codex'],
       quotaType: 'task',
     },
@@ -204,7 +207,7 @@ export function policyText(policy: EnterprisePolicy): PolicyView {
 
 export async function loadAdminSnapshot(): Promise<AdminSnapshot> {
   try {
-    const [modelPayload, providersPayload, employeePayload, policyPayload, imageSkillPayload, videoSkillPayload, paymentGatewayPayload, tokenPlansPayload] = await Promise.all([
+    const [modelPayload, providersPayload, employeePayload, policyPayload, imageSkillPayload, videoSkillPayload, paymentGatewayPayload, tokenPlansPayload, billingPayload] = await Promise.all([
       getJson<ModelProviderConfig>('/model-provider'),
       getJson<ModelProviderConfig[]>('/model-providers'),
       getJson<Employee[]>('/employees'),
@@ -213,6 +216,7 @@ export async function loadAdminSnapshot(): Promise<AdminSnapshot> {
       getJson<VideoSkillConfig>('/video-skill'),
       getJson<PaymentGatewayConfig>('/payment-gateway'),
       getJson<TokenPlan[]>('/token-plans'),
+      getJson<BillingConfig>('/billing-config'),
     ])
     const providers = providersPayload.data.length ? providersPayload.data.map(normalizeProvider) : [normalizeProvider(modelPayload.data)]
     const modelProvider = providers.find((item) => item.enabled) ?? normalizeProvider(modelPayload.data)
@@ -226,6 +230,7 @@ export async function loadAdminSnapshot(): Promise<AdminSnapshot> {
       policy: policyText(policyPayload.data),
       providers,
       imageSkill,
+      billingConfig: normalizeBillingConfig(billingPayload.data),
       videoSkill,
       plugins: pluginsPayload.data,
       paymentGateway: normalizePaymentGateway(paymentGatewayPayload.data),
@@ -239,6 +244,7 @@ export async function loadAdminSnapshot(): Promise<AdminSnapshot> {
       policy: defaultPolicy,
       providers: defaultProviders,
       imageSkill: defaultImageSkill,
+      billingConfig: defaultBillingConfig,
       videoSkill: defaultVideoSkill,
       plugins: defaultPlugins(),
       paymentGateway: defaultPaymentGateway,
@@ -257,9 +263,11 @@ function pluginBody(values: Record<string, unknown>) {
     ? values.inputFields.map((field) => {
         const item = field as Record<string, unknown>
         return {
+          helpText: item.helpText,
           id: item.id,
           label: item.label,
           maxFiles: item.maxFiles === undefined || item.maxFiles === '' ? undefined : Number(item.maxFiles),
+          placeholder: item.placeholder,
           type: item.type,
           required: Boolean(item.required),
           options: splitLines(item.optionsText ?? item.options).map((value) => ({ label: value, value })),
@@ -271,6 +279,7 @@ function pluginBody(values: Record<string, unknown>) {
     description: values.description,
     enabled: Boolean(values.enabled),
     handler: values.handler,
+    inputUi: values.inputUi,
     inputFields,
     interactionMode: values.interactionMode,
     name: values.name,
@@ -458,6 +467,35 @@ export async function loadTokenPlans() {
     return normalizeTokenPlans(payload.data)
   } catch {
     return defaultTokenPlans
+  }
+}
+
+export async function loadBillingConfig() {
+  try {
+    const payload = await getJson<BillingConfig>('/billing-config')
+    return normalizeBillingConfig(payload.data)
+  } catch {
+    return defaultBillingConfig
+  }
+}
+
+export async function saveBillingConfig(values: BillingConfig) {
+  const response = await adminFetch('/billing-config', {
+    body: JSON.stringify(values),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'PUT',
+  })
+  const payload = (await response.json()) as { data?: BillingConfig; error?: string }
+  if (!response.ok || !payload.data) throw new Error(payload.error ?? '计费配置保存失败')
+  return normalizeBillingConfig(payload.data)
+}
+
+export async function loadUsageLedger() {
+  try {
+    const payload = await getJson<UsageLedgerEntry[]>('/usage-ledger')
+    return payload.data
+  } catch {
+    return []
   }
 }
 

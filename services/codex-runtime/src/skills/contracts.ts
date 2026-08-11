@@ -1,4 +1,4 @@
-import type { PluginDefinition, VideoRatio, VideoResolution } from '@eaw/shared'
+import type { ImageGenerationInputImage, PluginDefinition, VideoRatio, VideoResolution } from '@eaw/shared'
 
 export const videoRatioOptions = ['adaptive', '16:9', '4:3', '1:1', '3:4', '9:16', '21:9'] as const satisfies readonly VideoRatio[]
 
@@ -40,7 +40,7 @@ export type RuntimeRunOptions = {
 }
 
 export type MoyuanToolCall =
-  | { tool: 'image_generation'; prompt?: string; size?: '1024x1024' | '1024x1536' | '1536x1024'; model?: string }
+  | { tool: 'image_generation'; images?: ImageGenerationInputImage[]; prompt?: string; size?: '1024x1024' | '1024x1536' | '1536x1024'; model?: string }
   | {
       tool: 'video_generation'
       content?: unknown[]
@@ -49,6 +49,7 @@ export type MoyuanToolCall =
       model?: string
       prompt?: string
       ratio?: VideoRatio
+      returnLastFrame?: boolean
       watermark?: boolean
     }
 
@@ -65,7 +66,10 @@ function extractJsonObject(content: string) {
   if (fenced) return fenced
   if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed
 
-  const marker = trimmed.indexOf('moyuan_tool')
+  const marker = ['moyuan_tool', 'moyuan_plugin', 'image_generation', 'video_generation']
+    .map((value) => trimmed.indexOf(value))
+    .filter((value) => value >= 0)
+    .sort((left, right) => left - right)[0] ?? -1
   if (marker < 0) return undefined
 
   const start = trimmed.lastIndexOf('{', marker)
@@ -135,13 +139,15 @@ export function buildSkillInstructionBlock(skills: EnterpriseSkillSet) {
     '可用技能工具（它们是你的手脚架，由你判断是否调用；不要让用户切换模式）:',
     `1. image_generation: ${image.enabled && image.apiKeyConfigured ? '已启用' : '未配置'}，默认模型 ${image.defaultModel}。用于生成静态图片、海报、插画、头像、logo、封面等。`,
     `   调用方式：只输出一行 JSON，不要解释：{"moyuan_tool":"image_generation","prompt":"高质量成图提示词","size":"1024x1024"}；size 可选 1024x1024、1024x1536、1536x1024，由你按用户意图判断。`,
+    '   图生图/参考图：如果用户随消息附带了图片，需要把这些图片作为 images 输入使用；可以输出 {"moyuan_tool":"image_generation","prompt":"...","images":[{"image_url":{"url":"https://..."}}]}，也可以省略 images，由 Runtime 自动使用本轮附图。最多 16 张。',
     '   重要：当用户明确要求生成图片成品时，不能用文字回答“已生成”“可以生成”“我会生成”；必须只返回 image_generation JSON，由 Runtime 执行后展示真实图片资源。',
     '   如果图片涉及真实公众人物、新闻人物或容易误导的场景，应在 prompt 中明确非写实、插画、漫画或编辑风格，避免生成误导性真实照片。',
     `2. video_generation: ${videoStatus}${video ? `，默认模型 ${video.defaultModel}，默认比例 ${defaultVideoRatio}，默认时长 ${video.defaultDuration}s` : ''}。用于文生视频、图生视频、参考视频/音频驱动的视频生成。`,
     '   火山方舟技能契约来自官方 Contents Generations Tasks：Runtime 会把你的 JSON 转成 POST /contents/generations/tasks，KEY 由企业后台代理保存。',
     '   ratio 可选 adaptive、16:9、4:3、1:1、3:4、9:16、21:9；Seedance 2.0 优先使用 adaptive，除非用户明确要求横屏、竖屏、方形或超宽屏。',
-    `   文生视频调用：{"moyuan_tool":"video_generation","prompt":"视频创意描述","generate_audio":true,"ratio":"${defaultVideoRatio}","duration":8,"watermark":false}`,
-    `   多模态参考调用：{"moyuan_tool":"video_generation","content":[{"type":"text","text":"完整视频描述"},{"type":"image_url","image_url":{"url":"https://.../first.jpg"},"role":"reference_image"},{"type":"video_url","video_url":{"url":"https://.../ref.mp4"},"role":"reference_video"},{"type":"audio_url","audio_url":{"url":"https://.../bgm.mp3"},"role":"reference_audio"}],"generate_audio":true,"ratio":"${defaultVideoRatio}","duration":8,"watermark":false}`,
+    `   文生视频调用：{"moyuan_tool":"video_generation","prompt":"视频创意描述","generate_audio":true,"return_last_frame":true,"ratio":"${defaultVideoRatio}","duration":8,"watermark":false}`,
+    `   多模态参考调用：{"moyuan_tool":"video_generation","content":[{"type":"text","text":"完整视频描述"},{"type":"image_url","image_url":{"url":"https://.../first.jpg"},"role":"reference_image"},{"type":"video_url","video_url":{"url":"https://.../ref.mp4"},"role":"reference_video"},{"type":"audio_url","audio_url":{"url":"https://.../bgm.mp3"},"role":"reference_audio"}],"generate_audio":true,"return_last_frame":true,"ratio":"${defaultVideoRatio}","duration":8,"watermark":false}`,
+    '   return_last_frame 默认 true；开启后查询视频任务时可返回无水印 PNG 尾帧，适合把上一段尾帧作为下一段首帧来连续生成。',
     '   重要：当用户明确要求生成视频成品时，如果没有匹配的交互插件需要补充输入，不能用文字回答“已生成”；必须只返回 video_generation JSON，由 Runtime 执行后展示真实视频资源。',
     '- 如果用户是在询问如何接入、开发、调试、配置这些能力，或要求修改相关代码，不要调用技能，直接完成代码/方案任务。',
     '- 如果用户明确要生成图或视频成品，优先调用对应技能；如果技能未启用，直接说明需要管理员在后台启用，不要编造结果。',
@@ -166,9 +172,12 @@ export function parseMoyuanToolCall(content: string): MoyuanToolCall | undefined
       generateAudio?: unknown
       prompt?: unknown
       ratio?: unknown
+      return_last_frame?: unknown
+      returnLastFrame?: unknown
       size?: unknown
       model?: unknown
       watermark?: unknown
+      images?: unknown
     }
     const tool = [payload.moyuan_tool, payload.tool, payload.name].find((value) => typeof value === 'string')
     const prompt = typeof payload.prompt === 'string' && payload.prompt.trim() ? payload.prompt.trim() : undefined
@@ -176,7 +185,7 @@ export function parseMoyuanToolCall(content: string): MoyuanToolCall | undefined
 
     if (tool === 'image_generation') {
       const size = payload.size === '1024x1536' || payload.size === '1536x1024' || payload.size === '1024x1024' ? payload.size : undefined
-      return { tool, prompt, size, model }
+      return { tool, images: parseImageInputs(payload.images), prompt, size, model }
     }
 
     if (tool === 'video_generation') {
@@ -188,6 +197,7 @@ export function parseMoyuanToolCall(content: string): MoyuanToolCall | undefined
         model,
         prompt,
         ratio: typeof payload.ratio === 'string' && videoRatioOptions.includes(payload.ratio as VideoRatio) ? payload.ratio as VideoRatio : undefined,
+        returnLastFrame: typeof payload.return_last_frame === 'boolean' ? payload.return_last_frame : typeof payload.returnLastFrame === 'boolean' ? payload.returnLastFrame : undefined,
         watermark: typeof payload.watermark === 'boolean' ? payload.watermark : undefined,
       }
     }
@@ -196,6 +206,32 @@ export function parseMoyuanToolCall(content: string): MoyuanToolCall | undefined
   }
 
   return undefined
+}
+
+function parseImageInputs(value: unknown): ImageGenerationInputImage[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const images = value
+    .map((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return undefined
+      const record = item as Record<string, unknown>
+      const imageUrl = record.image_url
+      const nestedImageUrl = imageUrl && typeof imageUrl === 'object' && !Array.isArray(imageUrl) ? (imageUrl as { url?: unknown }).url : undefined
+      const parsed: ImageGenerationInputImage = {}
+      if (typeof record.file_id === 'string' && record.file_id.trim()) parsed.file_id = record.file_id.trim()
+      if (typeof record.fileId === 'string' && record.fileId.trim()) parsed.file_id = record.fileId.trim()
+      if (typeof imageUrl === 'string' && imageUrl.trim()) parsed.image_url = imageUrl.trim()
+      if (typeof nestedImageUrl === 'string' && nestedImageUrl.trim()) parsed.image_url = { url: nestedImageUrl.trim() }
+      if (typeof record.url === 'string' && record.url.trim()) parsed.url = record.url.trim()
+      if (typeof record.dataUrl === 'string' && record.dataUrl.trim()) parsed.dataUrl = record.dataUrl.trim()
+      if (typeof record.mimeType === 'string' && record.mimeType.trim()) parsed.mimeType = record.mimeType.trim()
+      if (typeof record.name === 'string' && record.name.trim()) parsed.name = record.name.trim()
+      if (typeof record.sha256 === 'string' && record.sha256.trim()) parsed.sha256 = record.sha256.trim()
+      if (typeof record.size === 'number' && Number.isFinite(record.size)) parsed.size = record.size
+      return parsed.file_id || parsed.image_url || parsed.url || parsed.dataUrl ? parsed : undefined
+    })
+    .filter((item): item is ImageGenerationInputImage => Boolean(item))
+    .slice(0, 16)
+  return images.length ? images : undefined
 }
 
 export function parseMoyuanPluginInputCall(content: string): MoyuanPluginInputCall | undefined {

@@ -1,4 +1,4 @@
-import { defaultVideoRatioForModel, type Employee, type ImageSkillConfig, type MailServiceConfig, type ModelProviderConfig, type PaymentGatewayConfig, type TokenPlan, type VideoSkillConfig } from '@eaw/shared'
+import { defaultVideoRatioForModel, type BillingConfig, type Employee, type ImageSkillConfig, type MailServiceConfig, type ModelProviderConfig, type PaymentGatewayConfig, type TokenPlan, type VideoSkillConfig } from '@eaw/shared'
 import type { PolicyView } from '@/services/admin'
 
 export const defaultProviders: ModelProviderConfig[] = [
@@ -81,6 +81,48 @@ export const defaultPaymentGateway: PaymentGatewayConfig = {
 }
 
 const now = new Date().toISOString()
+
+export const defaultBillingConfig: BillingConfig = {
+  platformPriceCny: 10,
+  platformTokens: 10000000,
+  updatedAt: now,
+  meters: [
+    {
+      id: 'brain-default',
+      type: 'brain',
+      name: '大脑模型',
+      costCny: 0.5,
+      costUnitTokens: 1000000,
+      deductionFactor: 1,
+      markupRate: 0,
+      enabled: true,
+      updatedAt: now,
+    },
+    {
+      id: 'image-default',
+      type: 'image',
+      name: '图片技能',
+      costCny: 0.1,
+      costUnitTokens: 1000,
+      deductionFactor: 1,
+      markupRate: 0,
+      enabled: true,
+      updatedAt: now,
+    },
+    {
+      id: 'video-seedance',
+      type: 'video',
+      name: '视频技能',
+      provider: 'volcengine-ark',
+      costCny: 2800,
+      costUnitTokens: 100000000,
+      deductionFactor: 1.64285714,
+      markupRate: 0,
+      enabled: true,
+      updatedAt: now,
+    },
+  ],
+}
 
 export const defaultTokenPlans: TokenPlan[] = [
   {

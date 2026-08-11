@@ -69,35 +69,34 @@ export type PluginInputField = {
   options?: Array<{ label: string; value: string }>
 }
 
+export type PluginInputUiConfig = {
+  variant?: 'default' | 'video'
+  kicker?: string
+  title?: string
+  description?: string
+  promptSectionTitle?: string
+  mediaSectionTitle?: string
+  settingsSectionTitle?: string
+}
+
+export const interactiveVideoPluginInputUi = {
+  variant: 'video',
+  kicker: '视频生成',
+  title: '确认视频需求',
+  description: '写下想要的视频，也可以补充参考素材。',
+  promptSectionTitle: '视频描述',
+  mediaSectionTitle: '参考素材',
+  settingsSectionTitle: '生成设置',
+} satisfies PluginInputUiConfig
+
 export const interactiveVideoPluginInputFields = [
   {
-    id: 'taskType',
-    label: '任务类型',
-    type: 'select',
-    required: true,
-    options: ['多模态参考', '编辑视频', '延长视频', '组合任务'].map((value) => ({ label: value, value })),
-  },
-  {
     id: 'prompt',
-    label: '核心创意',
+    label: '视频描述',
     type: 'textarea',
     required: true,
-    placeholder: '用“主体 + 动作 + 场景 + 镜头 + 风格 + 约束”描述要生成的视频。',
-    helpText: 'Seedance 2.0 更适合工程型指令，避免只写抽象形容词。',
-  },
-  {
-    id: 'subjectDefinitions',
-    label: '主体定义',
-    type: 'textarea',
-    placeholder: '例如：将图片1中穿青色长袍、束发的男子定义为主角。',
-    helpText: '用于减少人物 ID 漂移；每个主体用 2-3 个稳定特征定义。',
-  },
-  {
-    id: 'shotList',
-    label: '分镜时序',
-    type: 'textarea',
-    placeholder: '镜头1：...\n镜头2：...\n镜头3：...',
-    helpText: '按镜头顺序描述动作、位置、运镜和音效，不强制精确秒数。',
+    placeholder: '描述想要的视频。可以写故事、广告脚本、镜头要求，也可以写“参考图片1的角色”。',
+    helpText: '素材会按上传顺序交给视频模型，墨渊会整理成模型需要的内容结构。',
   },
   { id: 'firstFrame', label: '首帧图片', type: 'image', maxFiles: 1, helpText: '需要严格首帧一致时使用。' },
   { id: 'lastFrame', label: '尾帧图片', type: 'image', maxFiles: 1, helpText: '需要严格尾帧一致时使用。' },
@@ -105,34 +104,24 @@ export const interactiveVideoPluginInputFields = [
   { id: 'referenceVideos', label: '参考视频', type: 'video', maxFiles: 3, helpText: '0-3 个。可作为运镜、动作、特效或编辑/延长对象。' },
   { id: 'referenceAudios', label: '参考音频', type: 'audio', maxFiles: 3, helpText: '0-3 个。不要只传文本+音频；建议同时提供图片或视频素材。' },
   {
-    id: 'visualStyle',
-    label: '画质与风格',
-    type: 'textarea',
-    placeholder: '高清，电影质感，光影柔和，3D 国漫 CG 仙侠风格。',
-  },
-  {
-    id: 'constraints',
-    label: '约束条件',
-    type: 'textarea',
-    placeholder: '保持无字幕，不要生成水印，不要生成 Logo，人物面部稳定不变形。',
-  },
-  {
     id: 'ratio',
     label: '画面比例',
     type: 'select',
     options: videoRatioOptions.map((value) => ({ label: value, value })),
   },
-  { id: 'duration', label: '时长', type: 'number' },
-  {
-    id: 'resolution',
-    label: '清晰度',
-    type: 'select',
-    options: videoResolutionOptions.map((value) => ({ label: value, value })),
-  },
+  { id: 'duration', label: '视频时长', type: 'number' },
   { id: 'generateAudio', label: '生成音频', type: 'boolean' },
+  { id: 'returnLastFrame', label: '保留尾帧', type: 'boolean', helpText: '生成后保留最后一帧，方便后续续写或做项目素材。' },
+  { id: 'watermark', label: '添加水印', type: 'boolean' },
 ] satisfies PluginInputField[]
 
 export const legacyInteractiveVideoPluginFieldIds = [
+  'taskType',
+  'subjectDefinitions',
+  'shotList',
+  'visualStyle',
+  'constraints',
+  'resolution',
   'referenceImage',
   'referenceVideo',
   'referenceImage1',
@@ -142,7 +131,7 @@ export const legacyInteractiveVideoPluginFieldIds = [
 ] as const
 
 export function hasSeedanceInteractiveVideoPluginFields(fields: Pick<PluginInputField, 'id'>[] = []) {
-  return fields.some((field) => field.id === 'taskType' || field.id === 'shotList')
+  return fields.some((field) => field.id === 'prompt' || field.id === 'referenceImages' || field.id === 'generateAudio' || field.id === 'returnLastFrame')
 }
 
 export function hasLegacyInteractiveVideoPluginFields(fields: Pick<PluginInputField, 'id'>[] = []) {
@@ -162,6 +151,7 @@ export type PluginDefinition = {
   ready: boolean
   status: 'ready' | 'needs_config' | 'disabled'
   triggerHints: string[]
+  inputUi?: PluginInputUiConfig
   inputFields: PluginInputField[]
   permissions: string[]
   quotaType: 'token' | 'task' | 'asset'
@@ -225,6 +215,53 @@ export type RechargeOrder = {
   paidAt?: string
 }
 
+export type BillingMeterType = 'brain' | 'image' | 'video'
+
+export type BillingMeterConfig = {
+  id: string
+  type: BillingMeterType
+  name: string
+  provider?: string
+  modelPattern?: string
+  costCny: number
+  costUnitTokens: number
+  deductionFactor: number
+  markupRate: number
+  enabled: boolean
+  updatedAt: string
+}
+
+export type BillingConfig = {
+  platformPriceCny: number
+  platformTokens: number
+  meters: BillingMeterConfig[]
+  updatedAt: string
+}
+
+export type UsageLedgerEntry = {
+  id: string
+  userEmail: string
+  userId: string
+  userName: string
+  source: BillingMeterType
+  provider?: string
+  model?: string
+  taskId?: string
+  assetId?: string
+  reportId?: string
+  rawTokens: number
+  billableProviderTokens: number
+  deductionFactor: number
+  platformTokens: number
+  costCny: number
+  billableCny: number
+  markupRate: number
+  platformTokenUnitPriceCny: number
+  meterId: string
+  meterName: string
+  createdAt: string
+}
+
 export type AccountUser = {
   id: string
   email: string
@@ -238,6 +275,22 @@ export type AccountUser = {
   quotaUpdatedAt?: string
   createdAt: string
   lastLoginAt?: string
+}
+
+export type UserWorkspaceSummary = {
+  user: AccountUser
+  assets: GeneratedAssetRecord[]
+  usageLedger: UsageLedgerEntry[]
+  totals: {
+    assets: number
+    images: number
+    videos: number
+    platformTokens: number
+    rawTokens: number
+    billableProviderTokens: number
+    costCny: number
+    billableCny: number
+  }
 }
 
 export type EnterprisePolicy = {
@@ -338,6 +391,7 @@ export type RuntimePluginInputRequest = {
   turnId?: string
   itemId?: string
   fields: PluginInputField[]
+  inputUi?: PluginInputUiConfig
   values?: Record<string, unknown>
   createdAt: string
   resolvedAt?: string
@@ -377,12 +431,38 @@ export type CodexTask = {
   transcript: Array<{
     role: 'user' | 'assistant' | 'tool' | 'system'
     content: string
+    attachments?: RuntimeAttachment[]
     timestamp: string
     eventId?: string
     itemId?: string
     seq?: number
     turnId?: string
   }>
+}
+
+export type RuntimeAttachment = {
+  id: string
+  type: 'image'
+  name: string
+  mimeType: string
+  size: number
+  localUrl?: string
+  dataUrl?: string
+  storageUrl?: string
+  fileId?: string
+  sha256?: string
+  createdAt: string
+}
+
+export type ImageGenerationInputImage = {
+  file_id?: string
+  image_url?: string | { url: string }
+  url?: string
+  dataUrl?: string
+  mimeType?: string
+  name?: string
+  sha256?: string
+  size?: number
 }
 
 export type ImageGenerationResult = {
@@ -392,6 +472,11 @@ export type ImageGenerationResult = {
   size: string
   url: string
   usageTokens?: number
+  rawTokens?: number
+  billableProviderTokens?: number
+  deductionFactor?: number
+  costCny?: number
+  billableCny?: number
   createdAt: string
 }
 
@@ -400,10 +485,17 @@ export type VideoGenerationResult = {
   prompt: string
   model: string
   url: string
+  lastFrameUrl?: string
+  returnLastFrame?: boolean
   duration?: number
   ratio?: string
   resolution?: string
   usageTokens?: number
+  rawTokens?: number
+  billableProviderTokens?: number
+  deductionFactor?: number
+  costCny?: number
+  billableCny?: number
   createdAt: string
 }
 
@@ -420,6 +512,11 @@ export type GeneratedAssetRecord = {
   taskId?: string
   status: 'running' | 'succeeded' | 'failed'
   tokenUsage: number
+  rawTokens?: number
+  billableProviderTokens?: number
+  deductionFactor?: number
+  costCny?: number
+  billableCny?: number
   provider: string
   metadata?: Record<string, unknown>
   createdAt: string
@@ -486,6 +583,7 @@ export type CodexTaskEvent = {
   plan?: RuntimePlanStep[]
   pluginRequest?: RuntimePluginInputRequest
   source?: RuntimeTaskSource
+  attachments?: RuntimeAttachment[]
   raw?: unknown
 }
 
@@ -497,6 +595,8 @@ export {
   isRuntimeFailureNotice,
   mergeAssistantContent,
   runtimeFailureDiagnostic,
+  runtimeTaskStatusExplanation,
   type CodexTranscriptItem,
+  type RuntimeTaskStatusExplanation,
   type StructuredTaskEvent,
 } from './task-normalization.js'

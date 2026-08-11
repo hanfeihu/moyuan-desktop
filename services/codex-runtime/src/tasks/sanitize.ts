@@ -64,6 +64,7 @@ function latestTurnItems(task: CodexTask) {
 }
 
 function latestTurnCompletedWithoutAssistant(task: CodexTask) {
+  if (task.pluginRequests?.some((request) => request.status === 'pending')) return false
   if (task.status !== 'completed') return false
   const turn = latestTurnItems(task)
   const hasUser = turn.some((item) => item.role === 'user')
@@ -82,6 +83,7 @@ function latestTurnCompletedWithoutAssistant(task: CodexTask) {
 export function sanitizeTask(task: CodexTask): CodexTask {
   const hasRuntimeFailure = task.transcript.some((item) => isRawRuntimeFailure(item.content, item.role))
   const hasEmptyCompletion = latestTurnCompletedWithoutAssistant(task)
+  const hasPendingPluginRequest = Boolean(task.pluginRequests?.some((request) => request.status === 'pending'))
   const transcript = compactTranscript(
     task.transcript
       .filter((item) => {
@@ -119,7 +121,7 @@ export function sanitizeTask(task: CodexTask): CodexTask {
 
   return {
     ...task,
-    status: hasEmptyCompletion ? 'failed' : task.status,
+    status: hasPendingPluginRequest ? 'needs_approval' : hasEmptyCompletion ? 'failed' : task.status,
     transcript,
   }
 }

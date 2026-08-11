@@ -122,6 +122,9 @@ export async function connectAppServer(url: string, onNotification: (message: Re
     close() {
       socket.close()
     },
+    notify(method: string, params?: unknown) {
+      socket.send(JSON.stringify(params === undefined ? { method } : { method, params }))
+    },
     request(method: string, params: unknown, timeoutMs = 45000) {
       const id = requestId
       requestId += 1

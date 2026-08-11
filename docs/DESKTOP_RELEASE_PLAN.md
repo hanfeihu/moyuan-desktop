@@ -24,5 +24,5 @@
 
 - 增加企业后台下发配置，替代本地环境变量。
 - 配置 Apple Developer ID、Notarization 和 Windows Authenticode 签名。
-- 优化打包体积，把当前保守包含的依赖集合收敛为 Runtime 生产依赖。
+- 优化打包体积和签名耗时：启用 `asar`，仅把 Runtime 必须直接访问的文件放进 `asarUnpack` 或 `extraResources`，并把当前保守包含的依赖集合收敛为 Runtime 生产依赖。
 - 增加首启设置页，帮助开源用户配置模型地址、API Key、工作区和员工身份。

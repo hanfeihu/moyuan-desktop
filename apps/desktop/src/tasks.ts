@@ -7,6 +7,7 @@ import {
   runtimeFailureDiagnostic,
   type CodexTask,
   type CodexTaskEvent,
+  type RuntimeAttachment,
 } from '@eaw/shared'
 
 export type TranscriptItem = CodexTask['transcript'][number]
@@ -21,7 +22,7 @@ export function statusText(status: CodexTask['status']) {
     running: '运行中',
     needs_approval: '待确认',
     completed: '完成',
-    failed: '失败',
+    failed: '需处理',
     interrupted: '已停止',
   }[status]
 }
@@ -33,9 +34,12 @@ export function taskSortValue(task: CodexTask) {
 export function normalizeTask(task: CodexTask): CodexTask {
   const normalizedTask = ensureTranscriptModel(task)
   const rawTranscript = normalizedTask.transcript ?? []
-  const inferredFailed = task.status !== 'interrupted' && (latestTurnHasFailure(rawTranscript) || latestTurnCompletedWithoutAssistant(task.status, rawTranscript))
-  const status = inferredFailed ? 'failed' : task.status
-  const transcript = compactTranscript(cleanResourceLinkTranscript(filterDisplayTranscript(rawTranscript), normalizedTask))
+  const unhandledPluginRequest = latestTurnCompletedWithUnhandledPluginRequest(normalizedTask, rawTranscript)
+  const handledSkillOutcome = taskHasHandledSkillOutcome(normalizedTask)
+  const inferredFailed = !handledSkillOutcome && task.status !== 'interrupted' && (latestTurnHasFailure(rawTranscript) || latestTurnCompletedWithoutAssistant(task.status, rawTranscript) || unhandledPluginRequest)
+  const hasPendingPluginRequest = Boolean(normalizedTask.pluginRequests?.some((request) => request.status === 'pending'))
+  const status = hasPendingPluginRequest ? 'needs_approval' : inferredFailed ? 'failed' : task.status
+  const transcript = compactTranscript(cleanResourceLinkTranscript(filterDisplayTranscript(rawTranscript, normalizedTask), normalizedTask))
   const title = task.title?.trim().replace(/^生成图片[:：]\s*/, '')
   const hasVisibleReply = transcript.some((item) => item.role !== 'user')
   const hasFailureDiagnostic = transcript.some((item) => item.content.startsWith('失败诊断：'))
@@ -44,6 +48,12 @@ export function normalizeTask(task: CodexTask): CodexTask {
     transcript.push({
       role: 'system',
       content: '本轮没有收到最终回复，已停止。可以重新发送；详细原因已写入本地日志。',
+      timestamp: task.updatedAt ?? nowIso(),
+    })
+  } else if (status === 'failed' && !hasFailureDiagnostic && unhandledPluginRequest) {
+    transcript.push({
+      role: 'system',
+      content: '本轮需要打开插件表单，但表单没有成功弹出。请重新发送这句，墨渊会重新进入插件参数填写。',
       timestamp: task.updatedAt ?? nowIso(),
     })
   } else if (status === 'failed' && !hasFailureDiagnostic && latestTurnHasRuntimeFailure(rawTranscript)) {
@@ -73,6 +83,10 @@ export function normalizeTask(task: CodexTask): CodexTask {
     transcript,
     turns: normalizedTask.turns ?? [],
   }
+}
+
+function taskHasHandledSkillOutcome(task: CodexTask) {
+  return Boolean(task.items?.some((item) => item.metadata?.handledFailure === true))
 }
 
 function cleanResourceLinkTranscript(items: TranscriptItem[], task: CodexTask) {
@@ -118,8 +132,22 @@ function cleanAssistantResourceLinks(content: string, resources: { hasImageResou
   return text
 }
 
-function filterDisplayTranscript(items: TranscriptItem[]) {
+function filterDisplayTranscript(items: TranscriptItem[], task: CodexTask) {
   const visible = items.filter(shouldShowMessage)
+  const hasPendingPluginRequest = Boolean(task.pluginRequests?.some((request) => request.status === 'pending'))
+  if (hasPendingPluginRequest) {
+    return visible.filter((item) => !isPluginWaitingNoise(item.content) && !isEmptyCompletionNoise(item.content))
+  }
+  const lastUserIndex = visible.map((item) => item.role).lastIndexOf('user')
+  const latestTurn = lastUserIndex >= 0 ? visible.slice(lastUserIndex) : visible
+  const latestTurnWaitingForPlugin = latestTurn.some((item) => item.role === 'system' && /等待插件表单提交|等待你补充参数|表单已准备好/.test(item.content))
+  if (latestTurnWaitingForPlugin) {
+    return visible.filter((item, index) => {
+      if (index < lastUserIndex) return true
+      if (isPluginWaitingNoise(item.content) || isEmptyCompletionNoise(item.content)) return false
+      return true
+    })
+  }
   const latestDiagnosticIndex = visible.findLastIndex((item) => item.content.startsWith('失败诊断：'))
   if (latestDiagnosticIndex < 0) return visible
 
@@ -129,6 +157,18 @@ function filterDisplayTranscript(items: TranscriptItem[]) {
     if (item.turnId !== diagnosticTurnId) return true
     return !isRawSkillFailureNotice(item.content)
   })
+}
+
+function isNoFinalReplyDiagnostic(content: string) {
+  return content.startsWith('失败诊断：') && /没有返回最终回复|没有收到最终回复/.test(content)
+}
+
+function isPluginWaitingNoise(content: string) {
+  return content === '任务完成' || content === '等待插件表单提交'
+}
+
+function isEmptyCompletionNoise(content: string) {
+  return isNoFinalReplyDiagnostic(content) || /Codex 已结束本轮工具执行|没有返回最终回复|没有收到最终回复|本轮执行中断|任务状态已经收口为失败/.test(content)
 }
 
 function isRawSkillFailureNotice(content: string) {
@@ -170,6 +210,7 @@ function eventToTranscript(event: CodexTaskEvent) {
   return {
     role: event.role,
     content: event.content,
+    attachments: Array.isArray(event.attachments) ? event.attachments : undefined,
     eventId: event.id,
     itemId: event.itemId,
     seq: event.seq,
@@ -262,6 +303,7 @@ export function shouldShowMessage(item: TranscriptItem) {
   const content = item.content.trim()
   if (!content) return false
   if (content.startsWith('员工已经提交插件表单：')) return false
+  if (content === '任务完成' || content === '等待插件表单提交') return false
   if (content.startsWith('失败诊断：')) return true
   if (/^正在生成图片[.。…]*$/.test(content)) return false
   if (isTransientSkillStatus(content)) return false
@@ -275,6 +317,7 @@ export function shouldShowMessage(item: TranscriptItem) {
     content.includes('Codex Runtime 没连上') ||
     content.includes('任务创建失败') ||
     content.includes('发送失败') ||
+    content.includes('需处理') ||
     content.includes('停止') ||
     content.includes('响应') ||
     content.includes('中断') ||
@@ -301,7 +344,7 @@ function failureSummary(items: TranscriptItem[]) {
   if (/超时|timeout|timed out/i.test(diagnostic)) {
     return '模型响应超时，已停止。可以缩小任务范围或稍后重试。'
   }
-  return diagnostic.replace(/^失败诊断：/, '')
+  return diagnostic.replace(/^失败诊断：/, '需要处理：')
 }
 
 function latestTurnItems(items: TranscriptItem[]) {
@@ -314,6 +357,7 @@ function latestTurnHasRuntimeFailure(items: TranscriptItem[]) {
 }
 
 function latestTurnCompletedWithoutAssistant(status: CodexTask['status'], items: TranscriptItem[]) {
+  if (status === 'needs_approval') return false
   if (status !== 'completed') return false
   const turn = latestTurnItems(items)
   const hasUser = turn.some((item) => item.role === 'user')
@@ -327,6 +371,25 @@ function latestTurnCompletedWithoutAssistant(status: CodexTask['status'], items:
   if (!hasUser || !hasCompleted) return false
   if (lastToolIndex >= 0) return !assistantAfterLastTool
   return !hasAssistant
+}
+
+function latestTurnCompletedWithUnhandledPluginRequest(task: CodexTask, items: TranscriptItem[]) {
+  if (task.status !== 'completed') return false
+  const turn = latestTurnItems(items)
+  const pluginMessage = turn.find((item) => item.role === 'assistant' && isPluginInputJson(item.content))
+  if (!pluginMessage) return false
+  return !(task.pluginRequests ?? []).some((request) => request.status === 'pending' && (!pluginMessage.turnId || request.turnId === pluginMessage.turnId))
+}
+
+function isPluginInputJson(content: string) {
+  const trimmed = content.trim()
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return false
+  try {
+    const payload = JSON.parse(trimmed) as { moyuan_plugin?: unknown; moyuan_plugin_input?: unknown; plugin?: unknown; pluginId?: unknown }
+    return [payload.moyuan_plugin_input, payload.moyuan_plugin, payload.pluginId, payload.plugin].some((value) => typeof value === 'string' && value.trim())
+  } catch {
+    return trimmed.includes('"moyuan_plugin_input"') || trimmed.includes('"moyuan_plugin"')
+  }
 }
 
 export function latestTurnHasFailure(items: TranscriptItem[]) {
@@ -393,20 +456,28 @@ export function taskMeta(task: CodexTask) {
 function eventIndicatesFailure(event: CodexTaskEvent) {
   const content = event.content.trim()
   if (event.type === 'turn.interrupted') return false
+  if (event.item?.metadata?.handledFailure === true) return false
   return event.type === 'turn.failed' || event.type === 'error' || content.startsWith('失败诊断：') || (event.role !== 'assistant' && isRuntimeFailureNotice(content))
 }
 
 function eventStatus(event: CodexTaskEvent, fallback: CodexTask['status']): CodexTask['status'] {
+  const content = event.content.trim()
+  const resolvesUserInput = event.type === 'plugin.inputSubmitted' || event.type === 'approval.resolved'
   if (event.type === 'turn.interrupted') return 'interrupted'
+  if (event.item?.metadata?.handledFailure === true) return fallback === 'needs_approval' ? 'needs_approval' : 'running'
+  if (resolvesUserInput) return 'running'
+  if (event.type === 'process.exit' && content.includes('等待插件表单提交')) return 'needs_approval'
   if (eventIndicatesFailure(event)) return 'failed'
+  if (fallback === 'needs_approval' && !resolvesUserInput) {
+    return 'needs_approval'
+  }
   if (fallback === 'completed' || fallback === 'failed' || fallback === 'interrupted') {
     return fallback
   }
   if (event.type === 'approval.requested' || event.type === 'plugin.inputRequested') return 'needs_approval'
-  if (event.type === 'approval.resolved' || event.type === 'plugin.inputSubmitted') return 'running'
   if (event.type === 'process.exit') {
-    if (event.content.includes('停止') || event.content.includes('中断')) return 'interrupted'
-    return event.content.includes('完成') ? 'completed' : 'failed'
+    if (content.includes('停止') || content.includes('中断')) return 'interrupted'
+    return content.includes('完成') ? 'completed' : 'failed'
   }
   if (event.type === 'turn.completed') return 'completed'
   if (
@@ -516,15 +587,16 @@ export function hasCodexActivity(task: CodexTask) {
 }
 
 export function canResumeTask(task: CodexTask) {
-  return task.status === 'completed' || task.status === 'failed' || task.status === 'interrupted'
+  return task.status === 'completed' || task.status === 'failed' || task.status === 'interrupted' || task.status === 'needs_approval'
 }
 
-export function buildPendingTask(promptText: string, workspacePath: string): CodexTask {
+export function buildPendingTask(promptText: string, workspacePath: string, attachments: RuntimeAttachment[] = []): CodexTask {
   const timestamp = nowIso()
   const taskId = `pending-${Date.now()}`
+  const content = promptText || (attachments.length ? '请根据我发送的图片继续处理。' : '')
   return {
     id: taskId,
-    title: promptText.slice(0, 36),
+    title: content.slice(0, 36),
     status: 'queued',
     workspace: workspacePath,
     createdAt: timestamp,
@@ -532,7 +604,8 @@ export function buildPendingTask(promptText: string, workspacePath: string): Cod
     transcript: [
       {
         role: 'user',
-        content: promptText,
+        content,
+        attachments,
         seq: 1,
         timestamp,
         turnId: `${taskId}-turn-1`,
@@ -541,10 +614,11 @@ export function buildPendingTask(promptText: string, workspacePath: string): Cod
   }
 }
 
-export function appendPendingTurn(task: CodexTask, promptText: string, workspacePath: string): CodexTask {
+export function appendPendingTurn(task: CodexTask, promptText: string, workspacePath: string, attachments: RuntimeAttachment[] = []): CodexTask {
   const normalizedTask = ensureTranscriptModel(task)
   const lastSeq = normalizedTask.transcript.reduce((max, item) => Math.max(max, item.seq ?? 0), 0)
   const nextTurnIndex = normalizedTask.transcript.filter((item) => item.role === 'user').length + 1
+  const content = promptText || (attachments.length ? '请根据我发送的图片继续处理。' : '')
   return {
     ...normalizedTask,
     status: 'queued',
@@ -553,7 +627,8 @@ export function appendPendingTurn(task: CodexTask, promptText: string, workspace
       ...normalizedTask.transcript,
       {
         role: 'user',
-        content: promptText,
+        content,
+        attachments,
         seq: lastSeq + 1,
         timestamp: nowIso(),
         turnId: `${normalizedTask.id}-turn-${nextTurnIndex}`,

@@ -1,4 +1,4 @@
-import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
+import type { CodexTask, CodexTaskEvent, RuntimeAttachment } from '@eaw/shared'
 import type { TaskLifecycle } from './lifecycle.js'
 
 export type TaskRecord = {
@@ -10,7 +10,9 @@ export type TaskRecord = {
   activeAssistantItemId?: string
   awaitingPluginInput?: boolean
   currentTurnId?: string
+  currentAttachments?: RuntimeAttachment[]
   nextTranscriptSeq?: number
   cancel?: (reason?: string) => void
   cancelRequested?: boolean
+  handledSkillOutcomes?: Set<'image_generation' | 'video_generation'>
 }

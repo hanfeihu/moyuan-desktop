@@ -28,6 +28,7 @@ export default defineConfig({
     { path: '/billing', name: '支付与套餐', icon: 'CreditCardOutlined', component: './billing' },
     { path: '/assets', name: '资源记录', icon: 'PictureOutlined', component: './assets' },
     { path: '/logs', name: '日志管理', icon: 'BugOutlined', component: './logs' },
+    { path: '/developer-docs', name: '接口文档', icon: 'BookOutlined', component: './developer-docs' },
     { path: '/accounts', name: '账号与用量', icon: 'UserOutlined', component: './accounts' },
     { path: '/settings', name: '系统设置', icon: 'SettingOutlined', component: './settings' },
     { path: '/organization', name: '组织同步', icon: 'TeamOutlined', component: './organization' },

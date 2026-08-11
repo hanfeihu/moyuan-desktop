@@ -1,4 +1,5 @@
 import { applyTaskStructureEvent, finalAssistantContent, mergeAssistantContent, type CodexTask, type CodexTaskEvent } from '@eaw/shared'
+import { previewLogContent } from '../format.js'
 import { applyTaskLifecycleEvent } from './lifecycle.js'
 import type { TaskRecord } from './types.js'
 
@@ -161,12 +162,13 @@ export function createTaskEventBus({
       }
       if (record.activeAssistantItemId === itemId) record.activeAssistantItemId = undefined
     } else if (next.content) {
-      appendTranscriptItem(record, {
-        role: next.role,
-        content: next.content,
-        eventId: next.id,
-        itemId: next.itemId,
-        timestamp: next.timestamp,
+        appendTranscriptItem(record, {
+          role: next.role,
+          content: next.content,
+          attachments: next.attachments,
+          eventId: next.id,
+          itemId: next.itemId,
+          timestamp: next.timestamp,
       })
     }
 
@@ -230,12 +232,6 @@ function firstString(...values: unknown[]) {
     if (typeof value === 'string' && value) return value
   }
   return ''
-}
-
-function previewLogContent(content: string, maxLength = 240) {
-  const compact = content.replace(/\s+/g, ' ').trim()
-  if (compact.length <= maxLength) return compact
-  return `${compact.slice(0, maxLength)}...`
 }
 
 function sleep(ms: number) {

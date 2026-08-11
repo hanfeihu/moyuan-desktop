@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
+    "migrate:admin-json": "node scripts/migrate-admin-json-to-postgres.mjs",
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js"
   },
@@ -15,11 +16,13 @@
     "dotenv": "^17.2.3",
     "fastify": "^5.6.2",
     "nodemailer": "^8.0.9",
+    "pg": "^8.21.0",
     "zod": "^4.1.13"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
     "@types/nodemailer": "^8.0.0",
+    "@types/pg": "^8.20.0",
     "tsx": "^4.20.6"
   }
 }

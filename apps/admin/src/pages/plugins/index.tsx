@@ -76,6 +76,7 @@ function formValues(plugin?: PluginDefinition) {
     enabled: plugin?.enabled ?? false,
     handler: plugin?.handler ?? 'runtime',
     inputFields: fieldValues(plugin?.inputFields ?? []),
+    inputUi: plugin?.inputUi ?? {},
     interactionMode: plugin?.interactionMode ?? 'requires_user_input',
     name: plugin?.name ?? '',
     permissions: listText(plugin?.permissions ?? []),
@@ -279,6 +280,27 @@ export default function PluginsPage() {
         </ProForm.Group>
         <ProFormTextArea label="触发词" name="triggerHints" placeholder="一行一个，例如：生成视频" />
         <ProFormTextArea label="权限说明" name="permissions" placeholder="一行一个，例如：读取用户上传素材" />
+        <ProCard bordered={false} title="弹框显示">
+          <ProForm.Group>
+            <ProFormSelect
+              colProps={{ md: 8, xs: 24 }}
+              label="展示样式"
+              name={['inputUi', 'variant']}
+              options={[
+                { label: '通用表单', value: 'default' },
+                { label: '视频生成', value: 'video' },
+              ]}
+            />
+            <ProFormText colProps={{ md: 8, xs: 24 }} label="左上标签" name={['inputUi', 'kicker']} placeholder="例如：视频生成" />
+            <ProFormText colProps={{ md: 8, xs: 24 }} label="弹框标题" name={['inputUi', 'title']} placeholder="例如：确认视频需求" />
+          </ProForm.Group>
+          <ProFormTextArea label="提示说明" name={['inputUi', 'description']} placeholder="例如：写下想要的视频，也可以补充参考素材。" />
+          <ProForm.Group>
+            <ProFormText colProps={{ md: 8, xs: 24 }} label="描述区标题" name={['inputUi', 'promptSectionTitle']} placeholder="例如：视频描述" />
+            <ProFormText colProps={{ md: 8, xs: 24 }} label="素材区标题" name={['inputUi', 'mediaSectionTitle']} placeholder="例如：参考素材" />
+            <ProFormText colProps={{ md: 8, xs: 24 }} label="设置区标题" name={['inputUi', 'settingsSectionTitle']} placeholder="例如：生成设置" />
+          </ProForm.Group>
+        </ProCard>
         <ProFormList
           creatorButtonProps={{ creatorButtonText: '添加表单字段' }}
           initialValue={[]}
@@ -291,6 +313,8 @@ export default function PluginsPage() {
             <ProFormSelect colProps={{ md: 6, xs: 12 }} label="类型" name="type" options={fieldTypeOptions} />
             <ProFormSwitch colProps={{ md: 6, xs: 12 }} label="必填" name="required" />
             <ProFormDigit colProps={{ md: 6, xs: 12 }} fieldProps={{ precision: 0 }} label="最大文件数" max={12} min={1} name="maxFiles" />
+            <ProFormText colProps={{ md: 12, xs: 24 }} label="占位提示" name="placeholder" />
+            <ProFormText colProps={{ md: 12, xs: 24 }} label="帮助说明" name="helpText" />
             <ProFormTextArea colProps={{ span: 24 }} label="选项" name="optionsText" placeholder="下拉选择可填写，一行一个" />
           </ProForm.Group>
         </ProFormList>

@@ -12,6 +12,10 @@ type ResourceCardItem = {
   prompt?: string
   model?: string
   usageTokens?: number
+  rawTokens?: number
+  billableProviderTokens?: number
+  deductionFactor?: number
+  billableCny?: number
 }
 
 function resolveResourceUrl(url?: string) {
@@ -34,6 +38,10 @@ function outputToResource(output: RuntimeTaskOutput, turnId?: string): ResourceC
     prompt: typeof metadata.prompt === 'string' ? metadata.prompt : undefined,
     model: typeof metadata.model === 'string' ? metadata.model : undefined,
     usageTokens: typeof metadata.usageTokens === 'number' ? metadata.usageTokens : undefined,
+    rawTokens: typeof metadata.rawTokens === 'number' ? metadata.rawTokens : undefined,
+    billableProviderTokens: typeof metadata.billableProviderTokens === 'number' ? metadata.billableProviderTokens : undefined,
+    deductionFactor: typeof metadata.deductionFactor === 'number' ? metadata.deductionFactor : undefined,
+    billableCny: typeof metadata.billableCny === 'number' ? metadata.billableCny : undefined,
   }
 }
 
@@ -54,6 +62,10 @@ export function taskResources(task: CodexTask) {
       prompt: image.prompt,
       model: image.model,
       usageTokens: image.usageTokens,
+      rawTokens: image.rawTokens,
+      billableProviderTokens: image.billableProviderTokens,
+      deductionFactor: image.deductionFactor,
+      billableCny: image.billableCny,
     })
   }
   for (const video of task.generatedVideos ?? []) {
@@ -66,7 +78,27 @@ export function taskResources(task: CodexTask) {
       prompt: video.prompt,
       model: video.model,
       usageTokens: video.usageTokens,
+      rawTokens: video.rawTokens,
+      billableProviderTokens: video.billableProviderTokens,
+      deductionFactor: video.deductionFactor,
+      billableCny: video.billableCny,
     })
+    if (video.lastFrameUrl) {
+      resources.push({
+        createdAt: video.createdAt,
+        id: `generated-video-last-frame-${video.id}`,
+        type: 'image',
+        title: '尾帧图片',
+        url: resolveResourceUrl(video.lastFrameUrl),
+        prompt: video.prompt,
+        model: video.model,
+        usageTokens: video.usageTokens,
+        rawTokens: video.rawTokens,
+        billableProviderTokens: video.billableProviderTokens,
+        deductionFactor: video.deductionFactor,
+        billableCny: video.billableCny,
+      })
+    }
   }
 
   const seen = new Set<string>()
@@ -137,7 +169,9 @@ export function ResourceCards({
               </div>
               <div className="resource-meta">
                 {resource.model ? <span>{resource.model}</span> : null}
-                {resource.usageTokens ? <span>{resource.usageTokens.toLocaleString()} tokens</span> : <span>Token 待结算</span>}
+                {resource.usageTokens ? <span>{resource.usageTokens.toLocaleString()} 平台 Token</span> : <span>Token 待结算</span>}
+                {resource.billableCny ? <span>¥{resource.billableCny.toFixed(4)}</span> : null}
+                {resource.deductionFactor && resource.deductionFactor !== 1 ? <span>系数 {resource.deductionFactor.toFixed(4)}</span> : null}
               </div>
               <div className="resource-actions">
                 {resource.url ? (

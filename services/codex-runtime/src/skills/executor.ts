@@ -1,8 +1,8 @@
 import type { CodexTaskEvent } from '@eaw/shared'
 import type { TaskRecord } from '../tasks/types.js'
 import type { EnterpriseSkillSet, MoyuanToolCall, RuntimeRunOptions } from './contracts.js'
-import { generateImage, inferImageSize } from './image.js'
-import { generateVideo, type VideoStatusUpdate } from './video.js'
+import { buildImageFailureAssistantMessage, generateImage, imageInputsFromAttachments, inferImageSize } from './image.js'
+import { buildVideoFailureAssistantMessage, generateVideo, type VideoStatusUpdate } from './video.js'
 
 type PushEvent = (record: TaskRecord, event: Omit<CodexTaskEvent, 'id' | 'timestamp'>) => void
 
@@ -14,6 +14,7 @@ type ToolExecutionBase = {
 }
 
 type ImageExecutionOptions = ToolExecutionBase & {
+  images?: Extract<MoyuanToolCall, { tool: 'image_generation' }>['images']
   model?: string
   options: RuntimeRunOptions
   prompt: string
@@ -28,16 +29,54 @@ type ToolCallExecutionOptions = ToolExecutionBase & {
   toolCall: MoyuanToolCall
 }
 
-export async function runImageGenerationTool({ record, prompt, runtimeRoot, size, model, options, skills, saveStore, pushEvent }: ImageExecutionOptions) {
+export async function runImageGenerationTool({ images: requestedImages, record, prompt, runtimeRoot, size, model, options, skills, saveStore, pushEvent }: ImageExecutionOptions) {
+  const itemId = `skill-image-${Date.now()}`
+  const images = requestedImages?.length ? requestedImages : imageInputsFromAttachments(record.currentAttachments)
+  const initialMetadata = {
+    imageCount: images.length,
+    model: model ?? skills.imageGeneration.defaultModel,
+    prompt,
+    size,
+  }
   try {
     record.task.status = 'running'
     record.task.updatedAt = new Date().toISOString()
+    pushEvent(record, {
+      taskId: record.task.id,
+      type: 'item.started',
+      role: 'system',
+      content: '',
+      itemId,
+      item: {
+        id: itemId,
+        type: 'image_generation',
+        title: '生成图片',
+        status: 'in_progress',
+        content: '准备调用图片生成服务',
+        metadata: initialMetadata,
+      },
+    })
     await saveStore()
 
-    const image = await generateImage({ prompt, runtimeRoot, size, model, options, skills })
+    const image = await generateImage({ images, prompt, runtimeRoot, size, model, options, skills })
     record.task.status = 'completed'
     record.task.updatedAt = new Date().toISOString()
     record.task.generatedImages = [...(record.task.generatedImages ?? []), image]
+    pushEvent(record, {
+      taskId: record.task.id,
+      type: 'item.completed',
+      role: 'system',
+      content: '图片生成完成',
+      itemId,
+      item: {
+        id: itemId,
+        type: 'image_generation',
+        title: '生成图片',
+        status: 'completed',
+        content: '图片生成完成',
+        metadata: { ...initialMetadata, url: image.url },
+      },
+    })
     pushEvent(record, {
       taskId: record.task.id,
       type: 'output.added',
@@ -48,7 +87,8 @@ export async function runImageGenerationTool({ record, prompt, runtimeRoot, size
         type: 'image',
         title: '生成图片',
         url: image.url,
-        metadata: { model: image.model, prompt: image.prompt, size: image.size, usageTokens: image.usageTokens },
+        taskItemId: itemId,
+        metadata: { billableCny: image.billableCny, billableProviderTokens: image.billableProviderTokens, costCny: image.costCny, deductionFactor: image.deductionFactor, model: image.model, prompt: image.prompt, rawTokens: image.rawTokens, size: image.size, usageTokens: image.usageTokens },
         createdAt: image.createdAt,
       },
       source: {
@@ -72,13 +112,44 @@ export async function runImageGenerationTool({ record, prompt, runtimeRoot, size
       content: '图片生成完成',
     })
   } catch (error) {
-    record.task.status = 'failed'
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    const diagnostic = error && typeof error === 'object' ? (error as { diagnostic?: unknown }).diagnostic : undefined
+    const assistantMessage = buildImageFailureAssistantMessage(errorMessage, diagnostic && typeof diagnostic === 'object' ? diagnostic : undefined)
+    record.handledSkillOutcomes ??= new Set()
+    record.handledSkillOutcomes.add('image_generation')
+    record.task.status = 'completed'
     record.task.updatedAt = new Date().toISOString()
     pushEvent(record, {
       taskId: record.task.id,
-      type: 'turn.failed',
+      type: 'item.completed',
       role: 'system',
-      content: `图片生成失败：${error instanceof Error ? error.message : String(error)}`,
+      content: '图片请求已处理',
+      itemId,
+      item: {
+        id: itemId,
+        type: 'image_generation',
+        title: '生成图片',
+        status: 'completed',
+        content: errorMessage,
+        metadata: {
+          ...initialMetadata,
+          diagnostic,
+          handledFailure: true,
+          reason: errorMessage,
+        },
+      },
+    })
+    pushEvent(record, {
+      taskId: record.task.id,
+      type: 'message',
+      role: 'assistant',
+      content: assistantMessage,
+    })
+    pushEvent(record, {
+      taskId: record.task.id,
+      type: 'turn.completed',
+      role: 'system',
+      content: '图片生成请求已处理',
     })
   } finally {
     await saveStore()
@@ -123,6 +194,7 @@ async function runVideoGenerationTool({ record, prompt, toolCall, options, skill
           providerTaskId: update.taskId,
           rawStatus: update.status,
           usageTokens: update.usageTokens,
+          lastFrameUrl: update.lastFrameUrl,
           videoUrl: update.videoUrl,
         },
       },
@@ -165,7 +237,7 @@ async function runVideoGenerationTool({ record, prompt, toolCall, options, skill
         title: '生成视频',
         status: 'completed',
         content: '视频生成完成',
-        metadata: { ...initialMetadata, providerTaskId: generatedVideo.id, url: generatedVideo.url },
+        metadata: { ...initialMetadata, providerTaskId: generatedVideo.id, returnLastFrame: generatedVideo.returnLastFrame, lastFrameUrl: generatedVideo.lastFrameUrl, url: generatedVideo.url },
       },
     })
     pushEvent(record, {
@@ -179,7 +251,7 @@ async function runVideoGenerationTool({ record, prompt, toolCall, options, skill
         title: '生成视频',
         url: generatedVideo.url,
         taskItemId: itemId,
-        metadata: { duration: generatedVideo.duration, model: generatedVideo.model, prompt: generatedVideo.prompt, ratio: generatedVideo.ratio, resolution: generatedVideo.resolution, usageTokens: generatedVideo.usageTokens },
+        metadata: { billableCny: generatedVideo.billableCny, billableProviderTokens: generatedVideo.billableProviderTokens, costCny: generatedVideo.costCny, deductionFactor: generatedVideo.deductionFactor, duration: generatedVideo.duration, model: generatedVideo.model, prompt: generatedVideo.prompt, ratio: generatedVideo.ratio, rawTokens: generatedVideo.rawTokens, resolution: generatedVideo.resolution, returnLastFrame: generatedVideo.returnLastFrame, lastFrameUrl: generatedVideo.lastFrameUrl, usageTokens: generatedVideo.usageTokens },
         createdAt: generatedVideo.createdAt,
       },
       source: {
@@ -190,6 +262,28 @@ async function runVideoGenerationTool({ record, prompt, toolCall, options, skill
         createdAt: generatedVideo.createdAt,
       },
     })
+    if (generatedVideo.lastFrameUrl) {
+      pushEvent(record, {
+        taskId: record.task.id,
+        type: 'output.added',
+        role: 'system',
+        content: '',
+        output: {
+          id: `video-last-frame-${generatedVideo.id}`,
+          type: 'image',
+          title: '尾帧图片',
+          url: generatedVideo.lastFrameUrl,
+          taskItemId: itemId,
+          metadata: {
+            model: generatedVideo.model,
+            prompt: generatedVideo.prompt,
+            sourceVideoId: generatedVideo.id,
+            usageTokens: generatedVideo.usageTokens,
+          },
+          createdAt: generatedVideo.createdAt,
+        },
+      })
+    }
     pushEvent(record, {
       taskId: record.task.id,
       type: 'message',
@@ -203,27 +297,42 @@ async function runVideoGenerationTool({ record, prompt, toolCall, options, skill
       content: '视频生成完成',
     })
   } catch (error) {
-    record.task.status = 'failed'
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    const assistantMessage = buildVideoFailureAssistantMessage(errorMessage)
+    record.handledSkillOutcomes ??= new Set()
+    record.handledSkillOutcomes.add('video_generation')
+    record.task.status = 'completed'
     record.task.updatedAt = new Date().toISOString()
     pushEvent(record, {
       taskId: record.task.id,
       type: 'item.completed',
       role: 'system',
-      content: `视频生成失败：${error instanceof Error ? error.message : String(error)}`,
+      content: '视频请求已处理',
       itemId,
       item: {
         id: itemId,
         type: 'video_generation',
         title: '生成视频',
-        status: 'failed',
-        content: error instanceof Error ? error.message : String(error),
+        status: 'completed',
+        content: errorMessage,
+        metadata: {
+          ...initialMetadata,
+          handledFailure: true,
+          reason: errorMessage,
+        },
       },
     })
     pushEvent(record, {
       taskId: record.task.id,
-      type: 'turn.failed',
+      type: 'message',
+      role: 'assistant',
+      content: assistantMessage,
+    })
+    pushEvent(record, {
+      taskId: record.task.id,
+      type: 'turn.completed',
       role: 'system',
-      content: `视频生成失败：${error instanceof Error ? error.message : String(error)}`,
+      content: '视频生成请求已处理',
     })
   } finally {
     await saveStore()
@@ -236,6 +345,7 @@ export async function runMoyuanToolCall(context: ToolCallExecutionOptions) {
     await runImageGenerationTool({
       ...context,
       prompt: toolCall.prompt ?? prompt,
+      images: toolCall.images,
       size: toolCall.size ?? inferImageSize(toolCall.prompt ?? prompt),
       model: toolCall.model,
     })

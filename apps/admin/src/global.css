@@ -221,6 +221,69 @@ body {
   margin-bottom: 16px;
 }
 
+.developer-doc-card {
+  min-height: 220px;
+}
+
+.developer-doc-card .ant-pro-card-body {
+  display: flex;
+  min-height: 220px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.developer-doc-card .ant-typography {
+  margin-bottom: 0;
+}
+
+.developer-doc-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 8px;
+  background: #edf5ff;
+  color: #1677ff;
+  font-size: 20px;
+}
+
+.developer-doc-icon.muted {
+  background: #f4f6f8;
+  color: #475467;
+}
+
+.developer-doc-icon.success {
+  background: #ecfdf3;
+  color: #16823a;
+}
+
+.developer-doc-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.developer-doc-steps > div {
+  display: grid;
+  gap: 6px;
+  min-height: 120px;
+  border: 1px solid #eef0f4;
+  border-radius: 8px;
+  padding: 14px;
+  background: #fafbfc;
+}
+
+.developer-doc-steps strong {
+  color: #1f2328;
+  font-weight: 650;
+}
+
+.developer-doc-steps span {
+  color: #64748b;
+  line-height: 1.6;
+}
+
 .quota-cell {
   width: 170px;
   display: grid;

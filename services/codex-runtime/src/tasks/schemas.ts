@@ -11,10 +11,25 @@ export const clientLogSchema = z.object({
   workspace: z.string().optional(),
 })
 
+export const attachmentSchema = z.object({
+  createdAt: z.string(),
+  dataUrl: z.string().optional(),
+  fileId: z.string().optional(),
+  id: z.string().min(1),
+  localUrl: z.string().optional(),
+  mimeType: z.string().min(1),
+  name: z.string().min(1),
+  sha256: z.string().optional(),
+  size: z.number().int().nonnegative(),
+  storageUrl: z.string().optional(),
+  type: z.literal('image'),
+})
+
 export const taskSchema = z.object({
-  prompt: z.string().min(1),
+  prompt: z.string().default(''),
   workspace: z.string().default(process.env.MOYUAN_DEFAULT_WORKSPACE ?? process.cwd()),
   employeeId: z.string().min(1),
+  attachments: z.array(attachmentSchema).max(16).default([]),
   enterpriseApiBase: z.string().url().optional(),
   enterpriseAuthToken: z.string().optional(),
   parentTaskId: z.string().optional(),
@@ -43,6 +58,7 @@ export const imageGenerationSchema = z.object({
   prompt: z.string().min(1),
   workspace: z.string().default(process.env.MOYUAN_DEFAULT_WORKSPACE ?? process.cwd()),
   employeeId: z.string().min(1),
+  attachments: z.array(attachmentSchema).max(16).default([]),
   enterpriseApiBase: z.string().url().optional(),
   enterpriseAuthToken: z.string().optional(),
   model: z.string().optional(),

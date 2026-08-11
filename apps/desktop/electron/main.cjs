@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, Menu } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, Menu } = require('electron')
 const { autoUpdater } = require('electron-updater')
 const { spawn } = require('node:child_process')
 const crypto = require('node:crypto')
@@ -22,6 +22,88 @@ app.setPath('userData', path.join(app.getPath('appData'), 'Moyuan Desktop'))
 
 function mainLogPath() {
   return path.join(app.getPath('userData'), 'logs', 'electron-main.ndjson')
+}
+
+function runtimeLogPath() {
+  return path.join(app.getPath('userData'), 'logs', 'codex-runtime.log')
+}
+
+function runtimeNdjsonPath() {
+  return path.join(app.getPath('userData'), 'runtime', 'logs', 'runtime.ndjson')
+}
+
+function rendererLogPath() {
+  return path.join(app.getPath('userData'), 'runtime', 'logs', 'desktop-client.ndjson')
+}
+
+function redactDiagnosticsText(text) {
+  return String(text)
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-***')
+    .replace(/Bearer\s+[A-Za-z0-9._~+/-]+/gi, 'Bearer ***')
+    .replace(/(Authorization\s*[:=]\s*)[^\s,;]+/gi, '$1***')
+    .replace(/([?&](?:token|runtimeToken|enterpriseAuthToken|authToken|apiKey|key)=)[^&\s]+/gi, '$1***')
+    .replace(/("?(?:token|runtimeToken|enterpriseAuthToken|authToken|apiKey|api_key|authorization)"?\s*[:=]\s*")([^"]+)(")/gi, '$1***$3')
+}
+
+function tailText(filePath, maxBytes = 48 * 1024) {
+  try {
+    if (!fs.existsSync(filePath)) return { exists: false, path: filePath, text: '' }
+    const stat = fs.statSync(filePath)
+    const length = Math.min(stat.size, maxBytes)
+    const buffer = Buffer.alloc(length)
+    const fd = fs.openSync(filePath, 'r')
+    try {
+      fs.readSync(fd, buffer, 0, length, Math.max(0, stat.size - length))
+    } finally {
+      fs.closeSync(fd)
+    }
+    return {
+      exists: true,
+      path: filePath,
+      size: stat.size,
+      truncated: stat.size > maxBytes,
+      text: redactDiagnosticsText(buffer.toString('utf8')),
+      updatedAt: stat.mtime.toISOString(),
+    }
+  } catch (error) {
+    return {
+      error: error?.message || String(error),
+      exists: false,
+      path: filePath,
+      text: '',
+    }
+  }
+}
+
+function collectDiagnosticsSnapshot() {
+  return {
+    appPath: app.getAppPath(),
+    isPackaged: isPackagedApp(),
+    paths: {
+      appData: app.getPath('appData'),
+      temp: app.getPath('temp'),
+      userData: app.getPath('userData'),
+    },
+    platform: process.platform,
+    runtime: {
+      alive: Boolean(runtimeProcess && !runtimeProcess.killed),
+      pid: runtimeProcess?.pid,
+    },
+    logs: {
+      electronMain: tailText(mainLogPath()),
+      rendererClient: tailText(rendererLogPath()),
+      runtimeMain: tailText(runtimeLogPath()),
+      runtimeNdjson: tailText(runtimeNdjsonPath()),
+      startup: tailText(startupLogPath),
+    },
+    versions: {
+      app: app.getVersion(),
+      chrome: process.versions.chrome,
+      electron: process.versions.electron,
+      node: process.versions.node,
+      v8: process.versions.v8,
+    },
+  }
 }
 
 function logStartup(message, error) {
@@ -300,6 +382,7 @@ async function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, 'preload.cjs'),
       sandbox: true,
     },
   })
@@ -345,6 +428,8 @@ async function createWindow() {
 }
 
 logStartup(`boot defaultApp=${Boolean(process.defaultApp)} isPackaged=${app.isPackaged}`)
+
+ipcMain.handle('moyuan:collect-diagnostics', () => collectDiagnosticsSnapshot())
 
 app.whenReady().then(() => {
   logStartup('app ready')

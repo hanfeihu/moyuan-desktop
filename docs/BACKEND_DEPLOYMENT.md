@@ -11,7 +11,7 @@ flowchart LR
   Nginx --> Site["官网静态文件 /opt/moyuan-site"]
   Nginx --> Admin["后台静态文件 /opt/moyuan-site/admin"]
   Nginx --> Api["Fastify API 127.0.0.1:14000"]
-  Api --> Config["admin-config.json"]
+  Api --> Postgres["PostgreSQL / moyuan_admin_state"]
   Api --> MinIO["MinIO 资源归档"]
   Api --> Mail["SMTP 邮件验证码"]
   Api --> Image["gpt-image-2 图片技能"]
@@ -32,6 +32,7 @@ flowchart LR
 - `packages/shared`：前后端共享类型，改接口结构时优先改这里。
 - `apps/site/deploy/nginx-codex.tminos.com.conf`：当前官网 + 后台的 Nginx 配置参考。
 - `services/api/deploy/moyuan-api.service`：systemd 服务参考。
+- `docs/AUTH_API.md`：登录、注册和 Token 认证接口文档。
 
 ## 运行端口
 
@@ -48,24 +49,24 @@ flowchart LR
 NODE_ENV=production
 API_HOST=127.0.0.1
 API_PORT=14000
-ADMIN_CONFIG_FILE=/opt/moyuan-api/data/admin-config.json
+DATABASE_URL=postgres://moyuan:replace-with-secret@127.0.0.1:5432/moyuan
 
 # 管理员首次初始化可通过后台页面完成。
 # 如需用环境变量预置，设置后首次启动会生成管理员账号。
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=change-me
 
-# 默认模型通道，只作为初始值；后台保存后以 admin-config.json 为准。
+# 默认模型通道，只作为初始值；后台保存后以 PostgreSQL 为准。
 AI_BASE_URL=https://your-openai-compatible-gateway/v1
 AI_API_KEY=replace-with-secret
 AI_MODEL=gpt-5-codex
 
-# 图片技能，只作为初始值；后台保存后以 admin-config.json 为准。
+# 图片技能，只作为初始值；后台保存后以 PostgreSQL 为准。
 IMAGE_BASE_URL=https://your-image-gateway/v1
 IMAGE_API_KEY=replace-with-secret
 IMAGE_MODEL=gpt-image-2
 
-# 火山方舟视频技能，只作为初始值；后台保存后以 admin-config.json 为准。
+# 火山方舟视频技能，只作为初始值；后台保存后以 PostgreSQL 为准。
 VOLCENGINE_ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
 VOLCENGINE_ARK_API_KEY=replace-with-secret
 VOLCENGINE_VIDEO_MODEL=doubao-seedance-2-0-260128
@@ -86,7 +87,13 @@ MINIO_SECRET_KEY=replace-with-secret
 MINIO_REGION=us-east-1
 ```
 
-注意：后台页面保存后的密钥、用户、额度、资源记录都在 `ADMIN_CONFIG_FILE` 指向的 JSON 文件里。后续 AI 修改部署时，不能覆盖这个文件。
+生产数据契约：
+
+- 后台页面保存后的密钥、用户、额度、订单、资源、日志和计费记录必须写入 PostgreSQL。
+- `DATABASE_URL` 是生产必填项，缺失时 API 必须启动失败。
+- PostgreSQL 里没有 `moyuan_admin_state/main` 时，API 必须启动失败；全新初始化必须显式设置 `ALLOW_EMPTY_POSTGRES_STATE=1`，初始化后移除。
+- 禁止使用 JSON 文件作为运行时兜底存储；JSON 只能作为一次性迁移输入或离线备份。
+- 任何 AI 或开发者不得重新加入“读取 JSON 失败则返回空配置”的逻辑。
 
 ## 本地开发
 
@@ -140,10 +147,10 @@ API 运行需要：
 - `services/api/dist`
 - `services/api/package.json`
 - 根目录 `package-lock.json`
-- `packages/shared`
+- `packages/shared/dist` 和 `packages/shared/package.json`，生产服务器需要放到 `/opt/moyuan-api/node_modules/@eaw/shared`
 - 根目录 `node_modules` 或在服务器重新安装依赖
 - `/opt/moyuan-api/.env`
-- `/opt/moyuan-api/data/admin-config.json`
+- PostgreSQL 数据库和 `/opt/moyuan-api/.env` 里的 `DATABASE_URL`
 
 4. 配置 systemd：
 
@@ -197,10 +204,10 @@ sudo systemctl reload nginx
 
 ## 后台数据与备份
 
-当前后台第一版使用 JSON 文件持久化：
+后台生产数据使用 PostgreSQL 持久化，当前状态存放在：
 
-```bash
-/opt/moyuan-api/data/admin-config.json
+```sql
+select payload from moyuan_admin_state where id = 'main';
 ```
 
 里面包含：
@@ -213,13 +220,21 @@ sudo systemctl reload nginx
 - 图片、视频资源记录。
 - 视频任务扣费记录，避免重复扣费。
 
-每次部署 API 前必须备份：
+每次部署 API 前必须备份 PostgreSQL：
 
 ```bash
-cp /opt/moyuan-api/data/admin-config.json /opt/moyuan-api/data/admin-config.$(date +%Y%m%d-%H%M%S).json
+pg_dump "$DATABASE_URL" > /opt/moyuan-api/backups/moyuan-postgres.$(date +%Y%m%d-%H%M%S).sql
 ```
 
-如果后台报错或数据结构升级失败，先恢复备份，再看 `services/api/src/index.ts` 里的 `StoredAdminConfig`、`needsStoredConfigMigration`、`persistStoredConfig`。
+从旧 JSON 一次性迁移到 PostgreSQL 时，只能使用迁移脚本：
+
+```bash
+DATABASE_URL="postgres://..." npm run migrate:admin-json -w @eaw/api -- /opt/moyuan-api/data/admin-config.json
+```
+
+迁移完成后，API 运行时不得再读取 JSON。
+
+如果后台报错或数据结构升级失败，先恢复 PostgreSQL 备份，再看 `services/api/src/index.ts` 里的 `StoredAdminConfig`、`needsStoredConfigMigration`、`persistStoredConfig`。
 
 ## 技能与计费逻辑
 
@@ -292,8 +307,9 @@ curl -i http://codex.tminos.com:18080/admin-health
 
 配置保存后丢失：
 
-- 检查 `ADMIN_CONFIG_FILE` 是否固定到 `/opt/moyuan-api/data/admin-config.json`。
-- 检查服务进程是否有写入该目录权限。
+- 检查 `/opt/moyuan-api/.env` 是否配置 `DATABASE_URL`。
+- 检查 PostgreSQL 是否运行、`moyuan_admin_state` 是否存在 `id = 'main'`。
+- API 不允许用 JSON 兜底；如果发现 JSON 兜底逻辑，必须移除。
 
 技能生成成功但后台没有资源：
 
@@ -322,11 +338,21 @@ curl -i http://codex.tminos.com:18080/admin-health
 
 客户端启动后会自动检查更新。有新版本时提示下载，下载完成后提示用户重启安装。不要让用户每次重新访问官网手动下载安装。
 
+### macOS 签名发布注意
+
+当前桌面端打包配置里 `asar` 仍是关闭状态，Runtime 和依赖会以大量独立文件进入 `.app`。macOS 发布时签名阶段可能长时间没有新日志，但只要下面命令还能看到 `codesign` 或 `electron-builder` 进程，就先等待，不要误判为失败：
+
+```bash
+pgrep -fl 'codesign|hdiutil|electron-builder|app-builder'
+```
+
+这次 `0.1.28` 发布时，签名阶段大约沉默 9 分钟后继续生成了 macOS zip 和 dmg。后续应把打包结构优化为启用 `asar`，仅把 Runtime 必须直接访问的文件放进 `asarUnpack` 或 `extraResources`。
+
 ## 给其他 AI 的协作规则
 
 1. 先读本文件、`docs/MOYUAN_ARCHITECTURE.md`、`services/api/src/index.ts`、`apps/admin/src/services/admin.ts`。
 2. 不要把密钥写进代码、文档、README 或提交记录。
-3. 不要覆盖 `/opt/moyuan-api/data/admin-config.json`；改数据结构前先备份。
+3. 不要使用 JSON 作为后台生产数据兜底；改数据结构前先备份 PostgreSQL。
 4. 没有用户明确要求时，不要发布 GitHub Release，不要部署官网，不要重启线上服务。
 5. 新增后台字段时，同步修改 `packages/shared/src/index.ts`、`services/api/src/index.ts`、`apps/admin/src/services/admin.ts` 和对应页面。
 6. 新增技能时遵循四段结构：后台配置、技能说明、工具契约、执行器。

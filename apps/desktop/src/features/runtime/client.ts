@@ -1,4 +1,4 @@
-import type { CodexTask, CodexTaskEvent } from '@eaw/shared'
+import type { CodexTask, CodexTaskEvent, RuntimeAttachment } from '@eaw/shared'
 import { runtimeEndpoint, runtimeFetch } from '../../api'
 import type { ExecutionSettings } from '../../config'
 
@@ -8,6 +8,7 @@ type RuntimePayload<T> = {
 }
 
 export type CreateRuntimeTaskInput = {
+  attachments?: RuntimeAttachment[]
   employeeId: string
   enterpriseApiBase: string
   enterpriseAuthToken: string
@@ -76,6 +77,15 @@ export async function submitRuntimePluginInput({ enterpriseApiBase, enterpriseAu
   })
   const payload = await readRuntimePayload<CodexTask>(response)
   if (!payload.data) throw new Error(payload.error ?? '插件表单提交失败')
+  return payload.data
+}
+
+export async function deferRuntimePluginInput(taskId: string, requestId: string) {
+  const response = await runtimeFetch(`/api/codex/tasks/${encodeURIComponent(taskId)}/plugin-requests/${encodeURIComponent(requestId)}/defer`, {
+    method: 'POST',
+  })
+  const payload = await readRuntimePayload<CodexTask>(response)
+  if (!payload.data) throw new Error(payload.error ?? '稍后处理失败')
   return payload.data
 }
 

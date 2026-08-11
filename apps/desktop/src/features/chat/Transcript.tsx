@@ -81,7 +81,7 @@ export function Transcript({
     <div className={`transcript ${isWelcome ? 'welcome' : ''}`} ref={transcriptRef}>
       {visibleTranscript.map((item, index) => {
         const isLatestAssistant = item.role === 'assistant' && index === visibleTranscript.length - 1 && activeTask.status === 'running'
-        const itemKey = `${activeTask.id}-${item.itemId ?? `${index}-${item.role}`}`
+        const itemKey = `${activeTask.id}-${[item.turnId, item.eventId, item.itemId, item.seq, index, item.role].filter(Boolean).join('-')}`
         const shouldRenderTurnResources = Boolean(item.turnId && anchoredResourceTurnIds.has(item.turnId) && lastVisibleIndexByTurn.get(item.turnId) === index)
         return (
           <Fragment key={itemKey}>

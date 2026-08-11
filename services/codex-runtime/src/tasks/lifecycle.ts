@@ -162,11 +162,17 @@ export function applyTaskLifecycleEvent(record: LifecycleRecord, event: CodexTas
   }
 
   if (event.type === 'turn.completed') {
+    if (lifecycle.phase === 'waiting_input') {
+      record.task.status = taskStatusForPhase(lifecycle.phase)
+      return lifecycle
+    }
     lifecycle.phase = 'waiting_final'
     lifecycle.turnCompletedAt = event.timestamp
   }
 
-  if (event.type === 'process.exit' && !event.content.includes('完成')) {
+  if (event.type === 'process.exit' && content.includes('等待插件表单提交')) {
+    lifecycle.phase = 'waiting_input'
+  } else if (event.type === 'process.exit' && !event.content.includes('完成')) {
     lifecycle.phase = 'failed'
     lifecycle.reason = content
   }
