@@ -1,4 +1,4 @@
-import { Check, Circle, FileText, Globe2, Image, Loader2, Package, Play, Search, ShieldQuestion, Upload, Video, X } from 'lucide-react'
+import { Check, Circle, FileText, Globe2, Image, Loader2, Package, Search, ShieldQuestion, Upload, Video, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { runtimeTaskStatusExplanation, type CodexTask, type GeneratedAssetRecord, type PluginInputField, type RuntimePluginInputRequest, type RuntimeTaskItem, type UserWorkspaceSummary } from '@eaw/shared'
 import { enterpriseFetch } from '../../api'
@@ -807,8 +807,8 @@ export function TaskProgressCard({
   const activePluginRequest = pluginRequests.find((request) => request.id === activePluginRequestId) ?? null
   const sources = task.sources ?? []
   const isLive = task.status === 'queued' || task.status === 'running'
-  const statusExplanation = runtimeTaskStatusExplanation(task, busyElapsed)
-  const hasContent = Boolean(statusExplanation) || isLive || plan.length || items.length || outputs.length || approvals.length || pluginRequests.length || sources.length
+  const statusExplanation = runtimeTaskStatusExplanation(task)
+  const hasContent = Boolean(statusExplanation) || plan.length || items.length || outputs.length || approvals.length || pluginRequests.length || sources.length
 
   useEffect(() => {
     if (!pluginRequests.length) {
@@ -853,8 +853,8 @@ export function TaskProgressCard({
           request={activePluginRequest}
         />
       ) : null}
-      <section className="task-progress-card" aria-label="任务过程">
-        <div className="task-progress-heading">任务过程</div>
+      <section className="task-progress-card" aria-label="本轮活动">
+        <div className="task-progress-heading">本轮活动</div>
       {statusExplanation ? (
         <div className={`task-progress-status ${statusExplanation.kind}`}>
           <span className="task-progress-status-icon">
@@ -956,12 +956,6 @@ export function TaskProgressCard({
         </div>
       ) : null}
 
-      {!plan.length && isLive ? (
-        <div className="task-progress-row task-progress-live">
-          <span className="task-progress-mark in_progress"><Play size={13} /></span>
-          <span>{task.status === 'queued' ? '任务排队中' : '任务正在执行'}</span>
-        </div>
-      ) : null}
       </section>
     </>
   )

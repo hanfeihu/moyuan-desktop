@@ -6,15 +6,8 @@ import { formatElapsed } from '../../utils/format'
 import { ResourceCards, resourceTurnIds, taskResources } from './ResourceCards'
 import { TranscriptMessage } from './TranscriptMessage'
 
-function pendingStatusLabel(task: CodexTask, visibleTranscript: TranscriptItem[], busyElapsed: number) {
-  const elapsed = formatElapsed(busyElapsed)
-  const latestVisible = visibleTranscript.at(-1)
-  if (task.status === 'queued') return `已发送，正在校验账号并创建任务 ${elapsed}`
-  if (latestVisible?.role === 'tool') return `正在执行工具 ${elapsed}`
-  if (latestVisible?.role === 'system') return `正在推进任务 ${elapsed}`
-  if (busyElapsed < 2500) return `已发送，正在启动本轮任务 ${elapsed}`
-  if (busyElapsed < 9000) return `Codex 正在理解并编排 ${elapsed}`
-  return `仍在编排，可能正在准备工具调用 ${elapsed}`
+function pendingStatusLabel(busyElapsed: number) {
+  return `正在处理 ${formatElapsed(busyElapsed)}`
 }
 
 function latestResourceCreatedAt(task: CodexTask) {
@@ -39,9 +32,7 @@ function unanchoredResourceInsertIndex(task: CodexTask, visibleTranscript: Trans
 export function Transcript({
   activeTask,
   busyElapsed,
-  isCancelling,
   isWelcome,
-  onStop,
   onRegenerateResource,
   shouldShowThinking,
   transcriptBottomRef,
@@ -50,9 +41,7 @@ export function Transcript({
 }: {
   activeTask: CodexTask
   busyElapsed: number
-  isCancelling: boolean
   isWelcome: boolean
-  onStop: () => void
   onRegenerateResource?: (prompt: string) => void
   shouldShowThinking: boolean
   transcriptBottomRef: RefObject<HTMLDivElement>
@@ -100,10 +89,7 @@ export function Transcript({
           </div>
           <div className="message-body">
             <span className="typing-dot" />
-            <span className="thinking-copy">{pendingStatusLabel(activeTask, visibleTranscript, busyElapsed)}</span>
-            <button className="inline-stop-button" disabled={isCancelling} onClick={onStop} type="button">
-              {isCancelling ? '停止中' : '停止'}
-            </button>
+            <span className="thinking-copy">{pendingStatusLabel(busyElapsed)}</span>
           </div>
         </article>
       )}

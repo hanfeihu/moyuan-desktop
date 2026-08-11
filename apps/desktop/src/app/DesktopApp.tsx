@@ -182,10 +182,8 @@ export function DesktopApp() {
             <Transcript
               activeTask={taskController.activeTask}
               busyElapsed={taskController.busyElapsed}
-              isCancelling={taskController.isCancelling}
               isWelcome={taskController.isWelcome}
               onRegenerateResource={taskController.regenerateResource}
-              onStop={taskController.stopActiveTask}
               shouldShowThinking={taskController.shouldShowThinking}
               transcriptBottomRef={transcriptBottomRef}
               transcriptRef={transcriptRef}
@@ -217,7 +215,7 @@ export function DesktopApp() {
               textareaRef={textareaRef}
             />
           </div>
-          <aside className="task-side-panel" aria-label="任务详情">
+          <aside className="task-side-panel" aria-label="运行活动">
             <div className="storyboard-tabs" role="tablist">
               <button
                 className={`storyboard-tab ${sidePanelTab === 'task' ? 'active' : ''}`}
@@ -226,7 +224,7 @@ export function DesktopApp() {
                 aria-selected={sidePanelTab === 'task'}
                 type="button"
               >
-                任务
+                活动
               </button>
               <button
                 className={`storyboard-tab ${sidePanelTab === 'characters' ? 'active' : ''}`}

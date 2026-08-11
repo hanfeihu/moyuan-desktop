@@ -932,7 +932,7 @@ button:disabled {
   height: 7px;
   border-radius: 50%;
   display: inline-block;
-  margin-right: 10px;
+  margin-right: 0;
   background: var(--muted);
   animation: pulse 1.2s ease-in-out infinite;
   vertical-align: middle;
@@ -942,24 +942,6 @@ button:disabled {
   color: #7d8288;
   font-size: var(--chat-message-size);
   line-height: 1.46;
-}
-
-.inline-stop-button {
-  height: 24px;
-  border: 1px solid rgba(224, 222, 216, 0.86);
-  border-radius: 999px;
-  padding: 0 9px;
-  background: rgba(255, 255, 255, 0.7);
-  color: #747980;
-  font-size: 12px;
-  line-height: 1;
-}
-
-.inline-stop-button:hover:not(:disabled) {
-  border-color: #d5d2cb;
-  background: #ffffff;
-  color: #25292f;
-  transform: none;
 }
 
 .message.tool .message-body,
@@ -1148,10 +1130,6 @@ button:disabled {
 .task-progress-output-icon,
 .task-progress-approval-icon {
   color: #8f9499;
-}
-
-.task-progress-live {
-  color: #7b8086;
 }
 
 .task-progress-plugin-row {

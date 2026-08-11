@@ -140,9 +140,11 @@ export function useTaskController({
   const shouldShowThinking = isBusy && latestVisibleItem?.role !== 'assistant'
   const remainingTokens = authUser ? authUser.tokenBudget - authUser.tokenUsed : 0
   const quotaDepleted = remainingTokens <= 0
-  const placeholder = quotaDepleted ? 'Token 额度不足，可先充值或联系管理员' : isBusy ? '当前任务运行中，完成后继续发送' : '让墨渊做点什么...'
+  const placeholder = quotaDepleted ? 'Token 额度不足，可先充值或联系管理员' : isBusy ? '正在处理当前请求' : '让墨渊做点什么...'
   const canSubmit = !isSubmitting && !isBusy && !quotaDepleted && (Boolean(prompt.trim()) || attachments.length > 0)
-  const showStatusBadge = !isWelcome && (activeTask.status !== 'completed' || runtimeState === 'offline')
+  const showStatusBadge =
+    !isWelcome &&
+    (runtimeState === 'offline' || activeTask.status === 'failed' || activeTask.status === 'interrupted' || activeTask.status === 'needs_approval')
 
   function selectTask(taskId: string) {
     logClientEvent('task.select', { fromTaskId: activeTask?.id, taskId }, 'debug')

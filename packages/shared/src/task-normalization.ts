@@ -281,7 +281,7 @@ function itemProgressDetail(item: RuntimeTaskItem) {
   return item.content || '正在准备视频生成服务。'
 }
 
-export function runtimeTaskStatusExplanation(task: CodexTask, elapsedMs = 0): RuntimeTaskStatusExplanation | undefined {
+export function runtimeTaskStatusExplanation(task: CodexTask): RuntimeTaskStatusExplanation | undefined {
   const pendingPlugin = (task.pluginRequests ?? []).find((request) => request.status === 'pending')
   if (pendingPlugin && task.status !== 'interrupted') {
     return {
@@ -320,16 +320,8 @@ export function runtimeTaskStatusExplanation(task: CodexTask, elapsedMs = 0): Ru
       }
     }
     return outputCount
-      ? { kind: 'completed', title: '任务已完成', detail: `已整理 ${outputCount} 个输出。` }
+      ? { kind: 'completed', title: '处理完成', detail: `已整理 ${outputCount} 个输出。` }
       : undefined
-  }
-
-  if (task.status === 'queued') {
-    return {
-      kind: 'queued',
-      title: '已发送，正在创建任务',
-      detail: elapsedMs > 7000 ? '如果这里停留很久，通常是账号校验、Runtime 启动或后台连接较慢。' : undefined,
-    }
   }
 
   if (task.status === 'running' || task.status === 'needs_approval') {
@@ -351,11 +343,7 @@ export function runtimeTaskStatusExplanation(task: CodexTask, elapsedMs = 0): Ru
       }
     }
 
-    return {
-      kind: 'running',
-      title: elapsedMs > 9000 ? 'Codex 仍在编排' : 'Codex 正在编排',
-      detail: elapsedMs > 9000 ? '可能正在准备工具调用、等待模型返回，或等待 Runtime 推送事件。' : undefined,
-    }
+    return undefined
   }
 
   return undefined

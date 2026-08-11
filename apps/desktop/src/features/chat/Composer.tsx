@@ -327,7 +327,7 @@ export function Composer({
             className={`send-button ${isBusy ? 'stop' : ''}`}
             disabled={isBusy ? isCancelling : !canSubmit}
             onClick={isBusy ? onStop : onSubmit}
-            title={isBusy ? '停止本次任务' : quotaDepleted ? 'Token 额度不足' : '发送'}
+            title={isBusy ? '停止生成' : quotaDepleted ? 'Token 额度不足' : '发送'}
             type="button"
           >
             {isBusy ? (isCancelling ? <Loader2 size={16} className="spin" /> : <Square size={13} />) : isSubmitting ? <Loader2 size={16} className="spin" /> : <Send size={16} />}
