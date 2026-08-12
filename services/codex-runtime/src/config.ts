@@ -1,3 +1,10 @@
+import {
+  defaultCodexModelCatalog,
+  defaultCodexModelId,
+  normalizeModelCatalog,
+  type ModelCatalogEntry,
+} from '@eaw/shared'
+
 export const defaultEnterpriseApiBase = process.env.ENTERPRISE_API_BASE ?? 'http://codex.tminos.com:18080/admin-api'
 
 export type ModelRuntimeConfig = {
@@ -8,9 +15,11 @@ export type ModelRuntimeConfig = {
   apiKey?: string
   envKey: 'OPENAI_API_KEY'
   defaultModel: string
+  models: ModelCatalogEntry[]
 }
 
 export function getModelConfig(): ModelRuntimeConfig {
+  const defaultModel = process.env.AI_MODEL ?? defaultCodexModelId
   return {
     providerId: process.env.AI_PROVIDER_ID ?? 'moyuan-blector',
     providerName: process.env.AI_PROVIDER_NAME ?? 'Moyuan OpenAI Compatible Proxy',
@@ -18,7 +27,8 @@ export function getModelConfig(): ModelRuntimeConfig {
     apiKeyConfigured: Boolean(process.env.AI_API_KEY),
     apiKey: process.env.AI_API_KEY,
     envKey: 'OPENAI_API_KEY',
-    defaultModel: process.env.AI_MODEL ?? 'gpt-5.5',
+    defaultModel,
+    models: normalizeModelCatalog(defaultModel === defaultCodexModelId ? defaultCodexModelCatalog : undefined, defaultModel),
   }
 }
 

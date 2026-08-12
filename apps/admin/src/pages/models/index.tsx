@@ -3,14 +3,17 @@ import {
   PageContainer,
   ProCard,
   ProForm,
+  ProFormDependency,
   ProFormDigit,
+  ProFormList,
+  ProFormSelect,
   ProFormSwitch,
   ProFormText,
   ProTable,
 } from '@ant-design/pro-components'
 import { App, Button, Popconfirm, Space, Tag } from 'antd'
 import { useEffect, useState } from 'react'
-import type { ModelProviderConfig } from '@eaw/shared'
+import { defaultCodexModelCatalog, type ModelCatalogEntry, type ModelProviderConfig } from '@eaw/shared'
 import { useAdminSnapshot } from '@/hooks/useAdminSnapshot'
 import { deleteModelProvider, saveModelProvider } from '@/services/admin'
 
@@ -46,8 +49,8 @@ export default function ModelsPage() {
       setProviders(payload.providers)
       setFormSeed((current) => current + 1)
       message.success('模型配置已保存')
-    } catch {
-      message.warning('后台 API 暂不可用，已保留页面配置草稿')
+    } catch (error) {
+      message.warning(error instanceof Error ? error.message : '模型配置保存失败')
     }
   }
 
@@ -83,7 +86,8 @@ export default function ModelsPage() {
       name: '新模型通道',
       baseUrl: '',
       maskedApiKey: '未配置',
-      defaultModel: '',
+      defaultModel: defaultCodexModelCatalog[0].id,
+      models: defaultCodexModelCatalog,
       enabled: false,
       monthlyLimit: 5000000,
     })
@@ -108,11 +112,12 @@ export default function ModelsPage() {
             apiKey: undefined,
             baseUrl: modelProvider.baseUrl,
             defaultModel: modelProvider.defaultModel,
+            models: modelProvider.models,
             enabled: modelProvider.enabled,
             monthlyLimit: modelProvider.monthlyLimit,
             name: modelProvider.name,
           }}
-          key={`${formSeed}-${modelProvider.id}-${modelProvider.baseUrl}-${modelProvider.defaultModel}-${modelProvider.enabled}`}
+          key={`${formSeed}-${modelProvider.id}-${modelProvider.baseUrl}-${modelProvider.defaultModel}-${modelProvider.models.map((model) => model.id).join(',')}-${modelProvider.enabled}`}
           onFinish={save}
           preserve={false}
           submitter={{
@@ -130,7 +135,6 @@ export default function ModelsPage() {
             name="apiKey"
             placeholder={keyConfigured ? '留空则不修改现有密钥' : '粘贴 API Key'}
           />
-          <ProFormText colProps={{ md: 8, xs: 24 }} label="默认模型" name="defaultModel" />
           <ProFormDigit colProps={{ md: 8, xs: 24 }} label="月度 Token 额度" name="monthlyLimit" />
           <ProFormSwitch
             colProps={{ md: 8, xs: 24 }}
@@ -138,6 +142,64 @@ export default function ModelsPage() {
             label="启用该通道"
             name="enabled"
           />
+          <ProFormList
+            creatorRecord={() => ({
+              defaultReasoningEffort: 'xhigh',
+              enabled: true,
+              supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+            })}
+            creatorButtonProps={{ creatorButtonText: '添加可选模型' }}
+            label="客户端可选模型"
+            min={1}
+            name="models"
+          >
+            <ProForm.Group>
+              <ProFormText colProps={{ md: 6, xs: 24 }} label="模型 ID" name="id" rules={[{ required: true }]} />
+              <ProFormText colProps={{ md: 5, xs: 24 }} label="显示名称" name="displayName" rules={[{ required: true }]} />
+              <ProFormSelect
+                colProps={{ md: 4, xs: 12 }}
+                label="默认强度"
+                name="defaultReasoningEffort"
+                options={[
+                  { label: '轻度', value: 'low' },
+                  { label: '中', value: 'medium' },
+                  { label: '高', value: 'high' },
+                  { label: '极高', value: 'xhigh' },
+                  { label: '超高', value: 'max' },
+                  { label: 'Ultra', value: 'ultra' },
+                ]}
+                rules={[{ required: true }]}
+              />
+              <ProFormSelect
+                colProps={{ md: 5, xs: 12 }}
+                fieldProps={{ mode: 'multiple' }}
+                label="支持强度"
+                name="supportedReasoningEfforts"
+                options={[
+                  { label: '轻度', value: 'low' },
+                  { label: '中', value: 'medium' },
+                  { label: '高', value: 'high' },
+                  { label: '极高', value: 'xhigh' },
+                  { label: '超高', value: 'max' },
+                  { label: 'Ultra', value: 'ultra' },
+                ]}
+                rules={[{ required: true }]}
+              />
+              <ProFormSwitch colProps={{ md: 4, xs: 12 }} label="客户端可见" name="enabled" />
+              <ProFormText colProps={{ md: 20, xs: 24 }} label="说明" name="description" />
+            </ProForm.Group>
+          </ProFormList>
+          <ProFormDependency name={['models']}>
+            {({ models }: { models?: ModelCatalogEntry[] }) => (
+              <ProFormSelect
+                colProps={{ md: 8, xs: 24 }}
+                label="默认模型"
+                name="defaultModel"
+                options={(models ?? []).filter((model) => model.enabled).map((model) => ({ label: model.displayName || model.id, value: model.id }))}
+                rules={[{ required: true }]}
+              />
+            )}
+          </ProFormDependency>
         </ProForm>
       </ProCard>
 
@@ -147,6 +209,7 @@ export default function ModelsPage() {
             { title: '名称', dataIndex: 'name' },
             { title: 'Base URL', dataIndex: 'baseUrl', ellipsis: true },
             { title: '默认模型', dataIndex: 'defaultModel' },
+            { title: '可选模型', render: (_, row) => row.models.filter((model) => model.enabled).length },
             { title: '月度额度', dataIndex: 'monthlyLimit' },
             {
               title: 'Key',

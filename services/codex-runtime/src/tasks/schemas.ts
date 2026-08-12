@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { reasoningEffortValues } from '@eaw/shared'
 
 export const clientLogSchema = z.object({
   details: z.unknown().optional(),
@@ -33,7 +34,8 @@ export const taskSchema = z.object({
   enterpriseApiBase: z.string().url().optional(),
   enterpriseAuthToken: z.string().optional(),
   parentTaskId: z.string().optional(),
-  reasoningEffort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']).optional(),
+  model: z.string().trim().min(1).optional(),
+  reasoningEffort: z.enum(reasoningEffortValues).optional(),
   sandboxMode: z.enum(['read-only', 'workspace-write', 'danger-full-access']).optional(),
   sessionId: z.string().optional(),
 })
@@ -47,6 +49,9 @@ export const approvalSchema = z.object({
 export const pluginInputSubmissionSchema = z.object({
   enterpriseApiBase: z.string().url().optional(),
   enterpriseAuthToken: z.string().optional(),
+  model: z.string().trim().min(1).optional(),
+  reasoningEffort: z.enum(reasoningEffortValues).optional(),
+  sandboxMode: z.enum(['read-only', 'workspace-write', 'danger-full-access']).optional(),
   values: z.record(z.string(), z.unknown()).default({}),
 })
 

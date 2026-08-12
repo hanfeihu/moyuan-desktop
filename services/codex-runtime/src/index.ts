@@ -15,6 +15,7 @@ import {
   interactiveVideoPluginInputFields,
   interactiveVideoPluginInputUi,
   isRuntimeFailureNotice,
+  isReasoningEffort,
   runtimeFailureDiagnostic,
   type CodexTask,
   type CodexTaskEvent,
@@ -42,6 +43,7 @@ import { appServerRaw, createTaskEventBus, rawItemId } from './tasks/events.js'
 import { registerDiagnosticsRoutes } from './routes/diagnostics.js'
 import { appServerSandboxPolicy, appServerThreadId, appServerTurnId, connectAppServer, findOpenPort } from './codex/app-server.js'
 import { buildBaseInstructions, buildPromptWithContext } from './codex/context.js'
+import { resolveModelSelection, validateModelSelection } from './models.js'
 import {
   isRuntimeFailureContent,
   previewLogContent,
@@ -80,14 +82,12 @@ const runtimeToken = process.env.MOYUAN_RUNTIME_TOKEN ?? ''
 const runtimeHost = process.env.CODEX_RUNTIME_HOST ?? '127.0.0.1'
 const nodeHostPath = process.env.MOYUAN_NODE_HOST_PATH || process.execPath
 const codexSandboxMode = process.env.MOYUAN_CODEX_SANDBOX_MODE ?? 'danger-full-access'
-const codexReasoningEffort = process.env.MOYUAN_CODEX_REASONING_EFFORT ?? 'high'
+const codexReasoningEffort = isReasoningEffort(process.env.MOYUAN_CODEX_REASONING_EFFORT)
+  ? process.env.MOYUAN_CODEX_REASONING_EFFORT
+  : 'xhigh'
 
 function effectiveSandboxMode(options?: RuntimeRunOptions) {
   return options?.sandboxMode ?? codexSandboxMode
-}
-
-function effectiveReasoningEffort(options?: RuntimeRunOptions) {
-  return options?.reasoningEffort ?? codexReasoningEffort
 }
 
 await app.register(cors, {
@@ -1123,17 +1123,16 @@ async function ensureWorkspace(workspace: string) {
   return target
 }
 
-async function createCodexHome(config = getModelConfig()) {
+async function createCodexHome(config = getModelConfig(), model = config.defaultModel, reasoningEffort = codexReasoningEffort) {
   const codexHome = process.env.MOYUAN_CODEX_HOME ?? path.join(tmpdir(), 'moyuan-codex', 'default')
   const sandboxMode = codexSandboxMode
-  const reasoningEffort = codexReasoningEffort
 
   await mkdir(codexHome, { recursive: true })
   await writeFile(
     path.join(codexHome, 'config.toml'),
     [
       `model_provider = "${config.providerId}"`,
-      `model = "${config.defaultModel}"`,
+      `model = "${model}"`,
       'approval_policy = "never"',
       `sandbox_mode = "${sandboxMode}"`,
       `model_reasoning_effort = "${reasoningEffort}"`,
@@ -1292,9 +1291,9 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
   const requiredSkill = requestedSkillFromPrompt(attachmentPrompt)
   const codexBin = resolveCodexBin()
   const { modelConfig: config, skills } = await loadEnterpriseRuntimeConfig(options.enterpriseAuthToken, options.enterpriseApiBase)
-  const codexHome = await createCodexHome(config)
+  const { model, reasoningEffort } = resolveModelSelection(config, options)
+  const codexHome = await createCodexHome(config, model, reasoningEffort)
   const sandboxMode = effectiveSandboxMode(options)
-  const reasoningEffort = effectiveReasoningEffort(options)
   const skillInstructions = buildSkillInstructionBlock(skills)
   const port = await findOpenPort()
   const appServerUrl = `ws://127.0.0.1:${port}`
@@ -1314,7 +1313,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
   await saveStore()
   logTask(record, 'codex.app_server.start', {
     hasMemory: Boolean(memory),
-    model: config.defaultModel,
+    model,
     port,
     plugins: (skills.plugins ?? []).map((plugin) => ({
       id: plugin.id,
@@ -1645,13 +1644,13 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
       },
     }, 15000)
     connection.notify('initialized')
-    logTask(record, 'codex.app_server.initialized', { model: config.defaultModel })
+    logTask(record, 'codex.app_server.initialized', { model })
 
     const threadResult = sessionId
       ? await connection.request('thread/resume', {
           threadId: sessionId,
           cwd: workspace,
-          model: config.defaultModel,
+          model,
           runtimeWorkspaceRoots: [workspace],
           approvalPolicy: 'never',
           sandbox: sandboxMode,
@@ -1660,7 +1659,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
         }, 45000)
       : await connection.request('thread/start', {
           cwd: workspace,
-          model: config.defaultModel,
+          model,
           runtimeWorkspaceRoots: [workspace],
           approvalPolicy: 'never',
           sandbox: sandboxMode,
@@ -1687,7 +1686,7 @@ async function runCodexAppServer(record: TaskRecord, prompt: string, workspace: 
       cwd: workspace,
       approvalPolicy: 'never',
       sandboxPolicy: appServerSandboxPolicy(workspace, sandboxMode),
-      model: config.defaultModel,
+      model,
       effort: reasoningEffort,
     }, 60000)
     activeTurnId = appServerTurnId(turnResult) ?? ''
@@ -1746,9 +1745,9 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
   const requiredSkill = requestedSkillFromPrompt(attachmentPrompt)
   const codexBin = resolveCodexBin()
   const { modelConfig: config, skills } = await loadEnterpriseRuntimeConfig(options.enterpriseAuthToken, options.enterpriseApiBase)
-  const codexHome = await createCodexHome(config)
+  const { model, reasoningEffort } = resolveModelSelection(config, options)
+  const codexHome = await createCodexHome(config, model, reasoningEffort)
   const sandboxMode = effectiveSandboxMode(options)
-  const reasoningEffort = effectiveReasoningEffort(options)
   const skillInstructions = buildSkillInstructionBlock(skills)
   const commonArgs = [
     '--json',
@@ -1764,7 +1763,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
     '-c',
     `model_reasoning_effort="${reasoningEffort}"`,
     '-m',
-    config.defaultModel,
+    model,
   ]
   const memory = workspaceMemory.get(workspace)
   const diffSummary = await getGitDiff(workspace)
@@ -1782,7 +1781,7 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
 
   setTaskLifecyclePhase(record, 'running', isRuntimeFailureContent)
   logTask(record, 'codex.exec.start', {
-    model: config.defaultModel,
+    model,
     plugins: (skills.plugins ?? []).map((plugin) => ({
       id: plugin.id,
       status: plugin.status,
@@ -1980,6 +1979,13 @@ app.post('/api/codex/tasks', async (request, reply) => {
     return reply.status(400).send({ error: '请输入任务内容或添加图片' })
   }
 
+  const { modelConfig } = await loadEnterpriseRuntimeConfig(parsed.data.enterpriseAuthToken, parsed.data.enterpriseApiBase)
+  const selection = validateModelSelection(modelConfig, {
+    model: parsed.data.model,
+    reasoningEffort: parsed.data.reasoningEffort,
+  })
+  if (!selection.ok) return reply.status(400).send({ error: selection.error })
+
   const quota = await validateEnterpriseQuota(parsed.data.enterpriseAuthToken, parsed.data.enterpriseApiBase)
   if (!quota.ok) {
     logRuntime(
@@ -2028,6 +2034,9 @@ app.post('/api/codex/tasks', async (request, reply) => {
 
   task.status = 'queued'
   task.workspace = parsed.data.workspace
+  task.model = selection.model
+  task.reasoningEffort = selection.reasoningEffort
+  task.sandboxMode = parsed.data.sandboxMode
   task.workspaceMemory = workspaceMemory.get(parsed.data.workspace)
   task.diffSummary = await getGitDiff(parsed.data.workspace)
   task.updatedAt = now
@@ -2047,16 +2056,19 @@ app.post('/api/codex/tasks', async (request, reply) => {
     employeeId: parsed.data.employeeId,
     attachmentCount: parsed.data.attachments.length,
     parentTaskId: parsed.data.parentTaskId,
+    model: selection.model,
     promptLength: promptText.length,
     promptPreview: previewLogContent(promptText),
     reusable: Boolean(reusableRecord),
     requestedSessionId,
+    reasoningEffort: selection.reasoningEffort,
   })
 
   void runCodex(record, promptText, parsed.data.workspace, requestedSessionId ?? task.sessionId, {
     enterpriseApiBase: parsed.data.enterpriseApiBase,
     enterpriseAuthToken: parsed.data.enterpriseAuthToken,
-    reasoningEffort: parsed.data.reasoningEffort,
+    model: selection.model,
+    reasoningEffort: selection.reasoningEffort,
     sandboxMode: parsed.data.sandboxMode,
   }).catch((error: unknown) => {
     if (record.cancelRequested) return
@@ -2259,6 +2271,15 @@ app.post('/api/codex/tasks/:taskId/plugin-requests/:requestId/submit', async (re
   } catch (error) {
     return reply.status(400).send({ error: error instanceof Error ? error.message : '插件素材处理失败' })
   }
+  const { modelConfig } = await loadEnterpriseRuntimeConfig(parsed.data.enterpriseAuthToken, parsed.data.enterpriseApiBase)
+  const selection = validateModelSelection(modelConfig, {
+    model: parsed.data.model ?? record.task.model,
+    reasoningEffort: parsed.data.reasoningEffort ?? record.task.reasoningEffort,
+  })
+  if (!selection.ok) return reply.status(400).send({ error: selection.error })
+  record.task.model = selection.model
+  record.task.reasoningEffort = selection.reasoningEffort
+  record.task.sandboxMode = parsed.data.sandboxMode ?? record.task.sandboxMode
   pushEvent(record, {
     taskId: params.taskId,
     type: 'plugin.inputSubmitted',
@@ -2288,6 +2309,9 @@ app.post('/api/codex/tasks/:taskId/plugin-requests/:requestId/submit', async (re
   void runCodex(record, continuationPrompt, record.task.workspace, record.task.sessionId, {
     enterpriseApiBase: parsed.data.enterpriseApiBase,
     enterpriseAuthToken: parsed.data.enterpriseAuthToken,
+    model: selection.model,
+    reasoningEffort: selection.reasoningEffort,
+    sandboxMode: record.task.sandboxMode,
   }).catch((error: unknown) => {
     if (record.cancelRequested) return
     logTask(record, 'plugin.continue.unhandled_error', error, 'error')

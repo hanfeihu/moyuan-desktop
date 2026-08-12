@@ -1,4 +1,4 @@
-import type { ImageGenerationInputImage, PluginDefinition, VideoRatio, VideoResolution } from '@eaw/shared'
+import type { ImageGenerationInputImage, PluginDefinition, ReasoningEffort, VideoRatio, VideoResolution } from '@eaw/shared'
 
 export const videoRatioOptions = ['adaptive', '16:9', '4:3', '1:1', '3:4', '9:16', '21:9'] as const satisfies readonly VideoRatio[]
 
@@ -34,7 +34,8 @@ export type EnterpriseSkillSet = {
 export type RuntimeRunOptions = {
   enterpriseApiBase?: string
   enterpriseAuthToken?: string
-  reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+  model?: string
+  reasoningEffort?: ReasoningEffort
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access'
   skillRepairAttempt?: boolean
 }

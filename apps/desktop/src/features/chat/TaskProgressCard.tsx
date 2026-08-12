@@ -369,7 +369,7 @@ function PluginRequestForm({
       <div className="plugin-request-head">
         <span className="plugin-request-kicker">{ui.kicker || '交互插件'}</span>
         <strong>{ui.title || request.title}</strong>
-        <span>{ui.description || '补充信息和素材后，Codex 会继续接管生成流程。'}</span>
+        <span>{ui.description || '补充信息和素材后，墨渊会继续处理生成流程。'}</span>
       </div>
       <div className="plugin-request-fields">
         <div className="plugin-request-section">

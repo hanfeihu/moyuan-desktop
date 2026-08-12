@@ -59,7 +59,7 @@ ADMIN_PASSWORD=change-me
 # 默认模型通道，只作为初始值；后台保存后以 PostgreSQL 为准。
 AI_BASE_URL=https://your-openai-compatible-gateway/v1
 AI_API_KEY=replace-with-secret
-AI_MODEL=gpt-5-codex
+AI_MODEL=gpt-5.6-sol
 
 # 图片技能，只作为初始值；后台保存后以 PostgreSQL 为准。
 IMAGE_BASE_URL=https://your-image-gateway/v1

@@ -7,10 +7,14 @@ import { Readable } from 'node:stream'
 import { Pool } from 'pg'
 import { z } from 'zod'
 import {
+  defaultCodexModelCatalog,
+  defaultCodexModelId,
   hasLegacyInteractiveVideoPluginFields,
   hasSeedanceInteractiveVideoPluginFields,
   interactiveVideoPluginInputFields,
   interactiveVideoPluginInputUi,
+  normalizeModelCatalog,
+  reasoningEffortValues,
 } from '@eaw/shared'
 import { calculateUsageCharge, chargeUsage, normalizeBillingConfig } from './billing.js'
 import {
@@ -67,14 +71,57 @@ function defaultVideoRatioForModel(model?: string): VideoRatio {
   return normalized.includes('seedance-2') || normalized.includes('seedance-1-5-pro') ? 'adaptive' : '16:9'
 }
 
+const modelCatalogEntrySchema = z.object({
+  id: z.string().trim().min(1),
+  displayName: z.string().trim().min(1),
+  description: z.string().trim().optional(),
+  enabled: z.boolean(),
+  defaultReasoningEffort: z.enum(reasoningEffortValues),
+  supportedReasoningEfforts: z.array(z.enum(reasoningEffortValues)).min(1),
+})
+
 const modelConfigSchema = z.object({
   id: z.preprocess((value) => (value === '' ? undefined : value), z.string().min(1).optional()),
   name: z.string().min(1),
   baseUrl: z.string().url(),
   apiKey: z.string().optional(),
   defaultModel: z.string().min(1),
+  models: z.array(modelCatalogEntrySchema).min(1),
   enabled: z.boolean(),
   monthlyLimit: z.coerce.number().int().min(0),
+}).superRefine((value, context) => {
+  const seenModelIds = new Set<string>()
+  value.models.forEach((model, index) => {
+    if (seenModelIds.has(model.id)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['models', index, 'id'],
+        message: '模型 ID 不能重复',
+      })
+    }
+    seenModelIds.add(model.id)
+    if (!model.supportedReasoningEfforts.includes(model.defaultReasoningEffort)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['models', index, 'defaultReasoningEffort'],
+        message: '默认强度必须包含在支持强度中',
+      })
+    }
+  })
+  if (!value.models.some((model) => model.enabled)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['models'],
+      message: '至少启用一个客户端可选模型',
+    })
+  }
+  if (!value.models.some((model) => model.enabled && model.id === value.defaultModel)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['defaultModel'],
+      message: '默认模型必须是目录中已启用的模型',
+    })
+  }
 })
 
 const videoSkillConfigSchema = z.object({
@@ -576,6 +623,7 @@ async function flushPersistStoredConfig() {
 function needsStoredConfigMigration(config: StoredAdminConfig) {
   return (
     !config.modelProviders ||
+    config.modelProviders.some((provider) => !provider.models?.length || (provider.id === 'blector' && provider.defaultModel === 'gpt-5.5')) ||
     !config.imageSkill ||
     !config.videoSkill ||
     !config.plugins ||
@@ -594,19 +642,22 @@ function toStoredModelProviderConfig(provider: ModelProviderConfig): Omit<ModelP
     name: provider.name,
     baseUrl: provider.baseUrl,
     defaultModel: provider.defaultModel,
+    models: provider.models,
     enabled: provider.enabled,
     monthlyLimit: provider.monthlyLimit,
   }
 }
 
 function defaultModelProviders(): ModelProviderConfig[] {
+  const blectorDefaultModel = process.env.AI_MODEL ?? defaultCodexModelId
   return [
     {
       id: 'blector',
       name: 'Blector 中转',
       baseUrl: process.env.AI_BASE_URL ?? 'https://ai.blector.com/v1',
       maskedApiKey: maskKey(modelProviderApiKeys.blector),
-      defaultModel: process.env.AI_MODEL ?? 'gpt-5.5',
+      defaultModel: blectorDefaultModel,
+      models: normalizeModelCatalog(blectorDefaultModel === defaultCodexModelId ? defaultCodexModelCatalog : undefined, blectorDefaultModel),
       enabled: true,
       monthlyLimit: 5000000,
     },
@@ -616,6 +667,15 @@ function defaultModelProviders(): ModelProviderConfig[] {
       baseUrl: 'http://model-gateway:8000/v1',
       maskedApiKey: maskKey(modelProviderApiKeys.local),
       defaultModel: 'qwen3-coder',
+      models: normalizeModelCatalog([
+        {
+          id: 'qwen3-coder',
+          displayName: 'Qwen3 Coder',
+          enabled: true,
+          defaultReasoningEffort: 'high',
+          supportedReasoningEfforts: ['low', 'medium', 'high'],
+        },
+      ], 'qwen3-coder'),
       enabled: false,
       monthlyLimit: 5000000,
     },
@@ -630,12 +690,23 @@ function normalizeModelProviders(providers: ModelProviderConfig[]) {
     return true
   })
   const enabledIndex = unique.findIndex((provider) => provider.enabled)
-  return unique.map((provider, index) => ({
-    ...provider,
-    maskedApiKey: maskKey(modelProviderApiKeys[provider.id]),
-    enabled: enabledIndex < 0 ? index === 0 : index === enabledIndex,
-    monthlyLimit: provider.monthlyLimit ?? 5000000,
-  }))
+  return unique.map((provider, index) => {
+    const migrateLegacyBlector = provider.id === 'blector' && provider.defaultModel === 'gpt-5.5' && !provider.models?.length
+    const defaultModel = migrateLegacyBlector ? defaultCodexModelId : provider.defaultModel
+    const models = normalizeModelCatalog(migrateLegacyBlector ? defaultCodexModelCatalog : provider.models, defaultModel)
+    const enabledModels = models.filter((model) => model.enabled)
+    const normalizedDefault = enabledModels.some((model) => model.id === defaultModel)
+      ? defaultModel
+      : enabledModels[0]?.id ?? models[0].id
+    return {
+      ...provider,
+      defaultModel: normalizedDefault,
+      models,
+      maskedApiKey: maskKey(modelProviderApiKeys[provider.id]),
+      enabled: enabledIndex < 0 ? index === 0 : index === enabledIndex,
+      monthlyLimit: provider.monthlyLimit ?? 5000000,
+    }
+  })
 }
 
 function buildModelProviders(config: StoredAdminConfig): ModelProviderConfig[] {
@@ -645,6 +716,7 @@ function buildModelProviders(config: StoredAdminConfig): ModelProviderConfig[] {
   return normalizeModelProviders(
     stored.map((provider) => ({
       ...provider,
+      models: provider.models ?? [],
       maskedApiKey: maskKey(modelProviderApiKeys[provider.id]),
       monthlyLimit: provider.monthlyLimit ?? 5000000,
     })),
@@ -1253,6 +1325,7 @@ function buildDesktopBootstrap() {
         name: modelProvider.name,
         baseUrl: modelProvider.baseUrl,
         defaultModel: modelProvider.defaultModel,
+        models: modelProvider.models.filter((model) => model.enabled),
         enabled: modelProvider.enabled,
         apiKeyConfigured: Boolean(modelProviderApiKeys[modelProvider.id]),
         monthlyLimit: modelProvider.monthlyLimit,
@@ -1867,6 +1940,14 @@ async function proxyModelProvider(request: { body?: unknown; headers: Record<str
   if (user.status !== 'active') return reply.status(403).send({ error: '账号已停用，请联系管理员' })
   if (!modelProvider.enabled || !modelProviderApiKeys[modelProvider.id]) {
     return reply.status(400).send({ error: '模型通道未启用或未配置 KEY，请管理员在后台检查模型设置' })
+  }
+
+  const requestBody = request.body && typeof request.body === 'object' && !Array.isArray(request.body)
+    ? request.body as Record<string, unknown>
+    : undefined
+  const requestedModel = typeof requestBody?.model === 'string' ? requestBody.model.trim() : ''
+  if (requestedModel && !modelProvider.models.some((model) => model.enabled && model.id === requestedModel)) {
+    return reply.status(400).send({ error: '请求模型已停用或不在企业模型目录中' })
   }
 
   const [pathname, query = ''] = request.url.split('?')
@@ -2808,6 +2889,7 @@ app.put('/api/admin/model-provider', async (request, reply) => {
     baseUrl: parsed.data.baseUrl,
     maskedApiKey: maskKey(modelProviderApiKeys[id]),
     defaultModel: parsed.data.defaultModel,
+    models: normalizeModelCatalog(parsed.data.models, parsed.data.defaultModel),
     enabled: parsed.data.enabled,
     monthlyLimit: parsed.data.monthlyLimit,
   }

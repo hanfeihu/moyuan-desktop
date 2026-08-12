@@ -32,7 +32,7 @@ Codex 能力作为 runtime 内置。桌面安装包会随包启动 `services/cod
 ```bash
 AI_BASE_URL=https://your-model-gateway.example.com/v1
 AI_API_KEY=your-key
-AI_MODEL=gpt-5.5
+AI_MODEL=gpt-5.6-sol
 IMAGE_BASE_URL=https://your-image-gateway.example.com/v1
 IMAGE_API_KEY=your-image-key
 IMAGE_MODEL=gpt-image-2

@@ -1,5 +1,5 @@
 import type { AccountUser, BillingConfig, ClientLogRecord, Employee, EnterprisePolicy, GeneratedAssetRecord, ImageSkillConfig, MailServiceConfig, ModelProviderConfig, PaymentGatewayConfig, PluginDefinition, RechargeOrder, TokenPlan, UsageLedgerEntry, VideoSkillConfig } from '@eaw/shared'
-import { interactiveVideoPluginInputFields, interactiveVideoPluginInputUi } from '@eaw/shared'
+import { defaultCodexModelId, interactiveVideoPluginInputFields, interactiveVideoPluginInputUi, normalizeModelCatalog } from '@eaw/shared'
 import { defaultBillingConfig, defaultEmployees, defaultImageSkill, defaultMailSettings, defaultPaymentGateway, defaultPolicy, defaultProviders, defaultTokenPlans, defaultVideoSkill } from '@/data/defaults'
 
 const apiBase = '/admin-api'
@@ -56,12 +56,15 @@ function normalizeVideoSkill(skill?: Partial<VideoSkillConfig> | null): VideoSki
 }
 
 function normalizeProvider(provider: Partial<ModelProviderConfig>): ModelProviderConfig {
+  const migrateLegacyBlector = (provider.id ?? 'blector') === 'blector' && provider.defaultModel === 'gpt-5.5' && !provider.models?.length
+  const defaultModel = migrateLegacyBlector ? defaultCodexModelId : provider.defaultModel ?? defaultCodexModelId
   return {
     id: provider.id ?? 'blector',
     name: provider.name ?? 'Blector 中转',
     baseUrl: provider.baseUrl ?? 'https://ai.blector.com/v1',
     maskedApiKey: provider.maskedApiKey ?? '未配置',
-    defaultModel: provider.defaultModel ?? 'gpt-5.5',
+    defaultModel,
+    models: normalizeModelCatalog(provider.models, defaultModel),
     enabled: provider.enabled ?? false,
     monthlyLimit: provider.monthlyLimit ?? 5000000,
   }
@@ -317,6 +320,7 @@ export async function saveModelProvider(values: Record<string, unknown>) {
       apiKey: values.apiKey,
       baseUrl: values.baseUrl,
       defaultModel: values.defaultModel,
+      models: values.models,
       enabled: Boolean(values.enabled),
       monthlyLimit: values.monthlyLimit,
       name: values.name,
@@ -324,8 +328,15 @@ export async function saveModelProvider(values: Record<string, unknown>) {
     headers: { 'Content-Type': 'application/json' },
     method: 'PUT',
   })
-  const payload = (await response.json()) as { data?: { active: ModelProviderConfig; provider: ModelProviderConfig; providers: ModelProviderConfig[] }; error?: string }
-  if (!response.ok || !payload.data) throw new Error(payload.error ?? '保存失败')
+  const payload = (await response.json()) as {
+    data?: { active: ModelProviderConfig; provider: ModelProviderConfig; providers: ModelProviderConfig[] }
+    detail?: { fieldErrors?: Record<string, string[]> }
+    error?: string
+  }
+  if (!response.ok || !payload.data) {
+    const validationMessage = Object.values(payload.detail?.fieldErrors ?? {}).flat().find(Boolean)
+    throw new Error(validationMessage ?? payload.error ?? '保存失败')
+  }
   return {
     active: normalizeProvider(payload.data.active),
     provider: normalizeProvider(payload.data.provider),

@@ -1,21 +1,30 @@
-import { ChevronDown, Clapperboard, Image as ImageIcon, Loader2, Plus, Send, Settings, Square, X, Zap } from 'lucide-react'
+import { Check, ChevronDown, Clapperboard, Image as ImageIcon, Loader2, Plus, Send, Settings, Square, X, Zap } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
-import type { RuntimeAttachment } from '@eaw/shared'
+import type { ModelCatalogEntry, ReasoningEffort, RuntimeAttachment } from '@eaw/shared'
 import type { ExecutionSettings } from '../../config'
 import { attachmentDraftPreviewUrl } from './attachments'
 import type { ConversationImage } from './conversationImages'
 
 const reasoningLabel: Record<ExecutionSettings['reasoningEffort'], string> = {
-  low: '低',
+  low: '轻度',
   medium: '中',
   high: '高',
-  xhigh: '超高',
+  xhigh: '极高',
+  max: '超高',
+  ultra: 'Ultra',
+  minimal: '最低',
+  none: '关闭',
 }
 
 const sandboxLabel: Record<ExecutionSettings['sandboxMode'], string> = {
   'danger-full-access': '全权限',
   'read-only': '只读',
   'workspace-write': '工作区',
+}
+
+const reasoningDescription: Partial<Record<ReasoningEffort, string>> = {
+  max: '更快消耗使用额度',
+  ultra: '适合可拆分的大型任务',
 }
 
 type MentionState = {
@@ -54,11 +63,13 @@ export function Composer({
   isCancelling,
   isSubmitting,
   mentionImages = [],
+  modelCatalog,
+  onModelChange,
   onMentionSelect,
   onPromptChange,
   onRemoveAttachment,
   onSelectImages,
-  onReasoningToggle,
+  onReasoningChange,
   onSandboxToggle,
   onStop,
   onSubmit,
@@ -78,11 +89,13 @@ export function Composer({
   isCancelling: boolean
   isSubmitting: boolean
   mentionImages?: ConversationImage[]
+  modelCatalog: ModelCatalogEntry[]
+  onModelChange: (model: string) => void
   onMentionSelect: (image: ConversationImage) => void
   onPromptChange: (value: string) => void
   onRemoveAttachment: (id: string) => void
   onSelectImages: (files: File[]) => void
-  onReasoningToggle: () => void
+  onReasoningChange: (effort: ReasoningEffort) => void
   onSandboxToggle: () => void
   onStop: () => void
   onSubmit: () => void
@@ -96,8 +109,10 @@ export function Composer({
 }) {
   const hasDraftContent = Boolean(prompt.trim()) || attachments.length > 0
   const [mention, setMention] = useState<MentionState | null>(null)
+  const [settingsMenu, setSettingsMenu] = useState<'model' | 'reasoning' | null>(null)
   const [activeIndex, setActiveIndex] = useState(0)
   const mentionListRef = useRef<HTMLDivElement | null>(null)
+  const settingsMenuRef = useRef<HTMLDivElement | null>(null)
 
   const matches = useMemo(() => {
     if (!mention) return []
@@ -110,6 +125,24 @@ export function Composer({
 
   const mentionOpen = Boolean(mention)
   const hasMatches = matches.length > 0
+  const selectedModel = modelCatalog.find((model) => model.id === executionSettings.model) ?? modelCatalog[0]
+  const supportedEfforts = selectedModel?.supportedReasoningEfforts ?? []
+
+  useEffect(() => {
+    if (!settingsMenu) return
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!settingsMenuRef.current?.contains(event.target as Node)) setSettingsMenu(null)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSettingsMenu(null)
+    }
+    window.addEventListener('mousedown', closeOnOutsideClick)
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      window.removeEventListener('mousedown', closeOnOutsideClick)
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [settingsMenu])
 
   useEffect(() => {
     setActiveIndex(0)
@@ -312,14 +345,81 @@ export function Composer({
             <span>分镜</span>
           </button>
         </div>
-        <div className="composer-tools right">
-          <button className="composer-model-button" title="模型" type="button">
-            <span>gpt-5.5</span>
-            <ChevronDown size={14} />
-          </button>
-          <button className="composer-soft-button compact" title="推理强度在本机保存，点击切换" type="button" onClick={onReasoningToggle}>
-            {reasoningLabel[executionSettings.reasoningEffort]}
-          </button>
+        <div className="composer-tools right" ref={settingsMenuRef}>
+          <div className="composer-setting-control">
+            <button
+              aria-expanded={settingsMenu === 'model'}
+              aria-haspopup="menu"
+              className={`composer-model-button ${settingsMenu === 'model' ? 'active' : ''}`}
+              title="选择模型"
+              type="button"
+              onClick={() => setSettingsMenu((current) => current === 'model' ? null : 'model')}
+            >
+              <span>{selectedModel?.displayName ?? executionSettings.model}</span>
+              <ChevronDown size={14} />
+            </button>
+            {settingsMenu === 'model' ? (
+              <div className="composer-settings-menu model-menu" role="menu" aria-label="选择模型">
+                <div className="composer-settings-menu-title">模型</div>
+                {modelCatalog.map((model) => (
+                  <button
+                    className={model.id === executionSettings.model ? 'active' : ''}
+                    key={model.id}
+                    onClick={() => {
+                      onModelChange(model.id)
+                      setSettingsMenu(null)
+                    }}
+                    role="menuitemradio"
+                    aria-checked={model.id === executionSettings.model}
+                    type="button"
+                  >
+                    <span className="composer-settings-menu-copy">
+                      <strong>{model.displayName}</strong>
+                      {model.description ? <small>{model.description}</small> : null}
+                    </span>
+                    {model.id === executionSettings.model ? <Check size={15} /> : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <div className="composer-setting-control">
+            <button
+              aria-expanded={settingsMenu === 'reasoning'}
+              aria-haspopup="menu"
+              className={`composer-soft-button compact ${settingsMenu === 'reasoning' ? 'active' : ''}`}
+              title="选择推理强度"
+              type="button"
+              onClick={() => setSettingsMenu((current) => current === 'reasoning' ? null : 'reasoning')}
+            >
+              {reasoningLabel[executionSettings.reasoningEffort]}
+              <ChevronDown size={13} />
+            </button>
+            {settingsMenu === 'reasoning' ? (
+              <div className="composer-settings-menu reasoning-menu" role="menu" aria-label="选择推理强度">
+                <div className="composer-settings-menu-title">推理强度</div>
+                {supportedEfforts.map((effort) => (
+                  <button
+                    className={effort === executionSettings.reasoningEffort ? 'active' : ''}
+                    key={effort}
+                    onClick={() => {
+                      onReasoningChange(effort)
+                      setSettingsMenu(null)
+                    }}
+                    role="menuitemradio"
+                    aria-checked={effort === executionSettings.reasoningEffort}
+                    type="button"
+                  >
+                    <span className="composer-settings-menu-copy">
+                      <strong>{reasoningLabel[effort]}</strong>
+                      {reasoningDescription[effort] ? <small>{reasoningDescription[effort]}</small> : null}
+                    </span>
+                    {effort === executionSettings.reasoningEffort ? <Check size={15} /> : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <button className="composer-soft-button compact permission" title="本机执行权限在本机保存，点击切换" type="button" onClick={onSandboxToggle}>
             {sandboxLabel[executionSettings.sandboxMode]}
           </button>

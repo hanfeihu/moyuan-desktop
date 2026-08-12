@@ -14,6 +14,7 @@ export type CreateRuntimeTaskInput = {
   enterpriseAuthToken: string
   parentTaskId?: string
   prompt: string
+  model?: ExecutionSettings['model']
   reasoningEffort?: ExecutionSettings['reasoningEffort']
   sandboxMode?: ExecutionSettings['sandboxMode']
   sessionId?: string
@@ -23,7 +24,10 @@ export type CreateRuntimeTaskInput = {
 export type SubmitRuntimePluginInput = {
   enterpriseApiBase: string
   enterpriseAuthToken: string
+  model: ExecutionSettings['model']
+  reasoningEffort: ExecutionSettings['reasoningEffort']
   requestId: string
+  sandboxMode: ExecutionSettings['sandboxMode']
   taskId: string
   values: Record<string, unknown>
 }
@@ -70,10 +74,10 @@ export async function cancelRuntimeTask(taskId: string) {
   return payload.data
 }
 
-export async function submitRuntimePluginInput({ enterpriseApiBase, enterpriseAuthToken, requestId, taskId, values }: SubmitRuntimePluginInput) {
+export async function submitRuntimePluginInput({ enterpriseApiBase, enterpriseAuthToken, model, reasoningEffort, requestId, sandboxMode, taskId, values }: SubmitRuntimePluginInput) {
   const response = await runtimeFetch(`/api/codex/tasks/${encodeURIComponent(taskId)}/plugin-requests/${encodeURIComponent(requestId)}/submit`, {
     method: 'POST',
-    body: JSON.stringify({ enterpriseApiBase, enterpriseAuthToken, values }),
+    body: JSON.stringify({ enterpriseApiBase, enterpriseAuthToken, model, reasoningEffort, sandboxMode, values }),
   })
   const payload = await readRuntimePayload<CodexTask>(response)
   if (!payload.data) throw new Error(payload.error ?? '插件表单提交失败')

@@ -2575,6 +2575,99 @@ button:disabled {
   background: #f5f5f3;
   color: #3f444a;
   font-weight: 540;
+  max-width: 152px;
+}
+
+.composer-model-button > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-setting-control {
+  position: relative;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.composer-model-button.active,
+.composer-soft-button.compact.active {
+  background: #ececea;
+  color: #252a30;
+}
+
+.composer-settings-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 60;
+  width: 280px;
+  max-height: min(360px, calc(100vh - 220px));
+  overflow-y: auto;
+  border: 1px solid rgba(218, 216, 210, 0.94);
+  border-radius: 8px;
+  padding: 6px;
+  background: #ffffff;
+  box-shadow: 0 18px 42px rgba(35, 38, 42, 0.16);
+}
+
+.composer-settings-menu.reasoning-menu {
+  width: 190px;
+}
+
+.composer-settings-menu-title {
+  padding: 5px 8px 6px;
+  color: #8a8e93;
+  font-family: var(--font-chat);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.composer-settings-menu > button {
+  width: 100%;
+  min-height: 38px;
+  border: 0;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 8px;
+  background: transparent;
+  color: #4a4e54;
+  text-align: left;
+}
+
+.composer-settings-menu > button:hover,
+.composer-settings-menu > button.active {
+  background: #f3f3f1;
+  color: #22262b;
+  transform: none;
+}
+
+.composer-settings-menu > button svg {
+  flex: 0 0 auto;
+}
+
+.composer-settings-menu-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.composer-settings-menu-copy strong {
+  overflow-wrap: anywhere;
+  font-family: var(--font-chat);
+  font-size: 12.5px;
+  font-weight: 560;
+}
+
+.composer-settings-menu-copy small {
+  color: #8a8e93;
+  font-family: var(--font-chat);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .send-button {
@@ -4124,6 +4217,14 @@ button:disabled {
   .composer-soft-button,
   .composer-model-button {
     padding: 0 6px;
+  }
+
+  .composer-model-button {
+    max-width: 106px;
+  }
+
+  .composer-settings-menu.model-menu {
+    width: min(280px, calc(100vw - 36px));
   }
 }
 

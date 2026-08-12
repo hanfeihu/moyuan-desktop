@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { defaultCodexModelCatalog, type ModelCatalogEntry, type ReasoningEffort } from '@eaw/shared'
 import { AccountCenter } from '../features/account/AccountCenter'
 import { AuthScreen } from '../features/auth/AuthScreen'
 import { useAuth } from '../features/auth/useAuth'
@@ -11,6 +12,7 @@ import { useTranscriptAutoScroll } from '../features/chat/useTranscriptAutoScrol
 import { Sidebar } from '../features/layout/Sidebar'
 import { Topbar } from '../features/layout/Topbar'
 import { useDesktopHotkeys } from '../features/layout/useDesktopHotkeys'
+import { loadModelCatalog } from '../features/models/catalog'
 import { StoryboardBoard } from '../features/storyboard/StoryboardBoard'
 import { CharacterBoard } from '../features/storyboard/CharacterBoard'
 import { FaceMaskEditor } from '../features/storyboard/FaceMaskEditor'
@@ -20,7 +22,6 @@ import { readExecutionSettings, writeExecutionSettings, type ExecutionSettings }
 import { uploadDiagnosticsSnapshot } from '../diagnostics'
 import { logClientEvent } from '../logger'
 
-const reasoningOrder: ExecutionSettings['reasoningEffort'][] = ['low', 'medium', 'high', 'xhigh']
 const sandboxOrder: ExecutionSettings['sandboxMode'][] = ['read-only', 'workspace-write', 'danger-full-access']
 
 export function DesktopApp() {
@@ -44,6 +45,7 @@ export function DesktopApp() {
   const transcriptBottomRef = useRef<HTMLDivElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const composerRef = useRef<HTMLElement | null>(null)
+  const [modelCatalog, setModelCatalog] = useState<ModelCatalogEntry[]>(defaultCodexModelCatalog)
   const [executionSettings, setExecutionSettings] = useState(readExecutionSettings)
   const [accountCenterOpen, setAccountCenterOpen] = useState(false)
   const [rechargeOpen, setRechargeOpen] = useState(false)
@@ -114,18 +116,50 @@ export function DesktopApp() {
     void uploadDiagnosticsSnapshot('signed-in')
   }, [authState])
 
+  useEffect(() => {
+    if (authState !== 'signed-in' || !authToken) return
+    let active = true
+    const refreshCatalog = () => {
+      void loadModelCatalog(authToken)
+        .then(({ defaultModel, models }) => {
+          if (!active) return
+          setModelCatalog(models)
+          const next = readExecutionSettings(models, defaultModel)
+          writeExecutionSettings(next)
+          setExecutionSettings(next)
+        })
+        .catch((error) => logClientEvent('model_catalog.load_failed', error, 'warn'))
+    }
+    refreshCatalog()
+    window.addEventListener('focus', refreshCatalog)
+    return () => {
+      active = false
+      window.removeEventListener('focus', refreshCatalog)
+    }
+  }, [authState, authToken])
+
   function updateExecutionSettings(next: ExecutionSettings) {
     setExecutionSettings(next)
     writeExecutionSettings(next)
     logClientEvent('execution_settings.changed', next)
   }
 
-  function cycleReasoningEffort() {
-    const index = reasoningOrder.indexOf(executionSettings.reasoningEffort)
+  function selectModel(modelId: string) {
+    const selected = modelCatalog.find((model) => model.id === modelId)
+    if (!selected) return
     updateExecutionSettings({
       ...executionSettings,
-      reasoningEffort: reasoningOrder[(index + 1) % reasoningOrder.length],
+      model: selected.id,
+      reasoningEffort: selected.supportedReasoningEfforts.includes(executionSettings.reasoningEffort)
+        ? executionSettings.reasoningEffort
+        : selected.defaultReasoningEffort,
     })
+  }
+
+  function selectReasoningEffort(reasoningEffort: ReasoningEffort) {
+    const selected = modelCatalog.find((model) => model.id === executionSettings.model)
+    if (!selected?.supportedReasoningEfforts.includes(reasoningEffort)) return
+    updateExecutionSettings({ ...executionSettings, reasoningEffort })
   }
 
   function cycleSandboxMode() {
@@ -194,6 +228,7 @@ export function DesktopApp() {
               canSubmit={taskController.canSubmit}
               composerRef={composerRef}
               executionSettings={executionSettings}
+              modelCatalog={modelCatalog}
               isBusy={taskController.isBusy}
               isCancelling={taskController.isCancelling}
               isSubmitting={taskController.isSubmitting}
@@ -202,7 +237,8 @@ export function DesktopApp() {
               onRemoveAttachment={taskController.removeAttachment}
               onSelectImages={(files) => void taskController.addImageAttachments(files)}
               onPromptChange={(value) => taskController.setPrompt(value)}
-              onReasoningToggle={cycleReasoningEffort}
+              onModelChange={selectModel}
+              onReasoningChange={selectReasoningEffort}
               onSandboxToggle={cycleSandboxMode}
               onStop={taskController.stopActiveTask}
               onSubmit={handleComposerSubmit}

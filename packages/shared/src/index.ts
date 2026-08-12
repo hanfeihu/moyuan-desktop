@@ -2,12 +2,91 @@ export type OrgSource = 'wecom' | 'lark' | 'dingtalk'
 
 export type ConnectorStatus = 'connected' | 'pending' | 'disabled'
 
+export const reasoningEffortValues = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
+export type ReasoningEffort = (typeof reasoningEffortValues)[number]
+
+export type ModelCatalogEntry = {
+  id: string
+  displayName: string
+  description?: string
+  enabled: boolean
+  defaultReasoningEffort: ReasoningEffort
+  supportedReasoningEfforts: ReasoningEffort[]
+}
+
+export const defaultCodexModelId = 'gpt-5.6-sol'
+export const defaultCodexReasoningEffort: ReasoningEffort = 'xhigh'
+
+export const defaultCodexModelCatalog: ModelCatalogEntry[] = [
+  {
+    id: defaultCodexModelId,
+    displayName: '5.6 Sol',
+    description: '复杂编码与高质量任务',
+    enabled: true,
+    defaultReasoningEffort: defaultCodexReasoningEffort,
+    supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+  },
+]
+
+export function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return typeof value === 'string' && reasoningEffortValues.includes(value as ReasoningEffort)
+}
+
+export function modelDisplayName(modelId: string) {
+  const match = modelId.trim().match(/^gpt-(\d+(?:\.\d+)?)(?:-(.+))?$/i)
+  if (!match) return modelId.trim()
+  const suffix = match[2]
+    ? ` ${match[2].split('-').map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`).join(' ')}`
+    : ''
+  return `${match[1]}${suffix}`
+}
+
+export function normalizeModelCatalog(
+  models: ReadonlyArray<Partial<ModelCatalogEntry>> | null | undefined,
+  defaultModel = defaultCodexModelId,
+): ModelCatalogEntry[] {
+  const seen = new Set<string>()
+  const normalized = (models ?? []).flatMap((model) => {
+    const id = model.id?.trim()
+    if (!id || seen.has(id)) return []
+    seen.add(id)
+    const supportedReasoningEfforts = (model.supportedReasoningEfforts ?? []).filter(isReasoningEffort)
+    const efforts = supportedReasoningEfforts.length ? Array.from(new Set(supportedReasoningEfforts)) : ['low', 'medium', 'high', 'xhigh'] satisfies ReasoningEffort[]
+    const preferredEffort = isReasoningEffort(model.defaultReasoningEffort) ? model.defaultReasoningEffort : defaultCodexReasoningEffort
+    return [{
+      id,
+      displayName: model.displayName?.trim() || modelDisplayName(id),
+      description: model.description?.trim() || undefined,
+      enabled: model.enabled !== false,
+      defaultReasoningEffort: efforts.includes(preferredEffort) ? preferredEffort : efforts[0],
+      supportedReasoningEfforts: efforts,
+    }]
+  })
+
+  if (!normalized.length) {
+    const fallback = defaultModel.trim() || defaultCodexModelId
+    return normalizeModelCatalog(
+      fallback === defaultCodexModelId
+        ? defaultCodexModelCatalog
+        : [{ id: fallback, displayName: modelDisplayName(fallback), enabled: true }],
+      fallback,
+    )
+  }
+
+  const requestedDefault = defaultModel.trim()
+  const defaultIndex = normalized.findIndex((model) => model.id === requestedDefault)
+  if (defaultIndex >= 0) normalized[defaultIndex] = { ...normalized[defaultIndex], enabled: true }
+  else if (!normalized.some((model) => model.enabled)) normalized[0] = { ...normalized[0], enabled: true }
+  return normalized
+}
+
 export type ModelProviderConfig = {
   id: string
   name: string
   baseUrl: string
   maskedApiKey: string
   defaultModel: string
+  models: ModelCatalogEntry[]
   enabled: boolean
   monthlyLimit: number
 }
@@ -411,6 +490,9 @@ export type CodexTask = {
   title: string
   status: 'queued' | 'running' | 'needs_approval' | 'completed' | 'failed' | 'interrupted'
   workspace: string
+  model?: string
+  reasoningEffort?: ReasoningEffort
+  sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access'
   sessionId?: string
   forkedFrom?: string
   workspaceMemory?: string

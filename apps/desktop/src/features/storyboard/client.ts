@@ -28,6 +28,7 @@ export async function requestStoryboardBreakdown({
     enterpriseApiBase,
     enterpriseAuthToken: authToken,
     workspace: defaultWorkspace,
+    model: executionSettings.model,
     reasoningEffort: executionSettings.reasoningEffort,
     sandboxMode: executionSettings.sandboxMode,
   }
@@ -49,6 +50,7 @@ export async function requestCharacterExtraction({
     enterpriseApiBase,
     enterpriseAuthToken: authToken,
     workspace: defaultWorkspace,
+    model: executionSettings.model,
     reasoningEffort: executionSettings.reasoningEffort,
     sandboxMode: executionSettings.sandboxMode,
   }

@@ -1,4 +1,4 @@
-import { defaultVideoRatioForModel, type BillingConfig, type Employee, type ImageSkillConfig, type MailServiceConfig, type ModelProviderConfig, type PaymentGatewayConfig, type TokenPlan, type VideoSkillConfig } from '@eaw/shared'
+import { defaultCodexModelCatalog, defaultCodexModelId, defaultVideoRatioForModel, normalizeModelCatalog, type BillingConfig, type Employee, type ImageSkillConfig, type MailServiceConfig, type ModelProviderConfig, type PaymentGatewayConfig, type TokenPlan, type VideoSkillConfig } from '@eaw/shared'
 import type { PolicyView } from '@/services/admin'
 
 export const defaultProviders: ModelProviderConfig[] = [
@@ -7,7 +7,8 @@ export const defaultProviders: ModelProviderConfig[] = [
     name: 'Blector 中转',
     baseUrl: 'https://ai.blector.com/v1',
     maskedApiKey: 'sk-************************demo',
-    defaultModel: 'gpt-5.5',
+    defaultModel: defaultCodexModelId,
+    models: defaultCodexModelCatalog,
     enabled: true,
     monthlyLimit: 5000000,
   },
@@ -17,6 +18,15 @@ export const defaultProviders: ModelProviderConfig[] = [
     baseUrl: 'http://model-gateway:8000/v1',
     maskedApiKey: '未配置',
     defaultModel: 'qwen3-coder',
+    models: normalizeModelCatalog([
+      {
+        id: 'qwen3-coder',
+        displayName: 'Qwen3 Coder',
+        enabled: true,
+        defaultReasoningEffort: 'high',
+        supportedReasoningEfforts: ['low', 'medium', 'high'],
+      },
+    ], 'qwen3-coder'),
     enabled: false,
     monthlyLimit: 5000000,
   },

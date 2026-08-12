@@ -1,6 +1,7 @@
 import { defaultEnterpriseApiBase, getModelConfig, type ModelRuntimeConfig } from '../config.js'
 import { localSkillSet } from '../skills/catalog.js'
 import type { EnterpriseSkillSet } from '../skills/contracts.js'
+import { normalizeModelCatalog, type ModelCatalogEntry } from '@eaw/shared'
 
 type EnterpriseMeResponse = {
   data?: {
@@ -52,6 +53,7 @@ export async function loadEnterpriseRuntimeConfig(
             name?: string
             defaultModel?: string
             enabled?: boolean
+            models?: ModelCatalogEntry[]
           }
           skills?: {
             imageGeneration?: EnterpriseSkillSet['imageGeneration']
@@ -83,6 +85,7 @@ export async function loadEnterpriseRuntimeConfig(
         apiKey: authToken,
         envKey: 'OPENAI_API_KEY',
         defaultModel: modelProvider.defaultModel,
+        models: normalizeModelCatalog(modelProvider.models, modelProvider.defaultModel),
       }
     }
   } catch {

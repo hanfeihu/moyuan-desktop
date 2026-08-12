@@ -371,7 +371,10 @@ export function useTaskController({
       const updatedTask = await submitRuntimePluginInput({
         enterpriseApiBase,
         enterpriseAuthToken: authToken,
+        model: executionSettings.model,
+        reasoningEffort: executionSettings.reasoningEffort,
         requestId,
+        sandboxMode: executionSettings.sandboxMode,
         taskId: activeTask.id,
         values,
       })
@@ -533,6 +536,7 @@ export function useTaskController({
         employeeId: currentUser?.id ?? localEmployeeId,
         enterpriseApiBase,
         enterpriseAuthToken: authToken,
+        model: executionSettings.model,
         reasoningEffort: executionSettings.reasoningEffort,
         sandboxMode: executionSettings.sandboxMode,
         workspace: workspacePath,
