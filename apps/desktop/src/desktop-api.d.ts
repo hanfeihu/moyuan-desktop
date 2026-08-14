@@ -26,7 +26,11 @@ export type DesktopDiagnosticsSnapshot = {
   platform: string
   runtime: {
     alive: boolean
+    managed: boolean
     pid?: number
+    port?: number
+    status: 'starting' | 'running' | 'stopping' | 'stopped'
+    url?: string
   }
   versions: {
     app: string

@@ -80,6 +80,7 @@ const require = createRequire(import.meta.url)
 const execFileAsync = promisify(execFile)
 const runtimeToken = process.env.MOYUAN_RUNTIME_TOKEN ?? ''
 const runtimeHost = process.env.CODEX_RUNTIME_HOST ?? '127.0.0.1'
+const desktopParentPid = Number(process.env.MOYUAN_DESKTOP_PID ?? 0)
 const nodeHostPath = process.env.MOYUAN_NODE_HOST_PATH || process.execPath
 const codexSandboxMode = process.env.MOYUAN_CODEX_SANDBOX_MODE ?? 'danger-full-access'
 const codexReasoningEffort = isReasoningEffort(process.env.MOYUAN_CODEX_REASONING_EFFORT)
@@ -104,6 +105,7 @@ await app.register(cors, {
 })
 
 app.addHook('onRequest', async (request, reply) => {
+  if (runtimeShuttingDown) return reply.status(503).send({ error: '本地 Runtime 正在关闭' })
   if (!runtimeToken || request.method === 'OPTIONS') return
   const queryToken =
     request.query && typeof request.query === 'object' && 'token' in request.query
@@ -119,6 +121,8 @@ app.addHook('onRequest', async (request, reply) => {
 })
 
 const records = new Map<string, TaskRecord>()
+let runtimeShuttingDown = false
+let runtimeShutdownPromise: Promise<void> | undefined
 const runtimeRoot = process.env.MOYUAN_RUNTIME_HOME ?? path.join(tmpdir(), 'moyuan-runtime')
 const storePath = path.join(runtimeRoot, 'sessions.json')
 const memoryPath = path.join(runtimeRoot, 'workspace-memory.json')
@@ -140,7 +144,7 @@ const mutedStderrPatterns = [
 const maxVisibleToolOutput = 6000
 
 function logRuntime(event: string, details?: unknown, level: 'debug' | 'info' | 'warn' | 'error' = 'info') {
-  void runtimeLogger.append({ details, event, level, source: 'codex-runtime' })
+  return runtimeLogger.append({ details, event, level, source: 'codex-runtime' })
 }
 
 function logTask(
@@ -1946,6 +1950,81 @@ async function runCodexExec(record: TaskRecord, prompt: string, workspace: strin
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function waitForActiveTasks(timeoutMs: number) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    if (!Array.from(records.values()).some((record) => Boolean(record.cancel))) return true
+    await sleep(80)
+  }
+  return false
+}
+
+function shutdownRuntime(reason: string) {
+  if (runtimeShutdownPromise) return runtimeShutdownPromise
+
+  runtimeShuttingDown = true
+  runtimeShutdownPromise = (async () => {
+    const activeRecords = Array.from(records.values()).filter((record) => Boolean(record.cancel))
+    await logRuntime('runtime.shutdown.start', { activeTasks: activeRecords.length, reason })
+
+    for (const record of activeRecords) {
+      try {
+        record.cancel?.('墨渊正在退出，本次任务已停止。')
+        setTaskLifecyclePhase(record, 'interrupted', isRuntimeFailureContent, '墨渊正在退出，本次任务已停止。')
+      } catch (error) {
+        logTask(record, 'runtime.shutdown.cancel_failed', error, 'warn')
+      }
+    }
+
+    await saveStore().catch((error) => logRuntime('runtime.shutdown.save_failed', error, 'warn'))
+    const tasksStopped = await waitForActiveTasks(3000)
+    await logRuntime('runtime.shutdown.tasks_stopped', { tasksStopped })
+
+    let serverClosed = false
+    const closePromise = app.close()
+      .then(() => {
+        serverClosed = true
+      })
+      .catch((error) => logRuntime('runtime.shutdown.server_close_failed', error, 'warn'))
+    await Promise.race([closePromise, sleep(1800)])
+    if (!serverClosed) {
+      app.server.closeAllConnections?.()
+      await Promise.race([closePromise, sleep(700)])
+    }
+    await logRuntime('runtime.shutdown.complete', { serverClosed, tasksStopped })
+  })()
+  return runtimeShutdownPromise
+}
+
+function exitAfterRuntimeShutdown(reason: string) {
+  void shutdownRuntime(reason).finally(() => process.exit(0))
+}
+
+process.once('SIGINT', () => exitAfterRuntimeShutdown('SIGINT'))
+process.once('SIGTERM', () => exitAfterRuntimeShutdown('SIGTERM'))
+
+if (Number.isInteger(desktopParentPid) && desktopParentPid > 0) {
+  const parentMonitor = setInterval(() => {
+    if (runtimeShuttingDown) {
+      clearInterval(parentMonitor)
+      return
+    }
+    let parentAlive = process.ppid === desktopParentPid
+    if (parentAlive) {
+      try {
+        process.kill(desktopParentPid, 0)
+      } catch {
+        parentAlive = false
+      }
+    }
+    if (!parentAlive) {
+      clearInterval(parentMonitor)
+      exitAfterRuntimeShutdown('desktop-parent-exited')
+    }
+  }, 1500)
+  parentMonitor.unref()
 }
 
 registerDiagnosticsRoutes({

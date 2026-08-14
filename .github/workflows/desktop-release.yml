@@ -22,7 +22,7 @@ jobs:
         include:
           - name: macOS
             os: macos-latest
-            command: npm run build:release && npm run prepare:desktop-runtime && npx electron-builder --project apps/desktop --mac dmg zip --publish never -c.mac.identity=null
+            command: npm run dist:desktop:mac
             artifact: |
               apps/desktop/release/Moyuan-Desktop-*
               apps/desktop/release/latest*.yml
@@ -49,7 +49,23 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Check macOS signing configuration
+        if: matrix.name == 'macOS'
+        id: mac_signing
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          if [[ -n "$CSC_LINK" && -n "$CSC_KEY_PASSWORD" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Skipping macOS artifacts because CSC_LINK/CSC_KEY_PASSWORD are not configured; unsigned update packages must not be published."
+          fi
+
       - name: Build installer
+        if: matrix.name != 'macOS' || steps.mac_signing.outputs.enabled == 'true'
         run: ${{ matrix.command }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -63,6 +79,7 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
 
       - name: Upload installer artifacts
+        if: matrix.name != 'macOS' || steps.mac_signing.outputs.enabled == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: moyuan-desktop-${{ matrix.name }}
@@ -70,7 +87,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') && (matrix.name != 'macOS' || steps.mac_signing.outputs.enabled == 'true')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.artifact }}

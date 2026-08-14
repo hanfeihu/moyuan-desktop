@@ -1,6 +1,6 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu } = require('electron')
 const { autoUpdater } = require('electron-updater')
-const { spawn } = require('node:child_process')
+const { execFile, spawn } = require('node:child_process')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
 const http = require('node:http')
@@ -14,6 +14,15 @@ const defaultRuntimePort = Number(process.env.CODEX_RUNTIME_PORT || 4101)
 const runtimeToken = crypto.randomBytes(32).toString('hex')
 let runtimeProcess = null
 let runtimeLog = null
+let runtimeInfo = null
+let runtimeStatus = 'stopped'
+let runtimeStartPromise = null
+let runtimeStopPromise = null
+let mainWindow = null
+let windowCreatePromise = null
+let applicationShutdownPromise = null
+let allowImmediateQuit = false
+let isShuttingDown = false
 const startupLogPath = path.join(app.getPath('temp'), 'moyuan-desktop-startup.log')
 let updateCheckStarted = false
 
@@ -76,6 +85,7 @@ function tailText(filePath, maxBytes = 48 * 1024) {
 }
 
 function collectDiagnosticsSnapshot() {
+  const managedRuntimeAlive = isProcessAlive(runtimeProcess)
   return {
     appPath: app.getAppPath(),
     isPackaged: isPackagedApp(),
@@ -86,8 +96,12 @@ function collectDiagnosticsSnapshot() {
     },
     platform: process.platform,
     runtime: {
-      alive: Boolean(runtimeProcess && !runtimeProcess.killed),
-      pid: runtimeProcess?.pid,
+      alive: runtimeStatus === 'running' && (!isPackagedApp() || managedRuntimeAlive),
+      managed: isPackagedApp(),
+      pid: managedRuntimeAlive ? runtimeProcess?.pid : undefined,
+      port: runtimeInfo?.port,
+      status: runtimeStatus,
+      url: runtimeInfo?.url,
     },
     logs: {
       electronMain: tailText(mainLogPath()),
@@ -204,18 +218,189 @@ async function findRuntimePort() {
   throw new Error(`No available local runtime port from ${defaultRuntimePort}`)
 }
 
-function waitForRuntime(runtimeUrl, token, timeoutMs = 15000) {
+function isProcessAlive(child) {
+  return Boolean(child && child.exitCode === null && child.signalCode === null)
+}
+
+function waitForProcessExit(child, timeoutMs) {
+  if (!isProcessAlive(child)) return Promise.resolve(true)
+
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (exited) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.off('exit', onExit)
+      resolve(exited)
+    }
+    const onExit = () => finish(true)
+    const timer = setTimeout(() => finish(false), timeoutMs)
+    child.once('exit', onExit)
+  })
+}
+
+function listDescendantPids(rootPid) {
+  if (process.platform === 'win32') return Promise.resolve([])
+
+  return new Promise((resolve) => {
+    execFile('ps', ['-axo', 'pid=,ppid='], { timeout: 2000 }, (error, stdout) => {
+      if (error) {
+        logStartup(`runtime descendant scan failed rootPid=${rootPid}`, error)
+        resolve([])
+        return
+      }
+
+      const childrenByParent = new Map()
+      for (const line of stdout.split(/\r?\n/)) {
+        const match = line.trim().match(/^(\d+)\s+(\d+)$/)
+        if (!match) continue
+        const pid = Number(match[1])
+        const parentPid = Number(match[2])
+        const children = childrenByParent.get(parentPid) ?? []
+        children.push(pid)
+        childrenByParent.set(parentPid, children)
+      }
+
+      const descendants = []
+      const visit = (parentPid) => {
+        for (const pid of childrenByParent.get(parentPid) ?? []) {
+          visit(pid)
+          descendants.push(pid)
+        }
+      }
+      visit(rootPid)
+      resolve(descendants)
+    })
+  })
+}
+
+function signalPosixProcess(pid, signal) {
+  try {
+    process.kill(-pid, signal)
+    return
+  } catch {
+    try {
+      process.kill(pid, signal)
+    } catch {
+      // The process already exited.
+    }
+  }
+}
+
+async function forceStopProcessTree(child, knownDescendants = []) {
+  const pid = child?.pid
+  if (!pid) return
+
+  if (process.platform === 'win32') {
+    await new Promise((resolve) => {
+      const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+      killer.once('error', () => resolve())
+      killer.once('exit', () => resolve())
+    })
+    return
+  }
+
+  const currentDescendants = await listDescendantPids(pid)
+  const descendants = Array.from(new Set([...knownDescendants, ...currentDescendants]))
+  for (const descendantPid of descendants) signalPosixProcess(descendantPid, 'SIGKILL')
+  signalPosixProcess(pid, 'SIGKILL')
+}
+
+function stopWindowsProcessTree(pid, force = false) {
+  return new Promise((resolve) => {
+    const args = ['/pid', String(pid), '/T']
+    if (force) args.push('/F')
+    const killer = spawn('taskkill', args, {
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    killer.once('error', () => resolve())
+    killer.once('exit', () => resolve())
+  })
+}
+
+function closeRuntimeLog(logStream = runtimeLog) {
+  if (!logStream) return Promise.resolve()
+  if (runtimeLog === logStream) runtimeLog = null
+  if (logStream.destroyed || logStream.writableEnded) return Promise.resolve()
+
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve()
+    }
+    const timer = setTimeout(() => {
+      logStream.destroy()
+      finish()
+    }, 1000)
+    logStream.end(finish)
+  })
+}
+
+async function stopManagedRuntimeProcess(child, logStream, reason) {
+  if (!child) {
+    await closeRuntimeLog(logStream)
+    return
+  }
+
+  const pid = child.pid
+  const descendants = pid ? await listDescendantPids(pid) : []
+  if (isProcessAlive(child)) {
+    logStartup(`runtime stopping pid=${pid ?? ''} reason=${reason}`)
+    if (process.platform === 'win32' && pid) {
+      await stopWindowsProcessTree(pid)
+    } else {
+      try {
+        child.kill('SIGTERM')
+      } catch (error) {
+        logStartup(`runtime SIGTERM failed pid=${pid ?? ''}`, error)
+      }
+    }
+  }
+
+  const exitedGracefully = await waitForProcessExit(child, 5000)
+  if (!exitedGracefully) {
+    logStartup(`runtime graceful stop timed out pid=${pid ?? ''}; forcing process tree shutdown`)
+    await forceStopProcessTree(child, descendants)
+    await waitForProcessExit(child, 2500)
+  } else if (process.platform !== 'win32') {
+    for (const descendantPid of descendants) signalPosixProcess(descendantPid, 'SIGKILL')
+  }
+
+  await closeRuntimeLog(logStream)
+  logStartup(`runtime stop finished pid=${pid ?? ''} alive=${isProcessAlive(child)}`)
+}
+
+function waitForRuntime(runtimeUrl, token, timeoutMs = 15000, shouldContinue = () => true) {
   const startedAt = Date.now()
 
   return new Promise((resolve) => {
+    let settled = false
+    const finish = (healthy) => {
+      if (settled) return
+      settled = true
+      resolve(healthy)
+    }
     const probe = () => {
+      if (settled) return
+      if (!shouldContinue()) {
+        finish(false)
+        return
+      }
       const request = http.get(
         `${runtimeUrl}/health?token=${encodeURIComponent(token)}`,
         { timeout: 1200 },
         (response) => {
           response.resume()
           if (response.statusCode && response.statusCode >= 200 && response.statusCode < 300) {
-            resolve(true)
+            finish(true)
             return
           }
           retry()
@@ -229,8 +414,13 @@ function waitForRuntime(runtimeUrl, token, timeoutMs = 15000) {
     }
 
     const retry = () => {
+      if (settled) return
+      if (!shouldContinue()) {
+        finish(false)
+        return
+      }
       if (Date.now() - startedAt > timeoutMs) {
-        resolve(false)
+        finish(false)
         return
       }
       setTimeout(probe, 280)
@@ -241,72 +431,168 @@ function waitForRuntime(runtimeUrl, token, timeoutMs = 15000) {
 }
 
 async function startRuntime() {
-  logStartup(`startRuntime packaged=${isPackagedApp()} appPath=${app.getAppPath()}`)
-  if (!isPackagedApp()) {
-    return {
-      url: process.env.VITE_CODEX_RUNTIME_URL || 'http://127.0.0.1:4101',
-      token: '',
-      defaultWorkspace: process.env.VITE_DEFAULT_WORKSPACE || path.join(app.getPath('documents'), 'Moyuan Workspace'),
+  if (runtimeInfo && runtimeStatus === 'running' && (!isPackagedApp() || isProcessAlive(runtimeProcess))) {
+    return runtimeInfo
+  }
+  if (runtimeStartPromise) return runtimeStartPromise
+  if (runtimeStopPromise) await runtimeStopPromise
+  if (isShuttingDown) throw new Error('Application is shutting down')
+
+  runtimeStatus = 'starting'
+  runtimeStartPromise = (async () => {
+    logStartup(`startRuntime packaged=${isPackagedApp()} appPath=${app.getAppPath()}`)
+    if (!isPackagedApp()) {
+      const url = process.env.VITE_CODEX_RUNTIME_URL || 'http://127.0.0.1:4101'
+      runtimeInfo = {
+        url,
+        port: Number(new URL(url).port || 4101),
+        token: '',
+        defaultWorkspace: process.env.VITE_DEFAULT_WORKSPACE || path.join(app.getPath('documents'), 'Moyuan Workspace'),
+      }
+      runtimeStatus = 'running'
+      return runtimeInfo
     }
+
+    const appRoot = getAppRoot()
+    const runtimeEntry = path.join(appRoot, 'services/codex-runtime/dist/index.js')
+    logStartup(`runtimeEntry ${runtimeEntry}`)
+    const port = await findRuntimePort()
+    if (isShuttingDown) throw new Error('Application is shutting down')
+    const runtimeUrl = `http://${runtimeHost}:${port}`
+    const userData = app.getPath('userData')
+    const defaultWorkspace = path.join(app.getPath('documents'), 'Moyuan Workspace')
+    const logDir = path.join(userData, 'logs')
+    const runtimeEnv = loadRuntimeEnv(appRoot, userData)
+
+    fs.mkdirSync(logDir, { recursive: true })
+    fs.mkdirSync(defaultWorkspace, { recursive: true })
+    const logStream = fs.createWriteStream(path.join(logDir, 'codex-runtime.log'), { flags: 'a' })
+    runtimeLog = logStream
+    logStream.on('error', (error) => logStartup('runtime log stream failed', error))
+    logStream.write(`\n[${new Date().toISOString()}] starting runtime ${runtimeEntry}\n`)
+    logStream.write(`[${new Date().toISOString()}] runtime config keys ${Object.keys(runtimeEnv).join(',') || 'none'}\n`)
+
+    let spawnError = null
+    const child = spawn(process.execPath, [runtimeEntry], {
+      cwd: appRoot,
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      env: {
+        ...runtimeEnv,
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: '1',
+        CODEX_RUNTIME_HOST: runtimeHost,
+        CODEX_RUNTIME_PORT: String(port),
+        MOYUAN_DESKTOP_PID: String(process.pid),
+        MOYUAN_NODE_HOST_PATH: process.execPath,
+        MOYUAN_DEFAULT_WORKSPACE: defaultWorkspace,
+        MOYUAN_RUNTIME_TOKEN: runtimeToken,
+        MOYUAN_RUNTIME_HOME: path.join(userData, 'runtime'),
+        MOYUAN_CODEX_HOME: path.join(userData, 'codex-home'),
+      },
+    })
+    runtimeProcess = child
+    runtimeInfo = { url: runtimeUrl, port, token: runtimeToken, defaultWorkspace }
+    logStartup(`runtime spawned pid=${child.pid} url=${runtimeUrl}`)
+
+    child.stdout?.pipe(logStream)
+    child.stderr?.pipe(logStream)
+    child.once('error', (error) => {
+      spawnError = error
+      logStartup(`runtime spawn failed entry=${runtimeEntry}`, error)
+    })
+    child.once('exit', (code, signal) => {
+      logStream.write(`[${new Date().toISOString()}] runtime exited code=${code ?? ''} signal=${signal ?? ''}\n`)
+      if (runtimeProcess === child) {
+        runtimeProcess = null
+        runtimeInfo = null
+        if (runtimeStatus !== 'stopping') runtimeStatus = 'stopped'
+      }
+      void closeRuntimeLog(logStream)
+    })
+
+    if (isShuttingDown) {
+      await stopManagedRuntimeProcess(child, logStream, 'shutdown-during-start')
+      throw new Error('Application is shutting down')
+    }
+
+    const healthy = await waitForRuntime(runtimeUrl, runtimeToken, 15000, () => !isShuttingDown && !spawnError && isProcessAlive(child))
+    if (!healthy || !isProcessAlive(child)) {
+      await stopManagedRuntimeProcess(child, logStream, 'health-check-failed')
+      throw spawnError ?? new Error(`Local Runtime failed to start at ${runtimeUrl}`)
+    }
+    if (isShuttingDown) {
+      await stopManagedRuntimeProcess(child, logStream, 'shutdown-after-health-check')
+      throw new Error('Application is shutting down')
+    }
+    runtimeStatus = 'running'
+    logStartup(`runtime health check passed pid=${child.pid} url=${runtimeUrl}`)
+    return runtimeInfo
+  })()
+
+  try {
+    return await runtimeStartPromise
+  } catch (error) {
+    if (runtimeStatus !== 'stopping') runtimeStatus = 'stopped'
+    runtimeInfo = null
+    throw error
+  } finally {
+    runtimeStartPromise = null
   }
-
-  const appRoot = getAppRoot()
-  const runtimeEntry = path.join(appRoot, 'services/codex-runtime/dist/index.js')
-  logStartup(`runtimeEntry ${runtimeEntry}`)
-  const port = await findRuntimePort()
-  const runtimeUrl = `http://${runtimeHost}:${port}`
-  const userData = app.getPath('userData')
-  const defaultWorkspace = path.join(app.getPath('documents'), 'Moyuan Workspace')
-  const logDir = path.join(userData, 'logs')
-  const runtimeEnv = loadRuntimeEnv(appRoot, userData)
-
-  fs.mkdirSync(logDir, { recursive: true })
-  fs.mkdirSync(defaultWorkspace, { recursive: true })
-  runtimeLog = fs.createWriteStream(path.join(logDir, 'codex-runtime.log'), { flags: 'a' })
-  runtimeLog.write(`\n[${new Date().toISOString()}] starting runtime ${runtimeEntry}\n`)
-  runtimeLog.write(`[${new Date().toISOString()}] runtime config keys ${Object.keys(runtimeEnv).join(',') || 'none'}\n`)
-
-  runtimeProcess = spawn(process.execPath, [runtimeEntry], {
-    cwd: appRoot,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-    env: {
-      ...runtimeEnv,
-      ...process.env,
-      ELECTRON_RUN_AS_NODE: '1',
-      CODEX_RUNTIME_HOST: runtimeHost,
-      CODEX_RUNTIME_PORT: String(port),
-      MOYUAN_NODE_HOST_PATH: process.execPath,
-      MOYUAN_DEFAULT_WORKSPACE: defaultWorkspace,
-      MOYUAN_RUNTIME_TOKEN: runtimeToken,
-      MOYUAN_RUNTIME_HOME: path.join(userData, 'runtime'),
-      MOYUAN_CODEX_HOME: path.join(userData, 'codex-home'),
-    },
-  })
-  logStartup(`runtime spawned pid=${runtimeProcess.pid} url=${runtimeUrl}`)
-
-  runtimeProcess.stdout?.pipe(runtimeLog)
-  runtimeProcess.stderr?.pipe(runtimeLog)
-  runtimeProcess.once('exit', (code, signal) => {
-    runtimeLog?.write(`[${new Date().toISOString()}] runtime exited code=${code ?? ''} signal=${signal ?? ''}\n`)
-    runtimeProcess = null
-  })
-
-  await waitForRuntime(runtimeUrl, runtimeToken)
-  logStartup(`runtime health probe finished ${runtimeUrl}`)
-  return { url: runtimeUrl, token: runtimeToken, defaultWorkspace }
 }
 
-function stopRuntime() {
-  if (runtimeProcess && !runtimeProcess.killed) {
-    runtimeProcess.kill()
-    runtimeProcess = null
-  }
-  runtimeLog?.end()
-  runtimeLog = null
+function stopRuntime(reason = 'application-quit') {
+  if (runtimeStopPromise) return runtimeStopPromise
+
+  runtimeStatus = 'stopping'
+  runtimeStopPromise = (async () => {
+    if (runtimeStartPromise) await runtimeStartPromise.catch(() => undefined)
+    const child = runtimeProcess
+    const logStream = runtimeLog
+    await stopManagedRuntimeProcess(child, logStream, reason)
+    if (runtimeProcess === child) runtimeProcess = null
+    runtimeInfo = null
+    runtimeStatus = 'stopped'
+  })().finally(() => {
+    runtimeStopPromise = null
+  })
+  return runtimeStopPromise
 }
 
-function setupAutoUpdater(win) {
+function showAppMessageBox(options) {
+  if (mainWindow && !mainWindow.isDestroyed()) return dialog.showMessageBox(mainWindow, options)
+  return dialog.showMessageBox(options)
+}
+
+function beginApplicationShutdown(action = 'quit') {
+  if (applicationShutdownPromise) return applicationShutdownPromise
+
+  isShuttingDown = true
+  applicationShutdownPromise = (async () => {
+    try {
+      await stopRuntime(action === 'install-update' ? 'update-install' : 'application-quit')
+    } catch (error) {
+      logStartup('runtime shutdown failed', error)
+    }
+
+    allowImmediateQuit = true
+    if (action === 'install-update') {
+      logStartup('runtime stopped; starting update install')
+      try {
+        autoUpdater.quitAndInstall(false, true)
+      } catch (error) {
+        logStartup('update install restart failed; quitting normally', error)
+        app.quit()
+      }
+      return
+    }
+    app.quit()
+  })()
+  return applicationShutdownPromise
+}
+
+function setupAutoUpdater() {
   if (!isPackagedApp() || updateCheckStarted) return
   updateCheckStarted = true
 
@@ -322,7 +608,7 @@ function setupAutoUpdater(win) {
   autoUpdater.on('error', (error) => logStartup('updater error', error))
   autoUpdater.on('update-available', async (info) => {
     logStartup(`updater update-available version=${info?.version ?? ''}`)
-    const result = await dialog.showMessageBox(win, {
+    const result = await showAppMessageBox({
       type: 'info',
       buttons: ['下载更新', '稍后再说'],
       defaultId: 0,
@@ -337,7 +623,7 @@ function setupAutoUpdater(win) {
   })
   autoUpdater.on('update-downloaded', async (info) => {
     logStartup(`updater update-downloaded version=${info?.version ?? ''}`)
-    const result = await dialog.showMessageBox(win, {
+    const result = await showAppMessageBox({
       type: 'info',
       buttons: ['重启安装', '下次启动安装'],
       defaultId: 0,
@@ -347,7 +633,7 @@ function setupAutoUpdater(win) {
       detail: '重启后会自动完成安装。',
     })
     if (result.response === 0) {
-      autoUpdater.quitAndInstall(false, true)
+      void beginApplicationShutdown('install-update')
     }
   })
 
@@ -356,9 +642,18 @@ function setupAutoUpdater(win) {
   }, 5000)
 }
 
-async function createWindow() {
+function focusMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return false
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  if (!mainWindow.isVisible()) mainWindow.show()
+  mainWindow.focus()
+  return true
+}
+
+async function createWindowInternal() {
   logStartup('createWindow begin')
   const runtime = await startRuntime()
+  if (isShuttingDown) return undefined
   logStartup(`createWindow runtime url=${runtime.url}`)
   const iconPath = getIconPath()
   if (iconPath && app.dock) app.dock.setIcon(iconPath)
@@ -386,6 +681,10 @@ async function createWindow() {
       sandbox: true,
     },
   })
+  mainWindow = win
+  win.once('closed', () => {
+    if (mainWindow === win) mainWindow = null
+  })
 
   win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
     logStartup(`renderer console level=${level} ${sourceId || ''}:${line || 0} ${message}`)
@@ -398,7 +697,7 @@ async function createWindow() {
   })
   win.webContents.on('did-finish-load', () => {
     logStartup(`renderer loaded url=${win.webContents.getURL()}`)
-    setupAutoUpdater(win)
+    setupAutoUpdater()
   })
 
   if (isPackagedApp()) {
@@ -425,25 +724,56 @@ async function createWindow() {
     win.loadURL(url)
     logStartup(`loadURL requested ${url}`)
   }
+  return win
+}
+
+function createWindow() {
+  if (focusMainWindow()) return Promise.resolve(mainWindow)
+  if (windowCreatePromise) return windowCreatePromise
+  if (isShuttingDown) return Promise.resolve(undefined)
+
+  windowCreatePromise = createWindowInternal().finally(() => {
+    windowCreatePromise = null
+  })
+  return windowCreatePromise
 }
 
 logStartup(`boot defaultApp=${Boolean(process.defaultApp)} isPackaged=${app.isPackaged}`)
 
-ipcMain.handle('moyuan:collect-diagnostics', () => collectDiagnosticsSnapshot())
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
 
-app.whenReady().then(() => {
-  logStartup('app ready')
-  return createWindow()
-}).catch((error) => {
-  logStartup('createWindow failed', error)
-})
+if (!hasSingleInstanceLock) {
+  logStartup('single instance lock denied; quitting secondary process')
+  allowImmediateQuit = true
+  app.quit()
+} else {
+  ipcMain.handle('moyuan:collect-diagnostics', () => collectDiagnosticsSnapshot())
 
-app.on('before-quit', stopRuntime)
+  app.on('second-instance', () => {
+    logStartup('secondary launch redirected to primary instance')
+    if (app.isReady()) {
+      if (!focusMainWindow()) void createWindow().catch((error) => logStartup('second-instance createWindow failed', error))
+    }
+  })
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
-})
+  app.whenReady().then(() => {
+    logStartup('app ready')
+    return createWindow()
+  }).catch((error) => {
+    logStartup('createWindow failed', error)
+  })
 
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow()
-})
+  app.on('before-quit', (event) => {
+    if (allowImmediateQuit) return
+    event.preventDefault()
+    void beginApplicationShutdown('quit')
+  })
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit()
+  })
+
+  app.on('activate', () => {
+    if (!focusMainWindow()) void createWindow().catch((error) => logStartup('activate createWindow failed', error))
+  })
+}
